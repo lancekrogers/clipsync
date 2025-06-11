@@ -1,0 +1,94 @@
+# AI Documentation
+ai_docs/
+.claude/*
+*CLAUDE.md*
+
+# Binaries and build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+/clipsync
+/clip_board_sync
+/build/
+/dist/
+/bin/
+/target/
+
+# Go specific
+*.test
+*.out
+vendor/
+go.sum
+
+# TLS certificates and keys
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+cert/
+certs/
+.clipsync/
+
+# Configuration files with sensitive data
+config.yml
+config.yaml
+config.toml
+*.conf
+!config.example.*
+!config.sample.*
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Test coverage
+*.coverprofile
+coverage.txt
+coverage.html
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS specific
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Package files
+*.deb
+*.rpm
+*.pkg
+*.dmg
+*.msi
+
+# Documentation build
+docs/_build/
+*.pdf
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Debug files
+*.pprof
+debug/
+
+# System tray assets (if generated)
+*.ico
+*.icns
+!assets/*.ico
+!assets/*.icns
