@@ -18,19 +18,19 @@ async-trait = "0.1"
 arboard = "3.3"
 
 # Networking
-tokio-tungstenite = "0.21"
+tokio-tungstenite = "0.26"
 ssh2 = "0.9"
 bytes = "1.5"
 futures-util = "0.3"
 
 # Database
-rusqlite = { version = "0.30", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.36", features = ["bundled-sqlcipher"] }
 
 # Encryption & Security
 aes-gcm = "0.10"
 argon2 = "0.5"
 zeroize = "1.7"
-rand = "0.8"
+rand = "0.9"
 sha2 = "0.10"
 hex = "0.4"
 ring = "0.17"
@@ -43,13 +43,13 @@ toml = "0.8"
 bincode = "1.3"
 
 # Service discovery
-mdns-sd = "0.10"
-if-addrs = "0.10"
+mdns-sd = "0.13"
+if-addrs = "0.13"
 
 # CLI
 clap = { version = "4.4", features = ["derive"] }
-crossterm = "0.27"
-global-hotkey = "0.5"
+crossterm = "0.29"
+global-hotkey = "0.7"
 
 # Error handling
 thiserror = "1.0"
@@ -78,30 +78,30 @@ libc = "0.2"
 
 # Platform-specific clipboard dependencies
 [target.'cfg(target_os = "macos")'.dependencies]
-cocoa = "0.25"
+cocoa = "0.26"
 objc = "0.2"
 objc_id = "0.1"
-core-foundation = "0.9"
-core-graphics = "0.23"
+core-foundation = "0.10"
+core-graphics = "0.24"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 x11-clipboard = "0.9"
 x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
 wayland-client = "0.31"
-wayland-protocols = "0.31"
-wayland-protocols-wlr = "0.2"
-nix = { version = "0.29", features = ["poll"] }
+wayland-protocols = "0.32"
+wayland-protocols-wlr = "0.3"
+nix = { version = "0.30", features = ["poll"] }
 
 # Validation
-validator = { version = "0.18", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.6"
 tempfile = "3.12"
-mockall = "0.12"
+mockall = "0.13"
 tokio-test = "0.4"
 proptest = "1.5"
-rstest = "0.21"
+rstest = "0.25"
 pretty_assertions = "1.4"
 
 [features]
