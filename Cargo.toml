@@ -72,7 +72,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Utils
 uuid = { version = "1.6", features = ["v4", "serde"] }
-gethostname = "0.4"
+gethostname = "1.0"
 md5 = "0.7"
 libc = "0.2"
 
