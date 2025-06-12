@@ -1,4 +1,5 @@
 # ClipSync Makefile
+# Run 'make help' for a list of available commands
 
 CARGO := cargo
 TARGET_DIR := target
@@ -24,9 +25,34 @@ else ifeq ($(UNAME_S),Linux)
     endif
 endif
 
-.PHONY: all build release test clean install uninstall fmt lint bench check pre-commit
+.PHONY: all build release test clean install uninstall fmt lint bench check pre-commit help
 
-all: build
+# Default target - show help if no target specified
+all: help
+
+# Display help information
+help:
+	@echo "ClipSync Makefile Commands:"
+	@echo ""
+	@echo "  make help           Show this help message"
+	@echo "  make build          Build debug binary for current platform"
+	@echo "  make release        Build optimized release binary"
+	@echo "  make check          Run format and lint checks (fast)"
+	@echo "  make pre-commit     Run all pre-commit checks"
+	@echo "  make test           Run all tests"
+	@echo "  make test-integration Run integration tests"
+	@echo "  make fmt            Check code formatting"
+	@echo "  make fmt-fix        Fix code formatting issues"
+	@echo "  make lint           Run clippy linter and audit"
+	@echo "  make bench          Run benchmarks"
+	@echo "  make clean          Remove build artifacts"
+	@echo "  make install        Install clipsync system-wide"
+	@echo "  make uninstall      Remove clipsync from system"
+	@echo "  make package        Create distribution package"
+	@echo "  make build-all      Build for all supported platforms"
+	@echo ""
+	@echo "Platform: $(PLATFORM) ($(TARGET))"
+	@echo ""
 
 # Run all pre-commit checks
 pre-commit:
