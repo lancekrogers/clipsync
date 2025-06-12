@@ -1,0 +1,18 @@
+# Installation Paths for ClipSync
+
+## Binary Locations
+Linux: /usr/local/bin/clipsync
+macOS: /usr/local/bin/clipsync
+
+## Configuration
+Linux: ~/.config/clipsync/
+macOS: ~/Library/Application Support/clipsync/
+
+## Logs
+Linux: ~/.local/share/clipsync/
+macOS: ~/Library/Logs/clipsync/
+
+## Service Files
+Linux: /etc/systemd/system/clipsync.service (system-wide)
+       ~/.config/systemd/user/clipsync.service (user)
+macOS: ~/Library/LaunchAgents/com.clipsync.plist
