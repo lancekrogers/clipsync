@@ -1,0 +1,267 @@
+name: Security
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Run at 2 AM UTC every Monday
+    - cron: '0 2 * * 1'
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install cargo-audit
+      run: cargo install cargo-audit
+
+    - name: Run security audit
+      run: |
+        cargo audit --deny warnings
+        # Generate detailed report
+        cargo audit --json > audit-report.json || true
+
+    - name: Upload audit report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: audit-report
+        path: audit-report.json
+        retention-days: 30
+
+  dependency-check:
+    name: Dependency License Check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install cargo-license
+      run: cargo install cargo-license
+
+    - name: Check licenses
+      run: |
+        # Generate license report
+        cargo license --json > licenses.json
+        
+        # Check for problematic licenses
+        PROBLEMATIC=$(cargo license --avoid-build-deps --avoid-dev-deps | grep -E "(GPL|AGPL|LGPL)" || true)
+        
+        if [ -n "$PROBLEMATIC" ]; then
+          echo "Found problematic licenses:"
+          echo "$PROBLEMATIC"
+          exit 1
+        fi
+        
+        echo "All licenses are compatible!"
+
+    - name: Upload license report
+      uses: actions/upload-artifact@v4
+      with:
+        name: license-report
+        path: licenses.json
+        retention-days: 30
+
+  sast:
+    name: Static Analysis Security Testing
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: clippy
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config libx11-dev libxcb1-dev libxrandr-dev libdbus-1-dev
+
+    - name: Run clippy with security lints
+      run: |
+        cargo clippy --all-features -- \
+          -W clippy::all \
+          -W clippy::pedantic \
+          -W clippy::nursery \
+          -W clippy::cargo \
+          -D warnings \
+          -A clippy::module_name_repetitions \
+          -A clippy::must_use_candidate
+
+    - name: Check for unsafe code
+      run: |
+        # Count unsafe blocks
+        UNSAFE_COUNT=$(grep -r "unsafe" src/ --include="*.rs" | wc -l || echo 0)
+        echo "Found $UNSAFE_COUNT lines containing 'unsafe'"
+        
+        if [ "$UNSAFE_COUNT" -gt 0 ]; then
+          echo "Unsafe code found in:"
+          grep -r "unsafe" src/ --include="*.rs" -n || true
+          echo ""
+          echo "Please ensure all unsafe code is necessary and properly documented"
+        fi
+
+  secrets-scan:
+    name: Secrets Scanning
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Run gitleaks
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  supply-chain:
+    name: Supply Chain Security
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Verify dependencies
+      run: |
+        # Check for yanked crates
+        cargo update --dry-run 2>&1 | grep -i "yanked" && exit 1 || true
+        
+        # Verify Cargo.lock is up to date
+        cargo check --locked
+
+    - name: SBOM Generation
+      run: |
+        cargo install cargo-sbom
+        cargo sbom > sbom.json
+        
+        echo "Software Bill of Materials generated"
+
+    - name: Upload SBOM
+      uses: actions/upload-artifact@v4
+      with:
+        name: sbom
+        path: sbom.json
+        retention-days: 30
+
+  permissions-check:
+    name: File Permissions Audit
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Check file permissions
+      run: |
+        # Find files with excessive permissions
+        echo "Checking for files with excessive permissions..."
+        
+        # Check for world-writable files
+        WORLD_WRITABLE=$(find . -type f -perm -002 -not -path "./.git/*" || true)
+        if [ -n "$WORLD_WRITABLE" ]; then
+          echo "Found world-writable files:"
+          echo "$WORLD_WRITABLE"
+          exit 1
+        fi
+        
+        # Check for setuid/setgid files
+        SETUID=$(find . -type f \( -perm -4000 -o -perm -2000 \) -not -path "./.git/*" || true)
+        if [ -n "$SETUID" ]; then
+          echo "Found setuid/setgid files:"
+          echo "$SETUID"
+          exit 1
+        fi
+        
+        echo "File permissions check passed!"
+
+  codeql:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Initialize CodeQL
+      uses: github/codeql-action/init@v3
+      with:
+        languages: 'rust'
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config libx11-dev libxcb1-dev libxrandr-dev libdbus-1-dev
+
+    - name: Build
+      run: cargo build --release
+
+    - name: Perform CodeQL Analysis
+      uses: github/codeql-action/analyze@v3
+
+  security-report:
+    name: Generate Security Report
+    needs: [audit, dependency-check, sast, secrets-scan, supply-chain, permissions-check]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: security-artifacts
+
+    - name: Generate consolidated report
+      run: |
+        echo "# Security Scan Report" > security-report.md
+        echo "Date: $(date)" >> security-report.md
+        echo "" >> security-report.md
+        
+        # Add job statuses
+        echo "## Job Results" >> security-report.md
+        echo "- Audit: ${{ needs.audit.result }}" >> security-report.md
+        echo "- License Check: ${{ needs.dependency-check.result }}" >> security-report.md
+        echo "- SAST: ${{ needs.sast.result }}" >> security-report.md
+        echo "- Secrets Scan: ${{ needs.secrets-scan.result }}" >> security-report.md
+        echo "- Supply Chain: ${{ needs.supply-chain.result }}" >> security-report.md
+        echo "- Permissions: ${{ needs.permissions-check.result }}" >> security-report.md
+        
+        # Check if all passed
+        if [ "${{ needs.audit.result }}" = "success" ] && \
+           [ "${{ needs.dependency-check.result }}" = "success" ] && \
+           [ "${{ needs.sast.result }}" = "success" ] && \
+           [ "${{ needs.secrets-scan.result }}" = "success" ] && \
+           [ "${{ needs.supply-chain.result }}" = "success" ] && \
+           [ "${{ needs.permissions-check.result }}" = "success" ]; then
+          echo "" >> security-report.md
+          echo "✅ **All security checks passed!**" >> security-report.md
+        else
+          echo "" >> security-report.md
+          echo "❌ **Some security checks failed!**" >> security-report.md
+        fi
+
+    - name: Upload security report
+      uses: actions/upload-artifact@v4
+      with:
+        name: security-report
+        path: security-report.md
+        retention-days: 30

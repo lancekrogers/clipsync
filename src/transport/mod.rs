@@ -56,7 +56,10 @@ impl TransportManager {
             // This would send the message through the connection
             todo!("Implement message sending")
         } else {
-            Err(TransportError::PeerNotFound(peer_id))
+            Err(TransportError::PeerNotFound { 
+                peer_id, 
+                peer_name: None  // Could be enhanced to look up peer name
+            })
         }
     }
     
@@ -65,52 +68,68 @@ impl TransportManager {
     }
 }
 
-/// Transport layer errors
+/// Transport layer errors with user-friendly messages
 #[derive(Debug, Error)]
 pub enum TransportError {
     /// WebSocket protocol error
-    #[error("WebSocket error: {0}")]
-    WebSocket(String),
+    #[error("CS001: Network connection error: {message}. Please check your network connection and try again.")]
+    WebSocket { message: String },
     
     /// Authentication error
-    #[error("Authentication error: {0}")]
+    #[error("CS002: Authentication failed: {0}")]
     Authentication(#[from] crate::auth::AuthError),
     
     /// Connection error
-    #[error("Connection error: {0}")]
-    Connection(String),
+    #[error("CS003: Connection failed: {message}. Check if the remote device is online and accessible.")]
+    Connection { message: String },
     
     /// Message serialization/deserialization error
-    #[error("Serialization error: {0}")]
+    #[error("CS004: Data format error: {0}. The message format may be corrupted or incompatible.")]
     Serialization(#[from] serde_json::Error),
     
     /// IO error
-    #[error("IO error: {0}")]
+    #[error("CS005: System error: {0}. Check file permissions and available disk space.")]
     Io(#[from] std::io::Error),
     
     /// Streaming error
-    #[error("Streaming error: {0}")]
-    Streaming(String),
+    #[error("CS006: File transfer error: {message}. Large clipboard content may not have transferred correctly.")]
+    Streaming { message: String },
     
     /// Reconnection error
-    #[error("Reconnection error: {0}")]
-    Reconnection(String),
+    #[error("CS007: Reconnection failed: {message}. Device may be offline or network may be unstable.")]
+    Reconnection { message: String },
     
     /// Peer not found
-    #[error("Peer not found: {0}")]
-    PeerNotFound(Uuid),
+    #[error("CS008: Cannot find device '{peer_name}' (ID: {peer_id}). Make sure the device is online and discoverable on your network.")]
+    PeerNotFound { peer_id: Uuid, peer_name: Option<String> },
     
     /// Connection closed
-    #[error("Connection closed")]
+    #[error("CS009: Connection closed unexpectedly. The remote device may have gone offline or network connectivity was lost.")]
     ConnectionClosed,
     
     /// Timeout error
-    #[error("Operation timed out")]
+    #[error("CS010: Operation timed out after waiting too long. Check your network connection and try again.")]
     Timeout,
     
     /// Protocol version mismatch
-    #[error("Protocol version mismatch: expected {expected}, got {actual}")]
+    #[error("CS011: Incompatible ClipSync versions. This device is running v{expected}, but the remote device is running v{actual}. Please update both devices to the same version.")]
     VersionMismatch { expected: String, actual: String },
+    
+    /// Configuration error
+    #[error("CS012: Configuration error: {message}. Run 'clipsync config validate' to check your settings.")]
+    Configuration { message: String },
+    
+    /// Permission denied
+    #[error("CS013: Permission denied: {message}. Check file permissions and security settings.")]
+    PermissionDenied { message: String },
+    
+    /// Network not available
+    #[error("CS014: Network unavailable. Please check your network connection and ensure both devices are on the same network.")]
+    NetworkUnavailable,
+    
+    /// Service unavailable
+    #[error("CS015: ClipSync service is not running. Start the service with 'clipsync start'.")]
+    ServiceUnavailable,
 }
 
 /// Result type for transport operations

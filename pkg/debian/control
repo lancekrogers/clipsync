@@ -1,0 +1,18 @@
+Package: clipsync
+Version: 0.1.0
+Section: utils
+Priority: optional
+Architecture: amd64
+Maintainer: ClipSync Team <support@clipsync.com>
+Depends: libc6 (>= 2.31), libxcb1, libxcb-render0, libxcb-shape0, libxcb-xfixes0
+Description: Cross-platform clipboard synchronization service
+ ClipSync is a lightweight service that synchronizes clipboard content
+ across multiple devices seamlessly. It runs in the background and
+ automatically syncs text, images, and files between your connected devices.
+ .
+ Features:
+  - Real-time clipboard synchronization
+  - End-to-end encryption
+  - Multi-device support
+  - Minimal resource usage
+Homepage: https://github.com/yourusername/clipsync

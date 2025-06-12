@@ -21,6 +21,8 @@ pub mod config;
 pub mod discovery;
 pub mod history;
 pub mod hotkey;
+pub mod progress;
+pub mod setup;
 pub mod sync;
 pub mod transport;
 

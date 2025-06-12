@@ -8,6 +8,7 @@ use crate::transport::{
     ConnectionInfo, ConnectionState, PeerInfo,
 };
 use crate::auth::{Authenticator, PeerId};
+use crate::progress::ConnectionProgress;
 use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use std::collections::HashMap;
@@ -154,8 +155,16 @@ impl WebSocketTransport {
         authenticator: Arc<dyn Authenticator>,
         config: WebSocketConfig,
     ) -> Result<WebSocketConnection> {
+        let mut progress = ConnectionProgress::new();
+        progress.start_connecting(&peer.name);
+
         let addr = peer.best_address()
-            .ok_or_else(|| TransportError::Connection("No valid address for peer".to_string()))?;
+            .ok_or_else(|| {
+                progress.error("No network address available");
+                TransportError::Connection { 
+                    message: format!("Device '{}' has no available network address. Check network discovery settings.", peer.name)
+                }
+            })?;
         
         info!("Connecting to peer {} at {}", peer.id, addr);
         
@@ -167,8 +176,16 @@ impl WebSocketTransport {
             config.connect_timeout,
             connect_async(&url)
         ).await
-        .map_err(|_| TransportError::Timeout)?
-        .map_err(|e| TransportError::WebSocket(e.to_string()))?;
+        .map_err(|_| {
+            progress.error("Connection timed out");
+            TransportError::Timeout
+        })?
+        .map_err(|e| {
+            progress.error(&format!("WebSocket connection failed: {}", e));
+            TransportError::WebSocket { 
+                message: format!("Failed to establish WebSocket connection to {}: {}", addr, e) 
+            }
+        })?;
         
         // Create connection
         let connection_id = Uuid::new_v4();
@@ -181,10 +198,22 @@ impl WebSocketTransport {
         ).await?;
         
         // Perform handshake and authentication
-        connection.perform_handshake(&*authenticator).await?;
-        connection.authenticate(&*authenticator).await?;
+        progress.start_handshake();
+        connection.perform_handshake(&*authenticator).await.map_err(|e| {
+            progress.error("Handshake failed");
+            e
+        })?;
+        
+        progress.start_authentication();
+        connection.authenticate(&*authenticator).await.map_err(|e| {
+            progress.error("Authentication failed");
+            e
+        })?;
+        
+        progress.finalizing_connection();
         
         info!("Successfully connected and authenticated with peer {}", peer.id);
+        progress.success(&peer.name);
         
         Ok(connection)
     }
@@ -266,7 +295,9 @@ impl WebSocketConnection {
         
         // Take the WebSocket stream from the Option
         let ws_stream = self.ws_stream.take()
-            .ok_or_else(|| TransportError::Connection("WebSocket stream already used".to_string()))?;
+            .ok_or_else(|| TransportError::Connection { 
+                message: "Internal error: network connection already in use. Please try reconnecting.".to_string() 
+            })?;
         
         // Split the WebSocket stream for concurrent read/write
         let (mut ws_sink, mut ws_stream) = ws_stream.split();
@@ -401,7 +432,9 @@ impl WebSocketConnection {
         );
         
         self.send_tx.send(handshake_msg)
-            .map_err(|_| TransportError::Connection("Failed to send handshake".to_string()))?;
+            .map_err(|_| TransportError::Connection { 
+                message: "Failed to send connection setup message. The connection may be closed.".to_string() 
+            })?;
         
         // Wait for handshake response
         let response = tokio::time::timeout(
@@ -409,7 +442,9 @@ impl WebSocketConnection {
             self.receive_message()
         ).await
         .map_err(|_| TransportError::Timeout)?
-        .map_err(|e| TransportError::Connection(format!("Handshake failed: {}", e)))?;
+        .map_err(|e| TransportError::Connection { 
+            message: format!("Connection setup failed: {}. The remote device may be incompatible or offline.", e) 
+        })?;
         
         // Verify handshake response
         match response.message_type {
@@ -426,14 +461,20 @@ impl WebSocketConnection {
                     self.state = ConnectionState::Connected;
                     Ok(())
                 } else {
-                    Err(TransportError::Connection("Invalid handshake response payload".to_string()))
+                    Err(TransportError::Connection { 
+                        message: "Received invalid connection setup response. The remote device may be incompatible.".to_string() 
+                    })
                 }
             }
             MessageType::Error => {
-                Err(TransportError::Connection("Handshake rejected by peer".to_string()))
+                Err(TransportError::Connection { 
+                    message: "Connection rejected by remote device. Check if this device is authorized.".to_string() 
+                })
             }
             _ => {
-                Err(TransportError::Connection("Unexpected handshake response".to_string()))
+                Err(TransportError::Connection { 
+                    message: "Received unexpected response during connection setup. The remote device may be incompatible.".to_string() 
+                })
             }
         }
     }
@@ -461,7 +502,9 @@ impl WebSocketConnection {
         );
         
         self.send_tx.send(auth_msg)
-            .map_err(|_| TransportError::Connection("Failed to send auth request".to_string()))?;
+            .map_err(|_| TransportError::Connection { 
+                message: "Failed to send authentication request. The connection may be closed.".to_string() 
+            })?;
         
         // Wait for authentication result
         let response = tokio::time::timeout(
@@ -469,7 +512,9 @@ impl WebSocketConnection {
             self.receive_message()
         ).await
         .map_err(|_| TransportError::Timeout)?
-        .map_err(|e| TransportError::Connection(format!("Authentication failed: {}", e)))?;
+        .map_err(|e| TransportError::Connection { 
+            message: format!("Authentication failed: {}. Check your SSH keys and permissions.", e) 
+        })?;
         
         // Process authentication result
         match response.message_type {
@@ -499,20 +544,26 @@ impl WebSocketConnection {
                             ))
                         }
                         None => {
-                            Err(TransportError::Connection("Missing auth result".to_string()))
+                            Err(TransportError::Connection { 
+                                message: "Authentication response missing result. The remote device may have an error.".to_string() 
+                            })
                         }
                     }
                 } else {
-                    Err(TransportError::Connection("Invalid auth response payload".to_string()))
+                    Err(TransportError::Connection { 
+                        message: "Received invalid authentication response. The remote device may be incompatible.".to_string() 
+                    })
                 }
             }
             MessageType::Error => {
                 Err(TransportError::Authentication(
-                    crate::auth::AuthError::AuthenticationFailed("Authentication rejected".to_string())
+                    crate::auth::AuthError::AuthenticationFailed("Authentication rejected by remote device. Verify your SSH key is authorized.".to_string())
                 ))
             }
             _ => {
-                Err(TransportError::Connection("Unexpected auth response".to_string()))
+                Err(TransportError::Connection { 
+                    message: "Received unexpected response during authentication. The remote device may be incompatible.".to_string() 
+                })
             }
         }
     }
@@ -576,7 +627,9 @@ impl Listener for WebSocketListener {
         // Wrap TcpStream in MaybeTlsStream and upgrade to WebSocket
         let maybe_tls_stream = MaybeTlsStream::Plain(tcp_stream);
         let ws_stream = accept_async(maybe_tls_stream).await
-            .map_err(|e| TransportError::WebSocket(e.to_string()))?;
+            .map_err(|e| TransportError::WebSocket { 
+                message: format!("Failed to accept WebSocket connection from {}: {}", addr, e) 
+            })?;
         
         // Create peer info (will be updated during handshake)
         let peer_info = PeerInfo {
@@ -628,7 +681,9 @@ impl WebSocketConnection {
         let handshake = self.receive_message().await?;
         
         if handshake.message_type != MessageType::Handshake {
-            return Err(TransportError::Connection("Expected handshake message".to_string()));
+            return Err(TransportError::Connection { 
+                message: "Expected connection setup message but received something else. The client may be incompatible.".to_string() 
+            });
         }
         
         // Process handshake
@@ -676,14 +731,18 @@ impl WebSocketConnection {
             );
             
             self.send_tx.send(response_msg)
-                .map_err(|_| TransportError::Connection("Failed to send handshake response".to_string()))?;
+                .map_err(|_| TransportError::Connection { 
+                    message: "Failed to send connection setup response. The connection may be closed.".to_string() 
+                })?;
             
             self.state = ConnectionState::Connected;
             info!("Handshake completed with client");
             
             Ok(())
         } else {
-            Err(TransportError::Connection("Invalid handshake payload".to_string()))
+            Err(TransportError::Connection { 
+                message: "Received invalid connection setup data. The client may be incompatible.".to_string() 
+            })
         }
     }
     
@@ -693,7 +752,9 @@ impl WebSocketConnection {
         let auth_msg = self.receive_message().await?;
         
         if auth_msg.message_type != MessageType::AuthChallenge {
-            return Err(TransportError::Connection("Expected auth challenge".to_string()));
+            return Err(TransportError::Connection { 
+                message: "Expected authentication request but received something else. The client may be incompatible.".to_string() 
+            });
         }
         
         // Process authentication
@@ -731,7 +792,9 @@ impl WebSocketConnection {
                             );
                             
                             self.send_tx.send(response_msg)
-                                .map_err(|_| TransportError::Connection("Failed to send auth result".to_string()))?;
+                                .map_err(|_| TransportError::Connection { 
+                                    message: "Failed to send authentication result. The connection may be closed.".to_string() 
+                                })?;
                             
                             self.authenticated_peer = Some(peer_id.clone());
                             self.state = ConnectionState::Ready;
@@ -751,7 +814,9 @@ impl WebSocketConnection {
                 }
             }
         } else {
-            Err(TransportError::Connection("Invalid auth payload".to_string()))
+            Err(TransportError::Connection { 
+                message: "Received invalid authentication data. The client may be incompatible.".to_string() 
+            })
         }
     }
     
@@ -772,7 +837,9 @@ impl WebSocketConnection {
         );
         
         self.send_tx.send(response_msg)
-            .map_err(|_| TransportError::Connection("Failed to send auth error".to_string()))
+            .map_err(|_| TransportError::Connection { 
+                message: "Failed to send authentication error response. The connection may be closed.".to_string() 
+            })
     }
 }
 

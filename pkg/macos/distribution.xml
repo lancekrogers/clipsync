@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2.0">
+    <title>ClipSync</title>
+    <organization>com.clipsync</organization>
+    <domain>anywhere</domain>
+    <background file="background.png" alignment="bottomleft" scaling="none"/>
+    <welcome file="welcome.rtf"/>
+    <readme file="readme.rtf"/>
+    <license file="license.txt"/>
+    <conclusion file="conclusion.rtf"/>
+    
+    <options customize="never" require-scripts="false" hostArchitectures="x86_64,arm64"/>
+    
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="10.15"/>
+        </allowed-os-versions>
+    </volume-check>
+    
+    <choices-outline>
+        <line choice="default">
+            <line choice="com.clipsync.app"/>
+        </line>
+    </choices-outline>
+    
+    <choice id="default"/>
+    
+    <choice id="com.clipsync.app" visible="false">
+        <pkg-ref id="com.clipsync.app"/>
+    </choice>
+    
+    <pkg-ref id="com.clipsync.app" version="0.1.0" onConclusion="none">ClipSync.pkg</pkg-ref>
+    
+    <product id="com.clipsync" version="0.1.0"/>
+</installer-gui-script>

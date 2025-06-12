@@ -1,0 +1,27 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        # Stop the service if it's running
+        if systemctl --user is-active --quiet clipsync.service; then
+            echo "Stopping ClipSync service..."
+            systemctl --user stop clipsync.service
+        fi
+        
+        # Disable the service
+        if systemctl --user is-enabled --quiet clipsync.service; then
+            systemctl --user disable clipsync.service
+        fi
+        ;;
+
+    failed-upgrade)
+        ;;
+
+    *)
+        echo "prerm called with unknown argument \`$1'" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

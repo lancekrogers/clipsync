@@ -1,171 +1,374 @@
-# ClipSync
+# 📋 ClipSync
 
-ClipSync is a high-performance, cross-platform clipboard synchronization service written in Rust. It enables real-time clipboard sharing between macOS and Linux systems with end-to-end encryption and SSH key authentication.
+> **Secure, Real-Time Clipboard Synchronization Across Your Devices**
 
-## Features
+ClipSync is a fast, secure, and easy-to-use clipboard synchronization service that keeps your clipboard in sync across macOS and Linux devices. Built in Rust for maximum performance and security.
 
-- **Cross-Platform Support**: Works seamlessly between macOS and Linux (X11/Wayland)
-- **Real-Time Sync**: Instant clipboard synchronization across devices
-- **Secure**: SSH key-based authentication and end-to-end encryption
-- **Rich Content Support**: Handles text, RTF, and images up to 5MB
-- **History**: Maintains an encrypted history of the last 20 clipboard items
-- **Performance**: Built in Rust for maximum efficiency and safety
-- **Service Discovery**: Automatic peer discovery using DNS-SD/mDNS
-
-## Installation
-
-### From Binary (Recommended)
-
-Download the latest release for your platform from the [releases page](https://github.com/yourusername/clipsync/releases).
-
-### From Source
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/clipsync.git
-cd clipsync
-
-# Build the project
-cargo build --release
-
-# Install
-cargo install --path .
+```
+Copy on your laptop → Instantly available on your desktop → Paste anywhere
 ```
 
-## Usage
+[![Build Status](https://github.com/yourusername/clipsync/workflows/CI/badge.svg)](https://github.com/yourusername/clipsync/actions)
+[![Security Audit](https://github.com/yourusername/clipsync/workflows/Security/badge.svg)](https://github.com/yourusername/clipsync/actions)
+[![License](https://img.shields.io/badge/license-MIT%2FApache-blue.svg)](LICENSE)
 
-### Starting the Service
+## ✨ Key Features
 
+🔐 **Secure by Default**
+- SSH key authentication - only your devices connect
+- End-to-end encryption with AES-256-GCM
+- No cloud servers - direct peer-to-peer communication
+- Encrypted local clipboard history
+
+🚀 **Lightning Fast**
+- Sub-500ms sync latency for text
+- Built in Rust for maximum performance
+- Automatic LAN discovery via mDNS
+- Background service with minimal resource usage
+
+📱 **Cross-Platform**
+- **macOS**: Full NSPasteboard support with native notifications
+- **Linux**: X11 and Wayland support with primary selection sync
+- Support for text, RTF, and images up to 5MB
+
+⚡ **Smart Features**
+- 20-item encrypted clipboard history with search
+- Global hotkeys for instant access (`Ctrl+Shift+V` for history)
+- Interactive terminal UI for history browsing
+- Automatic reconnection and network resilience
+
+🛠️ **Developer Friendly**
+- Comprehensive CLI with `--help` for every command
+- JSON/TOML configuration with validation
+- Structured logging and status reporting
+- Built-in troubleshooting tools
+
+## 🚀 Quick Start
+
+### 1️⃣ Install ClipSync
+
+**macOS (Homebrew)**
 ```bash
-# Start ClipSync daemon
+brew install clipsync
+```
+
+**Linux (Binary)**
+```bash
+curl -L https://github.com/yourusername/clipsync/releases/latest/download/clipsync-linux-x86_64.tar.gz | tar xz
+sudo mv clipsync /usr/local/bin/
+```
+
+**From Source**
+```bash
+git clone https://github.com/yourusername/clipsync.git
+cd clipsync && cargo install --path .
+```
+
+### 2️⃣ Generate SSH Key (if needed)
+```bash
+# ClipSync uses SSH keys for secure authentication
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_clipsync
+```
+
+### 3️⃣ Start on Both Devices
+```bash
+# Device 1 & 2: Start the service
 clipsync start
 
-# Start with custom config
-clipsync --config ~/.config/clipsync/config.toml start
+# Check connection status
+clipsync status
 ```
 
-### CLI Commands
-
+### 4️⃣ Connect Devices
 ```bash
-# Show current clipboard content
-clipsync show
+# On device 1: Add device 2's public key
+clipsync auth add ~/.ssh/id_ed25519_clipsync.pub --name "laptop"
 
-# Show clipboard history
-clipsync history
-
-# Copy specific item from history
-clipsync copy <index>
-
-# List connected peers
-clipsync peers
-
-# Stop the service
-clipsync stop
+# On device 2: Add device 1's public key  
+clipsync auth add ~/.ssh/id_ed25519_clipsync.pub --name "desktop"
 ```
 
-## Configuration
+### 5️⃣ Test It Out! 
+Copy something on one device and paste on another. Use `Ctrl+Shift+V` to see clipboard history!
 
-ClipSync looks for configuration in the following locations:
-- `~/.config/clipsync/config.toml` (Linux)
-- `~/Library/Application Support/ClipSync/config.toml` (macOS)
+> 📖 **Need help?** See the [Installation Guide](docs/INSTALL.md) for detailed setup instructions.
 
-Example configuration:
+## 💻 Command Reference
 
+### Service Management
+```bash
+clipsync start [--foreground]    # Start daemon (background by default)
+clipsync stop                    # Stop daemon
+clipsync status                  # Show service status and connections
+clipsync restart                 # Restart the service
+```
+
+### Clipboard Operations
+```bash
+clipsync copy "Hello World"      # Copy text to clipboard
+clipsync paste                   # Get current clipboard content
+clipsync sync                    # Force immediate sync across devices
+clipsync clear                   # Clear clipboard content
+```
+
+### History Management
+```bash
+clipsync history                 # Show recent clipboard history
+clipsync history --limit 10      # Show last 10 items
+clipsync history --interactive   # Interactive history picker
+clipsync history --search "text" # Search clipboard history
+```
+
+### Peer Management  
+```bash
+clipsync peers                   # List connected devices
+clipsync peers --discover        # Scan for devices on network
+clipsync auth add <public_key>   # Add authorized device
+clipsync auth list               # List authorized keys
+clipsync auth remove <key_id>    # Remove device access
+```
+
+### Configuration
+```bash
+clipsync config show            # Display current configuration
+clipsync config init            # Create default config file
+clipsync config validate        # Check configuration validity
+clipsync config edit            # Open config in editor
+```
+
+### Troubleshooting
+```bash
+clipsync doctor                 # Run connectivity diagnostics
+clipsync logs                   # Show recent log entries
+clipsync version                # Show version information
+clipsync --help                 # Show comprehensive help
+```
+
+## ⌨️ Global Hotkeys
+
+| Hotkey | Action |
+|--------|--------|
+| `Ctrl+Shift+V` | Show clipboard history picker |
+| `Ctrl+Shift+C` | Copy to secondary clipboard |
+| `Ctrl+Shift+S` | Force sync now |
+| `Ctrl+Shift+[` | Previous history item |
+| `Ctrl+Shift+]` | Next history item |
+
+> **macOS**: Replace `Ctrl` with `Cmd` • **Customizable**: Edit hotkeys in config.toml
+
+## ⚙️ Configuration
+
+ClipSync uses a TOML configuration file located at:
+- **Linux**: `~/.config/clipsync/config.toml`
+- **macOS**: `~/Library/Application Support/clipsync/config.toml`
+
+### Quick Configuration
+```bash
+# Generate default config
+clipsync config init
+
+# Edit configuration
+clipsync config edit
+
+# Validate settings
+clipsync config validate
+```
+
+### Example Configuration
 ```toml
-[server]
-port = 8080
-host = "0.0.0.0"
+# Network settings
+listen_addr = ":8484"                    # Server listen address
+advertise_name = "my-laptop-clipsync"    # mDNS service name
 
 [auth]
-ssh_key_path = "~/.ssh/id_ed25519"
+ssh_key = "~/.ssh/id_ed25519"           # SSH private key for auth
+authorized_keys = "~/.config/clipsync/authorized_keys"  # Authorized peers
 
-[history]
-max_items = 20
-database_path = "~/.local/share/clipsync/history.db"
+[clipboard]
+max_size = 5_242_880                     # Max payload size (5MB)
+sync_primary = true                      # Sync X11 primary selection (Linux)
+history_size = 20                        # Number of history items to keep
 
-[sync]
-max_payload_size = 5242880  # 5MB
-compression = true
+[hotkeys]
+show_history = "Ctrl+Shift+V"           # Show clipboard history
+toggle_sync = "Ctrl+Shift+Cmd+C"        # Toggle sync on/off
+cycle_prev = "Ctrl+Shift+["             # Previous history item
+
+[security]
+encryption = "aes-256-gcm"              # Encryption algorithm
+compression = "zstd"                    # Compression for large payloads
+
+# Logging level: trace, debug, info, warn, error
+log_level = "info"
 ```
 
-## Development
+> 📚 **Full reference**: See [Configuration Guide](docs/CONFIG.md) for all available options
 
-### Prerequisites
+## 🔧 Troubleshooting
 
-- Rust 1.70 or higher
-- Cargo
-- Platform-specific dependencies:
-  - **macOS**: Xcode Command Line Tools
-  - **Linux**: libx11-dev, libxcb-dev, libssl-dev
+### Common Issues
 
-### Building
-
+**Connection Problems**
 ```bash
-# Debug build
-cargo build
+# Run diagnostics
+clipsync doctor
 
-# Release build
-cargo build --release
+# Check if devices can see each other
+clipsync peers --discover
+
+# Verify SSH keys are set up correctly
+clipsync auth list
+```
+
+**Service Not Starting**
+```bash
+# Check service status
+clipsync status
+
+# View recent logs
+clipsync logs
+
+# Start in foreground for debugging
+clipsync start --foreground
+```
+
+**Sync Not Working**
+```bash
+# Force immediate sync
+clipsync sync
+
+# Check configuration
+clipsync config validate
+
+# Restart service
+clipsync restart
+```
+
+> 🩺 **Need more help?** See the [Troubleshooting Guide](docs/TROUBLESHOOTING.md) for detailed solutions
+
+## 🏗️ Development
+
+### Quick Development Setup
+```bash
+# Clone and build
+git clone https://github.com/yourusername/clipsync.git
+cd clipsync
+cargo build
 
 # Run tests
 cargo test
 
-# Run with verbose logging
-RUST_LOG=debug cargo run
+# Start with debug logging
+RUST_LOG=debug cargo run -- start --foreground
 ```
 
-### Cross-Compilation
+### Requirements
+- **Rust**: 1.75+ (2021 edition)
+- **Platform deps**:
+  - **macOS**: Xcode Command Line Tools
+  - **Linux**: `libx11-dev libxcb-dev libssl-dev`
 
-```bash
-# Build for all supported platforms
-make build-all
+> 🔨 **Contributing?** Check out the [Developer Guide](CONTRIBUTING.md)
 
-# Build for specific target
-cargo build --target x86_64-apple-darwin --release
+## 🏛️ Architecture
+
+```
+┌─────────────────┐    ┌─────────────────┐
+│   Device A      │    │   Device B      │
+│                 │    │                 │
+│ ┌─────────────┐ │    │ ┌─────────────┐ │
+│ │ Clipboard   │ │    │ │ Clipboard   │ │
+│ │ Monitor     │ │    │ │ Monitor     │ │
+│ └─────────────┘ │    │ └─────────────┘ │
+│        │        │    │        │        │
+│ ┌─────────────┐ │    │ ┌─────────────┐ │
+│ │   History   │ │    │ │   History   │ │
+│ │  Database   │ │    │ │  Database   │ │
+│ │ (encrypted) │ │    │ │ (encrypted) │ │
+│ └─────────────┘ │    │ └─────────────┘ │
+│        │        │    │        │        │
+│ ┌─────────────┐ │    │ ┌─────────────┐ │
+│ │ Transport   │◄┼────┼►│ Transport   │ │
+│ │  WebSocket  │ │    │ │  WebSocket  │ │
+│ │   + SSH     │ │    │ │   + SSH     │ │
+│ └─────────────┘ │    │ └─────────────┘ │
+│        │        │    │        │        │
+│ ┌─────────────┐ │    │ ┌─────────────┐ │
+│ │ mDNS/DNS-SD │ │    │ │ mDNS/DNS-SD │ │
+│ │ Discovery   │ │    │ │ Discovery   │ │
+│ └─────────────┘ │    │ └─────────────┘ │
+└─────────────────┘    └─────────────────┘
 ```
 
-## Architecture
+**Core Components:**
+- 📋 **Clipboard Module**: Platform-specific clipboard access (NSPasteboard/X11/Wayland)
+- 🔐 **Transport Layer**: WebSocket with SSH authentication and AES-256-GCM encryption
+- 💾 **History Database**: SQLite with SQLCipher for encrypted local storage
+- 🔍 **Service Discovery**: mDNS/DNS-SD for automatic LAN peer discovery
+- ⌨️ **Hotkey System**: Global hotkey registration and handling
+- 🖥️ **CLI Interface**: Comprehensive command-line interface with interactive features
 
-ClipSync uses a modular architecture:
+## 🛡️ Security
 
-- **Clipboard Module**: Platform-specific clipboard access
-- **Transport Layer**: WebSocket over TLS with SSH authentication
-- **History Database**: SQLite with encryption for clipboard history
-- **Service Discovery**: mDNS/DNS-SD for automatic peer discovery
-- **CLI Interface**: Command-line interface for user interaction
+ClipSync is built with security as a top priority:
 
-## Contributing
+🔑 **Authentication**
+- SSH Ed25519 key pairs for device authentication
+- No passwords or shared secrets
+- Authorized keys file similar to SSH
 
-Contributions are welcome! Please read our [Contributing Guidelines](CONTRIBUTING.md) before submitting PRs.
+🔒 **Encryption**
+- AES-256-GCM for all network communication
+- Perfect forward secrecy with session keys
+- Encrypted local clipboard history database
 
-## License
+🌐 **Network Security**
+- Direct peer-to-peer communication (no cloud)
+- WebSocket over TLS for transport security
+- mDNS discovery limited to LAN only
 
-ClipSync is dual-licensed under:
+🏠 **Privacy**
+- All data stays on your devices
+- No telemetry or data collection
+- Open source for full transparency
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT License ([LICENSE-MIT](LICENSE-MIT))
+> 🔒 **Security concerns?** See our [Security Guide](docs/SECURITY.md) or email security@clipsync.dev
 
-You may choose either license for your use.
+## 📚 Documentation
 
-## Security
+| Guide | Description |
+|-------|-------------|
+| [Installation Guide](docs/INSTALL.md) | Detailed setup instructions for all platforms |
+| [User Guide](docs/USER_GUIDE.md) | Complete user manual with tutorials |
+| [Configuration Guide](docs/CONFIG.md) | Full configuration reference |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and solutions |
+| [Developer Guide](CONTRIBUTING.md) | Development setup and contribution guidelines |
+| [Security Guide](docs/SECURITY.md) | Security model and best practices |
+| [API Reference](docs/API.md) | Technical API documentation |
 
-ClipSync takes security seriously:
+## 🤝 Contributing
 
-- All network communication is encrypted using TLS
-- SSH key-based authentication prevents unauthorized access
-- Clipboard history is encrypted at rest
-- No data is sent to third-party servers
+We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for:
+- Development setup instructions
+- Code style guidelines  
+- Testing requirements
+- Pull request process
 
-For security issues, please email security@clipsync.dev
+## 📄 License
 
-## Acknowledgments
+ClipSync is dual-licensed under your choice of:
+- **MIT License** ([LICENSE-MIT](LICENSE-MIT))
+- **Apache License 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
 
-Built with excellent Rust crates including:
-- tokio for async runtime
-- serde for serialization
-- sqlcipher for encrypted database
-- and many more...
+## 🙏 Acknowledgments
 
-## Status
+Built with excellent open-source projects:
+- [Tokio](https://tokio.rs/) - Async runtime
+- [Serde](https://serde.rs/) - Serialization
+- [SQLCipher](https://www.zetetic.net/sqlcipher/) - Encrypted database
+- [tungstenite](https://github.com/snapview/tungstenite-rs) - WebSocket implementation
+- [zeroize](https://github.com/RustCrypto/utils/tree/master/zeroize) - Secure memory handling
 
-This project is under active development. See the [roadmap](ROADMAP.md) for planned features.
+---
+
+**Made with ❤️ and 🦀 Rust** • [Report Issues](https://github.com/yourusername/clipsync/issues) • [Join Discussions](https://github.com/yourusername/clipsync/discussions)

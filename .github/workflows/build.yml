@@ -1,0 +1,184 @@
+name: Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Speed up builds
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  build:
+    name: Build - ${{ matrix.os }} - ${{ matrix.rust }} - ${{ matrix.arch }}
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.rust == 'nightly' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Fast checks on stable only
+          - os: ubuntu-latest
+            rust: stable
+            arch: x86_64
+            cross: false
+          - os: macos-latest
+            rust: stable
+            arch: x86_64
+            cross: false
+          # Native Apple Silicon (GitHub now has M1 runners)
+          - os: macos-14  # M1 runner
+            rust: stable
+            arch: aarch64
+            cross: false
+          # Cross-compilation for release
+          - os: ubuntu-latest
+            rust: stable
+            arch: aarch64
+            cross: true
+          # Only test nightly on one platform to catch upcoming issues
+          - os: ubuntu-latest
+            rust: nightly
+            arch: x86_64
+            cross: false
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Cache cargo registry
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo index
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v4
+      with:
+        path: target
+        key: ${{ runner.os }}-cargo-build-target-${{ matrix.rust }}-${{ hashFiles('**/Cargo.lock') }}
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.rust }}
+        components: rustfmt, clippy
+
+    - name: Install cross-compilation tools
+      if: matrix.cross
+      run: |
+        cargo install cross --git https://github.com/cross-rs/cross
+
+    - name: Install Linux dependencies
+      if: runner.os == 'Linux' && !matrix.cross
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config libx11-dev libxcb1-dev libxrandr-dev libdbus-1-dev
+
+    - name: Check formatting
+      run: cargo fmt -- --check
+
+    - name: Run clippy
+      if: matrix.rust == 'stable' && !matrix.cross
+      run: cargo clippy -- -D warnings
+
+    - name: Build (native)
+      if: '!matrix.cross'
+      run: |
+        cargo build --profile ci --verbose
+        cargo build --profile ci --features strict --verbose
+
+    - name: Build (cross)
+      if: matrix.cross
+      run: |
+        cross build --profile ci --target aarch64-unknown-linux-gnu --verbose
+
+    - name: Run tests (native)
+      if: '!matrix.cross'
+      run: |
+        cargo test --verbose
+        cargo test --release --verbose
+
+    - name: Build documentation
+      if: matrix.rust == 'stable' && !matrix.cross
+      run: cargo doc --no-deps --document-private-items
+
+    - name: Check binary size
+      if: '!matrix.cross'
+      run: |
+        ls -lh target/ci/clipsync
+        size target/ci/clipsync || true
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      if: matrix.rust == 'stable'
+      with:
+        name: clipsync-${{ matrix.os }}-${{ matrix.arch }}
+        path: |
+          target/ci/clipsync
+          target/aarch64-unknown-linux-gnu/ci/clipsync
+        retention-days: 7
+
+  check-licenses:
+    name: License Check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install cargo-license
+      run: cargo install cargo-license
+
+    - name: Check licenses
+      run: |
+        cargo license --avoid-build-deps --avoid-dev-deps
+        # Fail if any GPL licenses are found
+        ! cargo license --avoid-build-deps --avoid-dev-deps | grep -E "GPL|AGPL|LGPL"
+
+  minimum-rust-version:
+    name: Check MSRV
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust 1.70.0
+      uses: dtolnay/rust-toolchain@1.70.0
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config libx11-dev libxcb1-dev libxrandr-dev libdbus-1-dev
+
+    - name: Check if it builds
+      run: cargo check --all-features
+
+  arch-linux-test:
+    name: Arch Linux Test
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Arch environment
+      run: |
+        pacman -Syu --noconfirm
+        pacman -S --noconfirm rust cargo gcc pkg-config openssl libx11 libxcb libxrandr dbus git base-devel
+        
+    - name: Build on Arch
+      run: |
+        cargo build --profile ci
+        
+    - name: Test on Arch  
+      run: |
+        cargo test

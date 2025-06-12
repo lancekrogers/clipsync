@@ -1,0 +1,232 @@
+name: Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+
+jobs:
+  unit-tests:
+    name: Unit Tests - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            deps: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config libx11-dev libxcb1-dev libxrandr-dev libdbus-1-dev
+          - os: macos-latest
+            deps: echo "No additional dependencies needed"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: ${{ matrix.deps }}
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Run unit tests
+      run: |
+        cargo test --lib --verbose
+        cargo test --bins --verbose
+
+    - name: Run doc tests
+      run: cargo test --doc --verbose
+
+  integration-tests:
+    name: Integration Tests - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            deps: |
+              sudo apt-get update
+              sudo apt-get install -y libssl-dev pkg-config libx11-dev libxcb1-dev libxrandr-dev libdbus-1-dev
+              sudo apt-get install -y xvfb
+          - os: macos-latest
+            deps: echo "No additional dependencies needed"
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: ${{ matrix.deps }}
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Setup virtual display (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        export DISPLAY=:99
+        sudo Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
+        sleep 3
+
+    - name: Run integration tests
+      run: |
+        cargo test --test '*' --verbose
+      env:
+        DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config libx11-dev libxcb1-dev libxrandr-dev libdbus-1-dev xvfb
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Install tarpaulin
+      run: cargo install cargo-tarpaulin
+
+    - name: Setup virtual display
+      run: |
+        export DISPLAY=:99
+        sudo Xvfb :99 -screen 0 1024x768x24 > /dev/null 2>&1 &
+        sleep 3
+
+    - name: Run tests with coverage
+      run: |
+        cargo tarpaulin --verbose --all-features --workspace --timeout 300 --out xml
+      env:
+        DISPLAY: :99
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+      with:
+        file: ./cobertura.xml
+        fail_ci_if_error: false
+
+  memory-check:
+    name: Memory Safety Check
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config libx11-dev libxcb1-dev libxrandr-dev libdbus-1-dev valgrind
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build debug binary
+      run: cargo build --verbose
+
+    - name: Run valgrind memory check
+      run: |
+        valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes --verbose \
+          ./target/debug/clipsync --version || true
+
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libssl-dev pkg-config libx11-dev libxcb1-dev libxrandr-dev libdbus-1-dev
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache dependencies
+      uses: Swatinem/rust-cache@v2
+
+    - name: Run benchmarks
+      run: |
+        cargo bench --no-run
+        cargo bench -- --save-baseline pr-${{ github.event.pull_request.number || 'main' }}
+
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmarks
+        path: target/criterion
+        retention-days: 7
+
+  test-scenarios:
+    name: Test Scenarios
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        scenario:
+          - fresh-install
+          - large-clipboard
+          - network-interruption
+          - multi-device
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        if [ "${{ runner.os }}" = "Linux" ]; then
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config libx11-dev libxcb1-dev libxrandr-dev libdbus-1-dev xvfb
+        fi
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build release binary
+      run: cargo build --release
+
+    - name: Run scenario test - ${{ matrix.scenario }}
+      run: |
+        case "${{ matrix.scenario }}" in
+          fresh-install)
+            # Test fresh installation
+            ./target/release/clipsync --version
+            ./target/release/clipsync init
+            ./target/release/clipsync status
+            ;;
+          large-clipboard)
+            # Test with large clipboard content
+            dd if=/dev/urandom bs=1M count=10 | base64 | ./target/release/clipsync copy || true
+            ;;
+          network-interruption)
+            # Test network resilience
+            timeout 5 ./target/release/clipsync sync || true
+            ;;
+          multi-device)
+            # Test multiple instances
+            ./target/release/clipsync daemon &
+            PID=$!
+            sleep 2
+            ./target/release/clipsync status
+            kill $PID || true
+            ;;
+        esac
+      env:
+        DISPLAY: ${{ runner.os == 'Linux' && ':99' || '' }}
