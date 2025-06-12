@@ -9,7 +9,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configuration
-REPO_OWNER="yourusername"
+REPO_OWNER="lancekrogers"
 REPO_NAME="clipsync"
 BINARY_NAME="clipsync"
 VERSION="${VERSION:-latest}"

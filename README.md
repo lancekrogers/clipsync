@@ -8,8 +8,8 @@ ClipSync is a fast, secure, and easy-to-use clipboard synchronization service th
 Copy on your laptop → Instantly available on your desktop → Paste anywhere
 ```
 
-[![Build Status](https://github.com/yourusername/clipsync/workflows/CI/badge.svg)](https://github.com/yourusername/clipsync/actions)
-[![Security Audit](https://github.com/yourusername/clipsync/workflows/Security/badge.svg)](https://github.com/yourusername/clipsync/actions)
+[![Build Status](https://github.com/lancekrogers/clipsync/workflows/CI/badge.svg)](https://github.com/lancekrogers/clipsync/actions)
+[![Security Audit](https://github.com/lancekrogers/clipsync/workflows/Security/badge.svg)](https://github.com/lancekrogers/clipsync/actions)
 [![License](https://img.shields.io/badge/license-MIT%2FApache-blue.svg)](LICENSE)
 
 ## ✨ Key Features
@@ -54,13 +54,13 @@ brew install clipsync
 
 **Linux (Binary)**
 ```bash
-curl -L https://github.com/yourusername/clipsync/releases/latest/download/clipsync-linux-x86_64.tar.gz | tar xz
+curl -L https://github.com/lancekrogers/clipsync/releases/latest/download/clipsync-linux-x86_64.tar.gz | tar xz
 sudo mv clipsync /usr/local/bin/
 ```
 
 **From Source**
 ```bash
-git clone https://github.com/yourusername/clipsync.git
+git clone https://github.com/lancekrogers/clipsync.git
 cd clipsync && cargo install --path .
 ```
 
@@ -251,7 +251,7 @@ clipsync restart
 ### Quick Development Setup
 ```bash
 # Clone and build
-git clone https://github.com/yourusername/clipsync.git
+git clone https://github.com/lancekrogers/clipsync.git
 cd clipsync
 cargo build
 
@@ -371,4 +371,4 @@ Built with excellent open-source projects:
 
 ---
 
-**Made with ❤️ and 🦀 Rust** • [Report Issues](https://github.com/yourusername/clipsync/issues) • [Join Discussions](https://github.com/yourusername/clipsync/discussions)
+**Made with ❤️ and 🦀 Rust** • [Report Issues](https://github.com/lancekrogers/clipsync/issues) • [Join Discussions](https://github.com/lancekrogers/clipsync/discussions)

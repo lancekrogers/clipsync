@@ -15,8 +15,8 @@
 
 pub mod adapters;
 pub mod auth;
-pub mod clipboard;
 pub mod cli;
+pub mod clipboard;
 pub mod config;
 pub mod discovery;
 pub mod history;
@@ -37,23 +37,23 @@ pub enum Error {
     /// Authentication error
     #[error("Authentication error: {0}")]
     Auth(#[from] auth::AuthError),
-    
+
     /// Configuration error
     #[error("Configuration error: {0}")]
     Config(#[from] config::ConfigError),
-    
+
     /// Clipboard operation error
     #[error("Clipboard error: {0}")]
     Clipboard(#[from] clipboard::ClipboardError),
-    
+
     /// Transport error
     #[error("Transport error: {0}")]
     Transport(#[from] transport::TransportError),
-    
+
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     /// Generic error
     #[error("{0}")]
     Other(String),

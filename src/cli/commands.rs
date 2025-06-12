@@ -8,11 +8,7 @@ impl SystemCommands {
     pub fn check_daemon_running() -> bool {
         // Check if ClipSync daemon is running
         // This is a simplified implementation
-        match Command::new("pgrep")
-            .arg("-f")
-            .arg("clipsync")
-            .output() 
-        {
+        match Command::new("pgrep").arg("-f").arg("clipsync").output() {
             Ok(output) => !output.stdout.is_empty(),
             Err(_) => false,
         }
@@ -20,12 +16,8 @@ impl SystemCommands {
 
     pub fn stop_daemon() -> Result<()> {
         info!("Stopping ClipSync daemon");
-        
-        match Command::new("pkill")
-            .arg("-f")
-            .arg("clipsync")
-            .output()
-        {
+
+        match Command::new("pkill").arg("-f").arg("clipsync").output() {
             Ok(_) => {
                 info!("ClipSync daemon stopped");
                 Ok(())
@@ -46,11 +38,11 @@ impl SystemCommands {
         // - Close file descriptors
         // - Set working directory
         // - Create PID file
-        
+
         info!("Daemonizing ClipSync");
-        
+
         // For now, just detach from terminal
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             unsafe {
                 if libc::daemon(0, 0) != 0 {
@@ -58,7 +50,15 @@ impl SystemCommands {
                 }
             }
         }
-        
+
+        #[cfg(target_os = "macos")]
+        {
+            // On macOS, we rely on launchd instead of daemonizing
+            // The service should be installed with launchctl
+            eprintln!("Note: On macOS, ClipSync should be managed via launchctl.");
+            eprintln!("Install the service with: launchctl load ~/Library/LaunchAgents/com.clipsync.plist");
+        }
+
         Ok(())
     }
 }

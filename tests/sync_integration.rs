@@ -7,12 +7,12 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 use clipsync::{
+    clipboard::{ClipboardData, ClipboardError, ClipboardProvider},
     config::Config,
-    clipboard::{ClipboardProvider, ClipboardData, ClipboardError},
-    discovery::{PeerDiscovery, Peer},
+    discovery::{Peer, PeerDiscovery},
     history::HistoryManager,
     sync::{SyncEngine, SyncEvent},
-    transport::{TransportManager, TransportConfig},
+    transport::{TransportConfig, TransportManager},
 };
 
 // Mock clipboard provider for testing
@@ -56,7 +56,9 @@ async fn create_test_setup() -> Result<(
     Arc<TransportManager>,
 )> {
     let temp_dir = TempDir::new()?;
-    let config = Arc::new(Config::default_with_path(temp_dir.path().join("config.toml")));
+    let config = Arc::new(Config::default_with_path(
+        temp_dir.path().join("config.toml"),
+    ));
     let clipboard = Arc::new(MockClipboardProvider::new());
     let history = Arc::new(HistoryManager::new(&temp_dir.path().join("history.db")).await?);
     let discovery = Arc::new(PeerDiscovery::new(config.clone()).await?);
@@ -69,13 +71,7 @@ async fn create_test_setup() -> Result<(
 async fn test_sync_engine_creation() -> Result<()> {
     let (config, clipboard, history, discovery, transport) = create_test_setup().await?;
 
-    let sync_engine = SyncEngine::new(
-        config,
-        clipboard,
-        history,
-        discovery,
-        transport,
-    );
+    let sync_engine = SyncEngine::new(config, clipboard, history, discovery, transport);
 
     // Test that sync engine can be created successfully
     assert!(sync_engine.get_connected_peers().await.is_empty());
@@ -106,7 +102,7 @@ async fn test_clipboard_monitoring() -> Result<()> {
 
     // Wait for sync event
     let event = timeout(Duration::from_secs(5), event_receiver.recv()).await??;
-    
+
     assert_eq!(event.source_peer, config.node_id);
     match &event.entry.content {
         ClipboardData::Text(text) => {
@@ -117,7 +113,7 @@ async fn test_clipboard_monitoring() -> Result<()> {
     // Check that entry was saved to history
     let entries = history.get_recent_entries(1).await?;
     assert_eq!(entries.len(), 1);
-    
+
     Ok(())
 }
 
@@ -166,13 +162,7 @@ async fn test_conflict_resolution() -> Result<()> {
 async fn test_peer_connectivity() -> Result<()> {
     let (config, clipboard, history, discovery, transport) = create_test_setup().await?;
 
-    let sync_engine = SyncEngine::new(
-        config,
-        clipboard,
-        history,
-        discovery,
-        transport,
-    );
+    let sync_engine = SyncEngine::new(config, clipboard, history, discovery, transport);
 
     // Initially no peers should be connected
     let peers = sync_engine.get_connected_peers().await;
@@ -180,7 +170,7 @@ async fn test_peer_connectivity() -> Result<()> {
 
     // Test would add peer discovery and connection logic here
     // For now, just verify the interface works
-    
+
     Ok(())
 }
 
@@ -188,13 +178,7 @@ async fn test_peer_connectivity() -> Result<()> {
 async fn test_sync_event_broadcasting() -> Result<()> {
     let (config, clipboard, history, discovery, transport) = create_test_setup().await?;
 
-    let sync_engine = SyncEngine::new(
-        config.clone(),
-        clipboard,
-        history,
-        discovery,
-        transport,
-    );
+    let sync_engine = SyncEngine::new(config.clone(), clipboard, history, discovery, transport);
 
     // Subscribe to events
     let mut receiver1 = sync_engine.subscribe();
@@ -235,7 +219,7 @@ async fn test_large_clipboard_content() -> Result<()> {
     // Verify content was handled correctly
     let entries = history.get_recent_entries(1).await?;
     assert_eq!(entries.len(), 1);
-    
+
     match &entries[0].content {
         ClipboardData::Text(text) => {
             assert_eq!(text.len(), 1024 * 1024);
@@ -260,17 +244,17 @@ async fn test_concurrent_clipboard_updates() -> Result<()> {
 
     // Start multiple concurrent clipboard updates
     let mut handles = Vec::new();
-    
+
     for i in 0..10 {
         let clipboard_clone = clipboard.clone();
         let sync_engine_clone = sync_engine.clone();
-        
+
         let handle = tokio::spawn(async move {
             let content = format!("Content {}", i);
             clipboard_clone.set_text(&content).await.unwrap();
             sync_engine_clone.force_sync().await.unwrap();
         });
-        
+
         handles.push(handle);
     }
 

@@ -4,12 +4,10 @@
 //! ClipSync for the first time with step-by-step instructions.
 
 use crate::config::{Config, ConfigError};
-use crate::auth::{AuthError, KeyType, PublicKey};
 use crate::progress::ProgressIndicator;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use uuid::Uuid;
 
 /// Interactive setup wizard for first-time users
 pub struct SetupWizard {
@@ -21,8 +19,16 @@ impl SetupWizard {
     /// Create a new setup wizard
     pub fn new() -> Result<Self, ConfigError> {
         let config = Config::default();
-        let config_path = Config::default_config_path()?;
-        
+        let config_path = dirs::config_dir()
+            .ok_or_else(|| {
+                ConfigError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Could not find config directory",
+                ))
+            })?
+            .join("clipsync")
+            .join("config.toml");
+
         Ok(Self {
             config,
             config_path,
@@ -32,27 +38,27 @@ impl SetupWizard {
     /// Run the complete setup wizard
     pub async fn run(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.show_welcome();
-        
+
         // Step 1: System check
         self.run_system_check().await?;
-        
+
         // Step 2: SSH key setup
         self.setup_ssh_keys().await?;
-        
+
         // Step 3: Basic configuration
         self.configure_basic_settings().await?;
-        
+
         // Step 4: Network configuration
         self.configure_network().await?;
-        
+
         // Step 5: Save configuration
         self.save_configuration().await?;
-        
+
         // Step 6: Test setup
         self.test_setup().await?;
-        
+
         self.show_completion();
-        
+
         Ok(())
     }
 
@@ -73,7 +79,7 @@ impl SetupWizard {
         println!("  5. Save your configuration");
         println!("  6. Test the setup");
         println!();
-        
+
         self.wait_for_enter("Press Enter to continue...");
     }
 
@@ -83,7 +89,7 @@ impl SetupWizard {
         println!();
 
         let mut progress = ProgressIndicator::new("Checking system requirements");
-        
+
         // Check OS compatibility
         let os = std::env::consts::OS;
         match os {
@@ -98,25 +104,27 @@ impl SetupWizard {
             }
             _ => {
                 progress.error(&format!("Unsupported operating system: {}", os));
-                return Err(format!("ClipSync only supports macOS and Linux. Found: {}", os).into());
+                return Err(
+                    format!("ClipSync only supports macOS and Linux. Found: {}", os).into(),
+                );
             }
         }
 
         // Check network capabilities
         progress.update("Checking network capabilities");
         self.check_network_capabilities().await?;
-        
+
         // Check disk space
         progress.update("Checking disk space");
         self.check_disk_space()?;
-        
+
         // Check permissions
         progress.update("Checking permissions");
         self.check_permissions()?;
 
         progress.success("System check completed");
         println!();
-        
+
         Ok(())
     }
 
@@ -125,7 +133,7 @@ impl SetupWizard {
         // Check display server
         let display = std::env::var("DISPLAY").is_ok();
         let wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
-        
+
         if !display && !wayland {
             return Err("No display server detected. ClipSync requires X11 or Wayland.".into());
         }
@@ -133,7 +141,7 @@ impl SetupWizard {
         if display {
             println!("  • X11 display server detected");
         }
-        
+
         if wayland {
             println!("  • Wayland display server detected");
         }
@@ -155,7 +163,7 @@ impl SetupWizard {
     async fn check_network_capabilities(&self) -> Result<(), Box<dyn std::error::Error>> {
         // Check if we can bind to a port
         use tokio::net::TcpListener;
-        
+
         match TcpListener::bind("127.0.0.1:0").await {
             Ok(listener) => {
                 let addr = listener.local_addr()?;
@@ -167,7 +175,7 @@ impl SetupWizard {
         }
 
         // Check hostname resolution
-        let hostname = hostname::get()?.to_string_lossy().to_string();
+        let hostname = gethostname::gethostname().to_string_lossy().to_string();
         println!("  • Hostname: {}", hostname);
 
         Ok(())
@@ -176,7 +184,7 @@ impl SetupWizard {
     /// Check available disk space
     fn check_disk_space(&self) -> Result<(), Box<dyn std::error::Error>> {
         use std::fs;
-        
+
         // Check config directory space
         if let Some(parent) = self.config_path.parent() {
             if parent.exists() {
@@ -189,7 +197,7 @@ impl SetupWizard {
 
         // Estimate space requirements
         println!("  • Required disk space: ~10MB (for config, keys, and history)");
-        
+
         Ok(())
     }
 
@@ -202,19 +210,19 @@ impl SetupWizard {
             if !parent.exists() {
                 fs::create_dir_all(parent)?;
             }
-            
+
             // Test write permission
             let test_file = parent.join(".clipsync_test");
             fs::write(&test_file, "test")?;
             fs::remove_file(&test_file)?;
-            
+
             println!("  • Configuration directory is writable");
         }
 
         // Check SSH directory
         let home = std::env::var("HOME")?;
         let ssh_dir = Path::new(&home).join(".ssh");
-        
+
         if !ssh_dir.exists() {
             fs::create_dir_all(&ssh_dir)?;
             // Set proper permissions (0700)
@@ -249,13 +257,16 @@ impl SetupWizard {
 
         // Check for existing keys
         if clipsync_key.exists() {
-            println!("✅ ClipSync SSH key already exists: {}", clipsync_key.display());
-            self.config.auth.ssh_key = clipsync_key.to_string_lossy().to_string();
+            println!(
+                "✅ ClipSync SSH key already exists: {}",
+                clipsync_key.display()
+            );
+            self.config.auth.ssh_key = clipsync_key;
         } else if default_key.exists() {
             println!("📋 Found existing SSH key: {}", default_key.display());
-            
+
             if self.ask_yes_no("Use existing SSH key for ClipSync?")? {
-                self.config.auth.ssh_key = default_key.to_string_lossy().to_string();
+                self.config.auth.ssh_key = default_key;
             } else {
                 self.generate_new_ssh_key(&clipsync_key).await?;
             }
@@ -265,42 +276,53 @@ impl SetupWizard {
         }
 
         self.display_public_key()?;
-        
+
         Ok(())
     }
 
     /// Generate a new SSH key pair
-    async fn generate_new_ssh_key(&mut self, key_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let mut progress = ProgressIndicator::new("Generating SSH key pair");
-        
-        let hostname = hostname::get()?.to_string_lossy().to_string();
+    async fn generate_new_ssh_key(
+        &mut self,
+        key_path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let progress = ProgressIndicator::new("Generating SSH key pair");
+
+        let hostname = gethostname::gethostname().to_string_lossy().to_string();
         let comment = format!("clipsync-{}", hostname);
-        
+
         let output = Command::new("ssh-keygen")
             .args(&[
-                "-t", "ed25519",
-                "-f", &key_path.to_string_lossy(),
-                "-C", &comment,
-                "-N", "", // No passphrase
+                "-t",
+                "ed25519",
+                "-f",
+                &key_path.to_string_lossy(),
+                "-C",
+                &comment,
+                "-N",
+                "", // No passphrase
             ])
             .output()?;
 
         if !output.status.success() {
             progress.error("SSH key generation failed");
-            return Err(format!("ssh-keygen failed: {}", String::from_utf8_lossy(&output.stderr)).into());
+            return Err(format!(
+                "ssh-keygen failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
         }
 
         // Set proper permissions
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
             use std::fs;
-            
+            use std::os::unix::fs::PermissionsExt;
+
             // Private key: 0600
             let mut perms = fs::metadata(key_path)?.permissions();
             perms.set_mode(0o600);
             fs::set_permissions(key_path, perms)?;
-            
+
             // Public key: 0644
             let pub_key_path = format!("{}.pub", key_path.to_string_lossy());
             let mut perms = fs::metadata(&pub_key_path)?.permissions();
@@ -309,21 +331,21 @@ impl SetupWizard {
         }
 
         progress.success("SSH key pair generated");
-        
-        self.config.auth.ssh_key = key_path.to_string_lossy().to_string();
-        
+
+        self.config.auth.ssh_key = key_path.to_path_buf();
+
         println!("✅ Generated new SSH key pair:");
         println!("   Private key: {}", key_path.display());
         println!("   Public key:  {}.pub", key_path.display());
-        
+
         Ok(())
     }
 
     /// Display the public key for sharing
     fn display_public_key(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let pub_key_path = format!("{}.pub", self.config.auth.ssh_key);
+        let pub_key_path = format!("{}.pub", self.config.auth.ssh_key.display());
         let public_key = std::fs::read_to_string(&pub_key_path)?;
-        
+
         println!();
         println!("📤 Your ClipSync Public Key:");
         println!("┌─────────────────────────────────────────────────────────────────────────────┐");
@@ -335,9 +357,9 @@ impl SetupWizard {
         println!("   2. Run 'clipsync auth add' with this public key");
         println!("   3. Share that device's public key back to this device");
         println!();
-        
+
         self.wait_for_enter("Press Enter to continue...");
-        
+
         Ok(())
     }
 
@@ -347,9 +369,9 @@ impl SetupWizard {
         println!();
 
         // Device name
-        let hostname = hostname::get()?.to_string_lossy().to_string();
+        let hostname = gethostname::gethostname().to_string_lossy().to_string();
         let default_name = format!("{}-clipsync", hostname);
-        
+
         println!("Device name (used for discovery and identification):");
         let device_name = self.prompt_with_default("Device name", &default_name)?;
         self.config.advertise_name = device_name;
@@ -358,7 +380,7 @@ impl SetupWizard {
         println!();
         println!("Clipboard history keeps your recent clipboard items.");
         let history_size = self.prompt_number("History size (1-100)", 20, 1, 100)?;
-        self.config.clipboard.history_size = history_size;
+        self.config.clipboard.history_size = history_size as usize;
 
         // Maximum clipboard size
         println!();
@@ -366,17 +388,17 @@ impl SetupWizard {
         println!("  1. 1MB  (recommended for slow networks)");
         println!("  2. 5MB  (default, good for most uses)");
         println!("  3. 50MB (maximum, for large files/images)");
-        
+
         let size_choice = self.prompt_choice("Choose size", &["1MB", "5MB", "50MB"], 1)?;
         self.config.clipboard.max_size = match size_choice {
-            0 => 1 * 1024 * 1024,      // 1MB
-            1 => 5 * 1024 * 1024,      // 5MB (default)
-            2 => 50 * 1024 * 1024,     // 50MB
-            _ => 5 * 1024 * 1024,      // Default fallback
+            0 => 1 * 1024 * 1024,  // 1MB
+            1 => 5 * 1024 * 1024,  // 5MB (default)
+            2 => 50 * 1024 * 1024, // 50MB
+            _ => 5 * 1024 * 1024,  // Default fallback
         };
 
         println!();
-        
+
         Ok(())
     }
 
@@ -390,9 +412,13 @@ impl SetupWizard {
         println!("  1. All interfaces (0.0.0.0) - discoverable by any device on network");
         println!("  2. Localhost only (127.0.0.1) - only for testing");
         println!("  3. Specific IP - enter manually");
-        
-        let addr_choice = self.prompt_choice("Choose address", &["All interfaces", "Localhost", "Specific IP"], 0)?;
-        
+
+        let addr_choice = self.prompt_choice(
+            "Choose address",
+            &["All interfaces", "Localhost", "Specific IP"],
+            0,
+        )?;
+
         let listen_addr = match addr_choice {
             0 => ":8484".to_string(),
             1 => "127.0.0.1:8484".to_string(),
@@ -402,7 +428,7 @@ impl SetupWizard {
             }
             _ => ":8484".to_string(),
         };
-        
+
         self.config.listen_addr = listen_addr;
 
         // Port configuration
@@ -415,15 +441,20 @@ impl SetupWizard {
         // Security settings
         println!();
         println!("🔒 Security Settings:");
-        
-        let enable_compression = self.ask_yes_no("Enable compression for large clipboard items?")?;
-        self.config.security.compression = if enable_compression { "zstd".to_string() } else { "none".to_string() };
 
-        let encrypt_history = self.ask_yes_no("Encrypt clipboard history database?")?;
-        self.config.security.encrypt_history = encrypt_history;
+        let enable_compression =
+            self.ask_yes_no("Enable compression for large clipboard items?")?;
+        self.config.security.compression = if enable_compression {
+            "zstd".to_string()
+        } else {
+            "none".to_string()
+        };
+
+        // Note: History encryption is handled automatically by the history module
+        let _encrypt_history = self.ask_yes_no("Encrypt clipboard history database?")?;
 
         println!();
-        
+
         Ok(())
     }
 
@@ -432,32 +463,42 @@ impl SetupWizard {
         println!("💾 Step 5: Saving Configuration");
         println!();
 
-        let mut progress = ProgressIndicator::new("Saving configuration");
-        
+        let progress = ProgressIndicator::new("Saving configuration");
+
         // Create config directory if it doesn't exist
         if let Some(parent) = self.config_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         // Save config
-        self.config.save_to_file(&self.config_path)?;
-        
+        // Save config to the specific path
+        let toml_string = toml::to_string_pretty(&self.config).map_err(|e| {
+            ConfigError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
+        std::fs::write(&self.config_path, toml_string)?;
+
         progress.success("Configuration saved");
-        
+
         println!("✅ Configuration saved to: {}", self.config_path.display());
-        
+
         // Show config summary
         println!();
         println!("📋 Configuration Summary:");
         println!("   Device name: {}", self.config.advertise_name);
         println!("   Listen address: {}", self.config.listen_addr);
-        println!("   SSH key: {}", self.config.auth.ssh_key);
-        println!("   History size: {} items", self.config.clipboard.history_size);
-        println!("   Max clipboard size: {}", format_bytes(self.config.clipboard.max_size));
+        println!("   SSH key: {}", self.config.auth.ssh_key.display());
+        println!(
+            "   History size: {} items",
+            self.config.clipboard.history_size
+        );
+        println!(
+            "   Max clipboard size: {}",
+            format_bytes(self.config.clipboard.max_size)
+        );
         println!("   Compression: {}", self.config.security.compression);
-        println!("   Encrypt history: {}", self.config.security.encrypt_history);
+        println!("   Encrypt history: enabled"); // History encryption is automatic
         println!();
-        
+
         Ok(())
     }
 
@@ -467,9 +508,9 @@ impl SetupWizard {
         println!();
 
         let mut progress = ProgressIndicator::new("Testing configuration");
-        
+
         // Test config loading
-        match Config::load_from_file(&self.config_path) {
+        match Config::load_from_path(&self.config_path) {
             Ok(_) => {
                 progress.update("Configuration loads successfully");
             }
@@ -481,8 +522,9 @@ impl SetupWizard {
 
         // Test SSH key loading
         let key_exists = Path::new(&self.config.auth.ssh_key).exists();
-        let pub_key_exists = Path::new(&format!("{}.pub", self.config.auth.ssh_key)).exists();
-        
+        let pub_key_exists =
+            Path::new(&format!("{}.pub", self.config.auth.ssh_key.display())).exists();
+
         if key_exists && pub_key_exists {
             progress.update("SSH keys are accessible");
         } else {
@@ -498,7 +540,10 @@ impl SetupWizard {
             }
             Err(e) => {
                 progress.warning(&format!("Network binding test failed: {}", e));
-                println!("⚠️  Warning: Could not bind to {}. You may need to:", self.config.listen_addr);
+                println!(
+                    "⚠️  Warning: Could not bind to {}. You may need to:",
+                    self.config.listen_addr
+                );
                 println!("   - Choose a different port");
                 println!("   - Check firewall settings");
                 println!("   - Run with appropriate permissions");
@@ -533,7 +578,7 @@ impl SetupWizard {
         println!("📚 For more help:");
         println!("   - clipsync --help");
         println!("   - clipsync doctor  (diagnose issues)");
-        println!("   - Documentation: https://github.com/yourusername/clipsync");
+        println!("   - Documentation: https://github.com/lancekrogers/clipsync");
         println!();
         println!("Happy clipboard syncing! 📋✨");
         println!();
@@ -542,14 +587,18 @@ impl SetupWizard {
     // Helper methods for user interaction
 
     /// Prompt user for input with a default value
-    fn prompt_with_default(&self, prompt: &str, default: &str) -> Result<String, Box<dyn std::error::Error>> {
+    fn prompt_with_default(
+        &self,
+        prompt: &str,
+        default: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
         print!("{} [{}]: ", prompt, default);
         io::stdout().flush()?;
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         let input = input.trim();
-        
+
         if input.is_empty() {
             Ok(default.to_string())
         } else {
@@ -561,18 +610,27 @@ impl SetupWizard {
     fn prompt(&self, prompt: &str) -> Result<String, Box<dyn std::error::Error>> {
         print!("{}: ", prompt);
         io::stdout().flush()?;
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
-        
+
         Ok(input.trim().to_string())
     }
 
     /// Prompt user for a number within a range
-    fn prompt_number(&self, prompt: &str, default: u32, min: u32, max: u32) -> Result<u32, Box<dyn std::error::Error>> {
+    fn prompt_number(
+        &self,
+        prompt: &str,
+        default: u32,
+        min: u32,
+        max: u32,
+    ) -> Result<u32, Box<dyn std::error::Error>> {
         loop {
-            let input = self.prompt_with_default(&format!("{} ({}-{})", prompt, min, max), &default.to_string())?;
-            
+            let input = self.prompt_with_default(
+                &format!("{} ({}-{})", prompt, min, max),
+                &default.to_string(),
+            )?;
+
             match input.parse::<u32>() {
                 Ok(num) if num >= min && num <= max => return Ok(num),
                 Ok(_) => println!("Please enter a number between {} and {}", min, max),
@@ -582,25 +640,30 @@ impl SetupWizard {
     }
 
     /// Prompt user to choose from a list of options
-    fn prompt_choice(&self, prompt: &str, choices: &[&str], default: usize) -> Result<usize, Box<dyn std::error::Error>> {
+    fn prompt_choice(
+        &self,
+        prompt: &str,
+        choices: &[&str],
+        default: usize,
+    ) -> Result<usize, Box<dyn std::error::Error>> {
         loop {
             println!("{}: ", prompt);
             for (i, choice) in choices.iter().enumerate() {
                 let marker = if i == default { " (default)" } else { "" };
                 println!("  {}. {}{}", i + 1, choice, marker);
             }
-            
+
             print!("Choose [{}]: ", default + 1);
             io::stdout().flush()?;
-            
+
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
             let input = input.trim();
-            
+
             if input.is_empty() {
                 return Ok(default);
             }
-            
+
             match input.parse::<usize>() {
                 Ok(num) if num >= 1 && num <= choices.len() => return Ok(num - 1),
                 _ => println!("Please enter a number between 1 and {}", choices.len()),
@@ -613,11 +676,11 @@ impl SetupWizard {
         loop {
             print!("{} (y/n): ", prompt);
             io::stdout().flush()?;
-            
+
             let mut input = String::new();
             io::stdin().read_line(&mut input)?;
             let input = input.trim().to_lowercase();
-            
+
             match input.as_str() {
                 "y" | "yes" => return Ok(true),
                 "n" | "no" => return Ok(false),
@@ -630,7 +693,7 @@ impl SetupWizard {
     fn wait_for_enter(&self, prompt: &str) {
         print!("{}", prompt);
         io::stdout().flush().unwrap_or(());
-        
+
         let mut input = String::new();
         io::stdin().read_line(&mut input).unwrap_or(0);
     }

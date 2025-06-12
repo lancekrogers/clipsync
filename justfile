@@ -34,6 +34,14 @@ check:
   cargo fmt -- --check
   cargo clippy -- -D warnings
 
+# Run all pre-commit checks
+pre-commit:
+  @./scripts/pre-commit-checks.sh
+
+# Run local tests (non-blocking)
+test-local:
+  @./scripts/test-local.sh
+
 # Security audit
 audit:
   cargo audit

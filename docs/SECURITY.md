@@ -644,8 +644,8 @@ find ~/.config/clipsync -type f -exec ls -la {} \;  # Permission audit
 ### Security Contacts
 
 - **Security Team**: security@clipsync.dev
-- **PGP Key**: [Download from GitHub](https://github.com/yourusername/clipsync/blob/main/SECURITY.asc)
-- **Security Advisory**: [GitHub Security Advisories](https://github.com/yourusername/clipsync/security/advisories)
+- **PGP Key**: [Download from GitHub](https://github.com/lancekrogers/clipsync/blob/main/SECURITY.asc)
+- **Security Advisory**: [GitHub Security Advisories](https://github.com/lancekrogers/clipsync/security/advisories)
 
 ---
 

@@ -6,13 +6,13 @@ use tempfile::TempDir;
 use tokio::time::{sleep, timeout};
 
 use clipsync::{
-    config::Config,
-    clipboard::{ClipboardProvider, ClipboardData, ClipboardError},
     cli::{CliHandler, Commands},
+    clipboard::{ClipboardData, ClipboardError, ClipboardProvider},
+    config::Config,
     discovery::PeerDiscovery,
     history::HistoryManager,
     sync::SyncEngine,
-    transport::{TransportManager, TransportConfig},
+    transport::{TransportConfig, TransportManager},
 };
 
 // Mock clipboard provider for end-to-end testing
@@ -64,7 +64,9 @@ async fn create_complete_setup() -> Result<(
     Arc<SyncEngine>,
 )> {
     let temp_dir = TempDir::new()?;
-    let config = Arc::new(Config::default_with_path(temp_dir.path().join("config.toml")));
+    let config = Arc::new(Config::default_with_path(
+        temp_dir.path().join("config.toml"),
+    ));
     let clipboard = Arc::new(TestClipboardProvider::new());
     let history = Arc::new(HistoryManager::new(&temp_dir.path().join("history.db")).await?);
     let discovery = Arc::new(PeerDiscovery::new(config.clone()).await?);
@@ -78,12 +80,19 @@ async fn create_complete_setup() -> Result<(
         transport.clone(),
     ));
 
-    Ok((config, clipboard, history, discovery, transport, sync_engine))
+    Ok((
+        config,
+        clipboard,
+        history,
+        discovery,
+        transport,
+        sync_engine,
+    ))
 }
 
 #[tokio::test]
 async fn test_complete_system_initialization() -> Result<()> {
-    let (config, clipboard, history, discovery, transport, sync_engine) = 
+    let (config, clipboard, history, discovery, transport, sync_engine) =
         create_complete_setup().await?;
 
     // Test that all components can be initialized together
@@ -97,7 +106,7 @@ async fn test_complete_system_initialization() -> Result<()> {
 
 #[tokio::test]
 async fn test_clipboard_to_history_flow() -> Result<()> {
-    let (_config, clipboard, history, _discovery, _transport, sync_engine) = 
+    let (_config, clipboard, history, _discovery, _transport, sync_engine) =
         create_complete_setup().await?;
 
     // Set clipboard content
@@ -112,7 +121,7 @@ async fn test_clipboard_to_history_flow() -> Result<()> {
     // Check that content was saved to history
     let entries = history.get_recent_entries(5).await?;
     assert!(!entries.is_empty());
-    
+
     match &entries[0].content {
         ClipboardData::Text(text) => {
             assert_eq!(text, "Test content for history");
@@ -124,7 +133,7 @@ async fn test_clipboard_to_history_flow() -> Result<()> {
 
 #[tokio::test]
 async fn test_sync_event_propagation() -> Result<()> {
-    let (_config, clipboard, _history, _discovery, _transport, sync_engine) = 
+    let (_config, clipboard, _history, _discovery, _transport, sync_engine) =
         create_complete_setup().await?;
 
     // Subscribe to sync events
@@ -136,7 +145,7 @@ async fn test_sync_event_propagation() -> Result<()> {
 
     // Wait for event
     let event = timeout(Duration::from_secs(2), event_receiver.recv()).await??;
-    
+
     match &event.entry.content {
         ClipboardData::Text(text) => {
             assert_eq!(text, "Event propagation test");
@@ -150,7 +159,7 @@ async fn test_sync_event_propagation() -> Result<()> {
 async fn test_cli_integration_with_backend() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let config_path = temp_dir.path().join("config.toml");
-    
+
     // Create config
     let config = Config::default_with_path(config_path.clone());
     config.save().await?;
@@ -160,13 +169,20 @@ async fn test_cli_integration_with_backend() -> Result<()> {
 
     // Test various CLI commands
     cli_handler.handle_command(Commands::Status).await?;
-    cli_handler.handle_command(Commands::History { limit: 10, interactive: false }).await?;
+    cli_handler
+        .handle_command(Commands::History {
+            limit: 10,
+            interactive: false,
+        })
+        .await?;
     cli_handler.handle_command(Commands::Peers).await?;
 
     // Copy and paste operations
-    cli_handler.handle_command(Commands::Copy {
-        text: "CLI integration test".to_string(),
-    }).await?;
+    cli_handler
+        .handle_command(Commands::Copy {
+            text: "CLI integration test".to_string(),
+        })
+        .await?;
 
     cli_handler.handle_command(Commands::Paste).await?;
 
@@ -175,13 +191,13 @@ async fn test_cli_integration_with_backend() -> Result<()> {
 
 #[tokio::test]
 async fn test_multiple_clipboard_changes() -> Result<()> {
-    let (_config, clipboard, history, _discovery, _transport, sync_engine) = 
+    let (_config, clipboard, history, _discovery, _transport, sync_engine) =
         create_complete_setup().await?;
 
     // Make multiple clipboard changes
     let test_contents = vec![
         "First clipboard content",
-        "Second clipboard content", 
+        "Second clipboard content",
         "Third clipboard content",
         "Fourth clipboard content",
         "Fifth clipboard content",
@@ -212,7 +228,7 @@ async fn test_multiple_clipboard_changes() -> Result<()> {
 
 #[tokio::test]
 async fn test_large_content_handling() -> Result<()> {
-    let (_config, clipboard, history, _discovery, _transport, sync_engine) = 
+    let (_config, clipboard, history, _discovery, _transport, sync_engine) =
         create_complete_setup().await?;
 
     // Test with large content (100KB)
@@ -226,7 +242,7 @@ async fn test_large_content_handling() -> Result<()> {
     // Verify large content was handled correctly
     let entries = history.get_recent_entries(1).await?;
     assert_eq!(entries.len(), 1);
-    
+
     match &entries[0].content {
         ClipboardData::Text(text) => {
             assert_eq!(text.len(), large_content.len());
@@ -238,7 +254,7 @@ async fn test_large_content_handling() -> Result<()> {
 
 #[tokio::test]
 async fn test_concurrent_operations() -> Result<()> {
-    let (_config, clipboard, history, _discovery, _transport, sync_engine) = 
+    let (_config, clipboard, history, _discovery, _transport, sync_engine) =
         create_complete_setup().await?;
 
     let sync_engine = Arc::new(sync_engine.as_ref());
@@ -251,24 +267,24 @@ async fn test_concurrent_operations() -> Result<()> {
     for i in 0..5 {
         let clipboard = clipboard.clone();
         let sync_engine = sync_engine.clone();
-        
+
         let handle = tokio::spawn(async move {
             let content = format!("Concurrent content {}", i);
             clipboard.set_text(&content).await.unwrap();
             sync_engine.force_sync().await.unwrap();
         });
-        
+
         handles.push(handle);
     }
 
     // Concurrent history reads
     for _ in 0..3 {
         let history = history.clone();
-        
+
         let handle = tokio::spawn(async move {
             let _entries = history.get_recent_entries(10).await.unwrap();
         });
-        
+
         handles.push(handle);
     }
 
@@ -286,7 +302,7 @@ async fn test_concurrent_operations() -> Result<()> {
 
 #[tokio::test]
 async fn test_system_state_consistency() -> Result<()> {
-    let (_config, clipboard, history, _discovery, _transport, sync_engine) = 
+    let (_config, clipboard, history, _discovery, _transport, sync_engine) =
         create_complete_setup().await?;
 
     // Set initial content
@@ -313,7 +329,7 @@ async fn test_system_state_consistency() -> Result<()> {
     // Verify current clipboard content matches latest history entry
     let current_content = clipboard.get_text().await?;
     let recent_entries = history.get_recent_entries(1).await?;
-    
+
     if let Some(entry) = recent_entries.first() {
         match &entry.content {
             ClipboardData::Text(text) => {

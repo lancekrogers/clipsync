@@ -13,19 +13,19 @@ pub enum ConfigError {
     /// IO error reading config file
     #[error("Failed to read config file: {0}")]
     Io(#[from] std::io::Error),
-    
+
     /// TOML parsing error
     #[error("Failed to parse TOML: {0}")]
     Toml(#[from] toml::de::Error),
-    
+
     /// Validation error
     #[error("Config validation failed: {0}")]
     Validation(String),
-    
+
     /// SSH key not found
     #[error("SSH key not found at path: {0}")]
     SshKeyNotFound(PathBuf),
-    
+
     /// Invalid size value
     #[error("Invalid size value: {0}")]
     InvalidSize(String),
@@ -37,27 +37,27 @@ pub struct Config {
     /// Network address to listen on
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
-    
+
     /// Name advertised for mDNS discovery
     #[serde(default = "default_advertise_name")]
     pub advertise_name: String,
-    
+
     /// Authentication configuration
     #[serde(default)]
     pub auth: AuthConfig,
-    
+
     /// Clipboard configuration
     #[serde(default)]
     pub clipboard: ClipboardConfig,
-    
+
     /// Hotkey configuration
     #[serde(default)]
     pub hotkeys: HotkeyConfig,
-    
+
     /// Security configuration
     #[serde(default)]
     pub security: SecurityConfig,
-    
+
     /// Log level
     #[serde(default = "default_log_level")]
     pub log_level: String,
@@ -69,7 +69,7 @@ pub struct AuthConfig {
     /// Path to SSH private key for peer authentication
     #[serde(default = "default_ssh_key")]
     pub ssh_key: PathBuf,
-    
+
     /// Path to authorized keys file
     #[serde(default = "default_authorized_keys")]
     pub authorized_keys: PathBuf,
@@ -81,15 +81,15 @@ pub struct ClipboardConfig {
     /// Maximum payload size in bytes
     #[serde(default = "default_max_size")]
     pub max_size: usize,
-    
+
     /// Whether to sync middle-click selection on Linux
     #[serde(default = "default_sync_primary")]
     pub sync_primary: bool,
-    
+
     /// Number of clipboard items to keep in history
     #[serde(default = "default_history_size")]
     pub history_size: usize,
-    
+
     /// Path to SQLite database for history
     #[serde(default = "default_history_db")]
     pub history_db: PathBuf,
@@ -101,15 +101,15 @@ pub struct HotkeyConfig {
     /// Hotkey to toggle sync
     #[serde(default = "default_toggle_sync")]
     pub toggle_sync: String,
-    
+
     /// Hotkey to show clipboard history
     #[serde(default = "default_show_history")]
     pub show_history: String,
-    
+
     /// Hotkey to cycle to previous clipboard item
     #[serde(default = "default_cycle_prev")]
     pub cycle_prev: String,
-    
+
     /// Hotkey to cycle to next clipboard item
     #[serde(default = "default_cycle_next")]
     pub cycle_next: String,
@@ -121,7 +121,7 @@ pub struct SecurityConfig {
     /// Encryption algorithm
     #[serde(default = "default_encryption")]
     pub encryption: String,
-    
+
     /// Compression algorithm for large payloads
     #[serde(default = "default_compression")]
     pub compression: String,
@@ -133,9 +133,7 @@ fn default_listen_addr() -> String {
 }
 
 fn default_advertise_name() -> String {
-    let hostname = gethostname::gethostname()
-        .to_string_lossy()
-        .to_string();
+    let hostname = gethostname::gethostname().to_string_lossy().to_string();
     format!("{}-clipsync", hostname)
 }
 
@@ -166,7 +164,7 @@ fn default_history_db() -> PathBuf {
 fn default_toggle_sync() -> String {
     #[cfg(target_os = "macos")]
     return "Ctrl+Shift+Cmd+C".to_string();
-    
+
     #[cfg(not(target_os = "macos"))]
     return "Ctrl+Shift+Alt+C".to_string();
 }
@@ -259,7 +257,7 @@ impl Config {
     /// 3. Creates default config if none exists
     pub fn load() -> Result<Self, ConfigError> {
         let config_path = Self::find_config_path();
-        
+
         if let Some(path) = config_path {
             Self::load_from_path(&path)
         } else {
@@ -269,29 +267,29 @@ impl Config {
             Ok(config)
         }
     }
-    
+
     /// Load configuration from a specific path
     pub fn load_from_path(path: &Path) -> Result<Self, ConfigError> {
         let contents = std::fs::read_to_string(path)?;
         Self::from_toml(&contents)
     }
-    
+
     /// Parse configuration from TOML string
     pub fn from_toml(toml_str: &str) -> Result<Self, ConfigError> {
         let mut config: Config = toml::from_str(toml_str)?;
-        
+
         // Expand paths
         config.expand_paths();
-        
+
         // Manual validation instead of using validator crate
         config.validate_config()?;
-        
+
         // Additional validation
         config.validate_ssh_key()?;
-        
+
         Ok(config)
     }
-    
+
     /// Find configuration file path
     fn find_config_path() -> Option<PathBuf> {
         // Check environment variable first
@@ -301,22 +299,22 @@ impl Config {
                 return Some(path);
             }
         }
-        
+
         // Check default location
         let default_path = dirs::config_dir()
             .map(|p| p.join("clipsync").join("config.toml"))
             .filter(|p| p.exists());
-        
+
         default_path
     }
-    
+
     /// Expand tilde in paths
     fn expand_paths(&mut self) {
         self.auth.ssh_key = expand_path(&self.auth.ssh_key);
         self.auth.authorized_keys = expand_path(&self.auth.authorized_keys);
         self.clipboard.history_db = expand_path(&self.clipboard.history_db);
     }
-    
+
     /// Validate SSH key exists and is readable
     fn validate_ssh_key(&self) -> Result<(), ConfigError> {
         // Skip validation in tests
@@ -324,78 +322,78 @@ impl Config {
         {
             return Ok(());
         }
-        
+
         #[cfg(not(test))]
         {
             if !self.auth.ssh_key.exists() {
                 return Err(ConfigError::SshKeyNotFound(self.auth.ssh_key.clone()));
             }
-            
+
             // Check if readable
             std::fs::metadata(&self.auth.ssh_key)
                 .map_err(|_| ConfigError::SshKeyNotFound(self.auth.ssh_key.clone()))?;
-            
+
             Ok(())
         }
     }
-    
+
     /// Validate configuration values
     fn validate_config(&self) -> Result<(), ConfigError> {
         // Validate max_size range (1KB to 50MB)
         if self.clipboard.max_size < 1024 {
             return Err(ConfigError::Validation(
-                "max_size must be at least 1024 bytes (1KB)".to_string()
+                "max_size must be at least 1024 bytes (1KB)".to_string(),
             ));
         }
-        if self.clipboard.max_size > 52428800 {
+        if self.clipboard.max_size > 52_428_800 {
             return Err(ConfigError::Validation(
-                "max_size must not exceed 52428800 bytes (50MB)".to_string()
+                "max_size must not exceed 52428800 bytes (50MB)".to_string(),
             ));
         }
-        
+
         // Validate history_size range (1 to 100)
         if self.clipboard.history_size < 1 {
             return Err(ConfigError::Validation(
-                "history_size must be at least 1".to_string()
+                "history_size must be at least 1".to_string(),
             ));
         }
         if self.clipboard.history_size > 100 {
             return Err(ConfigError::Validation(
-                "history_size must not exceed 100".to_string()
+                "history_size must not exceed 100".to_string(),
             ));
         }
-        
+
         Ok(())
     }
-    
+
     /// Save configuration to default location
     pub fn save(&self) -> Result<(), ConfigError> {
         let config_dir = dirs::config_dir()
-            .ok_or_else(|| ConfigError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Could not find config directory"
-            )))?
+            .ok_or_else(|| {
+                ConfigError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Could not find config directory",
+                ))
+            })?
             .join("clipsync");
-        
+
         std::fs::create_dir_all(&config_dir)?;
-        
+
         let config_path = config_dir.join("config.toml");
-        let toml_string = toml::to_string_pretty(self)
-            .map_err(|e| ConfigError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                e
-            )))?;
-        
+        let toml_string = toml::to_string_pretty(self).map_err(|e| {
+            ConfigError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        })?;
+
         std::fs::write(config_path, toml_string)?;
-        
+
         Ok(())
     }
-    
+
     /// Generate example configuration file
     pub fn generate_example() -> String {
         let config = Config::default();
         let mut example = toml::to_string_pretty(&config).unwrap();
-        
+
         // Add comments
         example = format!(
             r#"# ClipSync Configuration File
@@ -457,7 +455,7 @@ log_level = "{}"
             config.security.compression,
             config.log_level
         );
-        
+
         example
     }
 }
@@ -473,7 +471,7 @@ fn expand_path(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    
+
     #[test]
     fn test_default_config() {
         let config = Config::default();
@@ -482,59 +480,59 @@ mod tests {
         assert_eq!(config.clipboard.history_size, 20);
         assert!(config.clipboard.sync_primary);
     }
-    
+
     #[test]
     fn test_load_from_toml() {
         let toml_str = r#"
             listen_addr = ":9999"
             advertise_name = "test-machine"
-            
+
             [clipboard]
             max_size = 1_048_576
             history_size = 10
         "#;
-        
+
         let config = Config::from_toml(toml_str).unwrap();
         assert_eq!(config.listen_addr, ":9999");
         assert_eq!(config.advertise_name, "test-machine");
         assert_eq!(config.clipboard.max_size, 1_048_576);
         assert_eq!(config.clipboard.history_size, 10);
     }
-    
+
     #[test]
     fn test_validation_max_size() {
         let toml_str = r#"
             [clipboard]
             max_size = 100_000_000
         "#;
-        
+
         let result = Config::from_toml(toml_str);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_validation_history_size() {
         let toml_str = r#"
             [clipboard]
             history_size = 200
         "#;
-        
+
         let result = Config::from_toml(toml_str);
         assert!(result.is_err());
     }
-    
+
     #[test]
     fn test_save_and_load() {
         let temp_dir = TempDir::new().unwrap();
         std::env::set_var("HOME", temp_dir.path());
-        
+
         let config = Config::default();
         config.save().unwrap();
-        
+
         let loaded = Config::load().unwrap();
         assert_eq!(config.listen_addr, loaded.listen_addr);
     }
-    
+
     #[test]
     fn test_generate_example() {
         let example = Config::generate_example();

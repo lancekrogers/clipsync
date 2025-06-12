@@ -24,9 +24,24 @@ else ifeq ($(UNAME_S),Linux)
     endif
 endif
 
-.PHONY: all build release test clean install uninstall fmt lint bench
+.PHONY: all build release test clean install uninstall fmt lint bench check pre-commit
 
 all: build
+
+# Run all pre-commit checks
+pre-commit:
+	@./scripts/pre-commit-checks.sh
+
+# Quick check - formatting and linting only
+check:
+	@if [ -f .env ]; then source .env; fi && \
+	unset OPENSSL_LIB_DIR OPENSSL_INCLUDE_DIR && \
+	export OPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3 && \
+	export OPENSSL_LIB_DIR=/opt/homebrew/opt/openssl@3/lib && \
+	export OPENSSL_INCLUDE_DIR=/opt/homebrew/opt/openssl@3/include && \
+	$(CARGO) fmt --check && \
+	$(CARGO) clippy -- -D warnings && \
+	$(CARGO) check --all-targets
 
 build:
 	$(CARGO) build --target $(TARGET)

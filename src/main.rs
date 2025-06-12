@@ -27,6 +27,6 @@ async fn main() -> Result<()> {
 
     let mut handler = CliHandler::new(cli.config).await?;
     handler.handle_command(cli.command).await?;
-    
+
     Ok(())
 }
