@@ -1,15 +1,15 @@
-use std::sync::Arc;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Result;
 use global_hotkey::{
-    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState, 
-    hotkey::{Code, HotKey, Modifiers}
+    hotkey::{Code, HotKey, Modifiers},
+    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-use crate::adapters::{HistoryManager, ClipboardProviderWrapper};
+use crate::adapters::{ClipboardProviderWrapper, HistoryManager};
 use crate::cli::history_picker::HistoryPicker;
 use crate::config::Config;
 use crate::sync::SyncEngine;
@@ -47,7 +47,7 @@ impl HotKeyManager {
     ) -> Result<Self> {
         let manager = GlobalHotKeyManager::new()?;
         let (event_sender, _) = broadcast::channel(100);
-        
+
         Ok(Self {
             manager,
             config,
@@ -68,10 +68,10 @@ impl HotKeyManager {
 
         // Cmd+Shift+V (or Ctrl+Shift+V on Linux) - Show clipboard history
         let history_hotkey = HotKey::new(
-            Some(if cfg!(target_os = "macos") { 
-                Modifiers::META | Modifiers::SHIFT 
-            } else { 
-                Modifiers::CONTROL | Modifiers::SHIFT 
+            Some(if cfg!(target_os = "macos") {
+                Modifiers::META | Modifiers::SHIFT
+            } else {
+                Modifiers::CONTROL | Modifiers::SHIFT
             }),
             Code::KeyV,
         );
@@ -79,10 +79,10 @@ impl HotKeyManager {
 
         // Cmd+Shift+S (or Ctrl+Shift+S on Linux) - Force sync
         let sync_hotkey = HotKey::new(
-            Some(if cfg!(target_os = "macos") { 
-                Modifiers::META | Modifiers::SHIFT 
-            } else { 
-                Modifiers::CONTROL | Modifiers::SHIFT 
+            Some(if cfg!(target_os = "macos") {
+                Modifiers::META | Modifiers::SHIFT
+            } else {
+                Modifiers::CONTROL | Modifiers::SHIFT
             }),
             Code::KeyS,
         );
@@ -90,10 +90,10 @@ impl HotKeyManager {
 
         // Cmd+Shift+C (or Ctrl+Shift+C on Linux) - Copy to secondary clipboard
         let copy_secondary_hotkey = HotKey::new(
-            Some(if cfg!(target_os = "macos") { 
-                Modifiers::META | Modifiers::SHIFT 
-            } else { 
-                Modifiers::CONTROL | Modifiers::SHIFT 
+            Some(if cfg!(target_os = "macos") {
+                Modifiers::META | Modifiers::SHIFT
+            } else {
+                Modifiers::CONTROL | Modifiers::SHIFT
             }),
             Code::KeyC,
         );
@@ -107,62 +107,64 @@ impl HotKeyManager {
         // For now, use a simple counter for hotkey ID mapping
         let hotkey_id = self.hotkeys.len() as u32;
         self.hotkeys.insert(hotkey_id, action.clone());
-        
+
         debug!("Registered hotkey {} for action {:?}", hotkey_id, action);
         Ok(())
     }
 
     pub async fn start_event_loop(&self) -> Result<()> {
         info!("Starting hotkey event loop");
-        
+
         let event_sender = self.event_sender.clone();
         let hotkeys = self.hotkeys.clone();
         let clipboard = Arc::clone(&self.clipboard);
         let history = Arc::clone(&self.history);
         let sync_engine = self.sync_engine.clone();
-        
+
         tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Handle::current();
-            
+
             loop {
                 if let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
                     if event.state == HotKeyState::Pressed {
                         if let Some(action) = hotkeys.get(&event.id) {
                             debug!("Hotkey pressed: {:?}", action);
-                            
+
                             let hotkey_event = HotKeyEvent {
                                 action: action.clone(),
                                 hotkey_id: event.id,
                             };
-                            
+
                             // Send event through broadcast channel
                             if let Err(e) = event_sender.send(hotkey_event.clone()) {
                                 warn!("Failed to broadcast hotkey event: {}", e);
                             }
-                            
+
                             // Execute action directly
                             let clipboard_clone = Arc::clone(&clipboard);
                             let history_clone = Arc::clone(&history);
                             let sync_engine_clone = sync_engine.clone();
-                            
+
                             rt.spawn(async move {
                                 if let Err(e) = Self::execute_action(
                                     &hotkey_event.action,
                                     clipboard_clone,
                                     history_clone,
                                     sync_engine_clone,
-                                ).await {
+                                )
+                                .await
+                                {
                                     error!("Failed to execute hotkey action: {}", e);
                                 }
                             });
                         }
                     }
                 }
-                
+
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         });
-        
+
         Ok(())
     }
 
@@ -198,11 +200,12 @@ impl HotKeyManager {
                 if let Ok(content) = clipboard.get_text().await {
                     // Store in secondary clipboard slot
                     // This would require extending the clipboard provider
-                    info!("Copied to secondary clipboard: {}", 
-                        if content.len() > 50 { 
-                            format!("{}...", &content[..50]) 
-                        } else { 
-                            content 
+                    info!(
+                        "Copied to secondary clipboard: {}",
+                        if content.len() > 50 {
+                            format!("{}...", &content[..50])
+                        } else {
+                            content
                         }
                     );
                 }
@@ -213,7 +216,7 @@ impl HotKeyManager {
                 info!("Paste from secondary not yet implemented");
             }
         }
-        
+
         Ok(())
     }
 
@@ -223,7 +226,7 @@ impl HotKeyManager {
 
     pub fn unregister_all(&mut self) -> Result<()> {
         info!("Unregistering all hotkeys");
-        
+
         // For now, just clear the mapping since we don't track individual hotkeys properly
         self.hotkeys.clear();
         Ok(())
@@ -246,10 +249,16 @@ mod tests {
     #[tokio::test]
     async fn test_hotkey_manager_creation() {
         let temp_dir = TempDir::new().unwrap();
-        let config = Arc::new(Config::default_with_path(temp_dir.path().join("config.toml")));
+        let config = Arc::new(Config::default_with_path(
+            temp_dir.path().join("config.toml"),
+        ));
         let clipboard = Arc::new(get_clipboard_provider().await.unwrap());
-        let history = Arc::new(HistoryManager::new(&temp_dir.path().join("history.db")).await.unwrap());
-        
+        let history = Arc::new(
+            HistoryManager::new(&temp_dir.path().join("history.db"))
+                .await
+                .unwrap(),
+        );
+
         let result = HotKeyManager::new(config, clipboard, history);
         assert!(result.is_ok());
     }
@@ -258,7 +267,7 @@ mod tests {
     fn test_hotkey_action_clone() {
         let action = HotKeyAction::ShowHistory;
         let cloned = action.clone();
-        
+
         matches!(cloned, HotKeyAction::ShowHistory);
     }
 }

@@ -569,4 +569,4 @@ nnoremap <leader>p :r !clipsync paste<CR>
 **Need more help?** 
 - Check the [Troubleshooting Guide](TROUBLESHOOTING.md)
 - See [Configuration Reference](CONFIG.md) for detailed settings
-- Visit [GitHub Issues](https://github.com/yourusername/clipsync/issues) for community support
+- Visit [GitHub Issues](https://github.com/lancekrogers/clipsync/issues) for community support

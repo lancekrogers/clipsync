@@ -100,16 +100,17 @@ impl ServiceInfo {
         info.port = port;
         info
     }
-    
+
     /// Add SSH fingerprint to TXT data
     pub fn with_ssh_fingerprint(mut self, fingerprint: String) -> Self {
         self.txt_data.push(("ssh_fp".to_string(), fingerprint));
         self
     }
-    
+
     /// Add capabilities to TXT data
     pub fn with_capabilities(mut self, capabilities: Vec<String>) -> Self {
-        self.txt_data.push(("caps".to_string(), capabilities.join(",")));
+        self.txt_data
+            .push(("caps".to_string(), capabilities.join(",")));
         self
     }
 }
@@ -127,35 +128,35 @@ impl PeerInfo {
             .find(|(k, _)| k == "id")
             .and_then(|(_, v)| Uuid::parse_str(v).ok())
             .unwrap_or_else(Uuid::new_v4);
-            
+
         let version = txt_data
             .iter()
             .find(|(k, _)| k == "version")
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| "unknown".to_string());
-            
+
         let platform = txt_data
             .iter()
             .find(|(k, _)| k == "platform")
             .map(|(_, v)| v.clone())
             .unwrap_or_else(|| "unknown".to_string());
-            
+
         let ssh_fingerprint = txt_data
             .iter()
             .find(|(k, _)| k == "ssh_fp")
             .map(|(_, v)| v.clone());
-            
+
         let capabilities = txt_data
             .iter()
             .find(|(k, _)| k == "caps")
             .map(|(_, v)| v.split(',').map(String::from).collect())
             .unwrap_or_default();
-            
+
         let device_name = txt_data
             .iter()
             .find(|(k, _)| k == "device")
             .map(|(_, v)| v.clone());
-            
+
         Self {
             id,
             name,
@@ -171,12 +172,12 @@ impl PeerInfo {
             last_seen: chrono::Utc::now().timestamp(),
         }
     }
-    
+
     /// Check if peer supports a specific capability
     pub fn has_capability(&self, capability: &str) -> bool {
         self.metadata.capabilities.iter().any(|c| c == capability)
     }
-    
+
     /// Get the best address to connect to (prefer IPv4)
     pub fn best_address(&self) -> Option<SocketAddr> {
         // First try IPv4

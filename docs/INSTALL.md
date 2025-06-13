@@ -13,7 +13,7 @@ brew install clipsync
 
 **Direct Download**
 ```bash
-curl -L https://github.com/yourusername/clipsync/releases/latest/download/clipsync-macos-x86_64.tar.gz | tar xz
+curl -L https://github.com/lancekrogers/clipsync/releases/latest/download/clipsync-macos-x86_64.tar.gz | tar xz
 sudo mv clipsync /usr/local/bin/
 ```
 
@@ -28,13 +28,13 @@ paru -S clipsync
 
 **Ubuntu/Debian**
 ```bash
-curl -L https://github.com/yourusername/clipsync/releases/latest/download/clipsync-linux-x86_64.deb -o clipsync.deb
+curl -L https://github.com/lancekrogers/clipsync/releases/latest/download/clipsync-linux-x86_64.deb -o clipsync.deb
 sudo dpkg -i clipsync.deb
 ```
 
 **Direct Download**
 ```bash
-curl -L https://github.com/yourusername/clipsync/releases/latest/download/clipsync-linux-x86_64.tar.gz | tar xz
+curl -L https://github.com/lancekrogers/clipsync/releases/latest/download/clipsync-linux-x86_64.tar.gz | tar xz
 sudo mv clipsync /usr/local/bin/
 ```
 
@@ -85,7 +85,7 @@ sudo pacman -S libx11 libxcb openssl
 
 2. **Install ClipSync**:
    ```bash
-   brew tap yourusername/clipsync
+   brew tap lancekrogers/clipsync
    brew install clipsync
    ```
 
@@ -104,7 +104,7 @@ sudo pacman -S libx11 libxcb openssl
 1. **Download the binary**:
    ```bash
    cd ~/Downloads
-   curl -L https://github.com/yourusername/clipsync/releases/latest/download/clipsync-macos-universal.tar.gz -o clipsync.tar.gz
+   curl -L https://github.com/lancekrogers/clipsync/releases/latest/download/clipsync-macos-universal.tar.gz -o clipsync.tar.gz
    ```
 
 2. **Extract and install**:
@@ -145,7 +145,7 @@ makepkg -si
 **Ubuntu/Debian**:
 ```bash
 # Download and install .deb package
-wget https://github.com/yourusername/clipsync/releases/latest/download/clipsync_1.0.0_amd64.deb
+wget https://github.com/lancekrogers/clipsync/releases/latest/download/clipsync_1.0.0_amd64.deb
 sudo dpkg -i clipsync_1.0.0_amd64.deb
 
 # Fix any dependency issues
@@ -155,7 +155,7 @@ sudo apt-get install -f
 **Fedora/RHEL**:
 ```bash
 # Download and install .rpm package
-wget https://github.com/yourusername/clipsync/releases/latest/download/clipsync-1.0.0-1.x86_64.rpm
+wget https://github.com/lancekrogers/clipsync/releases/latest/download/clipsync-1.0.0-1.x86_64.rpm
 sudo rpm -i clipsync-1.0.0-1.x86_64.rpm
 ```
 
@@ -176,7 +176,7 @@ sudo rpm -i clipsync-1.0.0-1.x86_64.rpm
 
 2. **Download and install binary**:
    ```bash
-   curl -L https://github.com/yourusername/clipsync/releases/latest/download/clipsync-linux-x86_64.tar.gz | tar xz
+   curl -L https://github.com/lancekrogers/clipsync/releases/latest/download/clipsync-linux-x86_64.tar.gz | tar xz
    sudo mv clipsync /usr/local/bin/
    sudo chmod +x /usr/local/bin/clipsync
    ```
@@ -233,7 +233,7 @@ source ~/.cargo/env
 
 1. **Clone the repository**:
    ```bash
-   git clone https://github.com/yourusername/clipsync.git
+   git clone https://github.com/lancekrogers/clipsync.git
    cd clipsync
    ```
 
@@ -443,8 +443,8 @@ If you encounter issues:
 2. **Run diagnostics**: `clipsync doctor`
 3. **Validate config**: `clipsync config validate`
 4. **Check the [Troubleshooting Guide](TROUBLESHOOTING.md)**
-5. **Search [existing issues](https://github.com/yourusername/clipsync/issues)**
-6. **Create a [new issue](https://github.com/yourusername/clipsync/issues/new)**
+5. **Search [existing issues](https://github.com/lancekrogers/clipsync/issues)**
+6. **Create a [new issue](https://github.com/lancekrogers/clipsync/issues/new)**
 
 ## 🔄 Updating ClipSync
 

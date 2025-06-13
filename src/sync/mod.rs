@@ -9,10 +9,14 @@ use tokio::time::{interval, sleep};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
-use crate::adapters::{ClipboardData, PeerDiscovery, Peer, HistoryManager, ClipboardEntry, ClipboardProviderWrapper};
+use crate::adapters::{
+    ClipboardData, ClipboardEntry, ClipboardProviderWrapper, HistoryManager, Peer, PeerDiscovery,
+};
 use crate::config::Config;
-use crate::transport::{TransportManager, Message, MessageType, MessagePayload, ClipboardData as TransportClipboardData};
 use crate::transport::protocol::ClipboardFormat;
+use crate::transport::{
+    ClipboardData as TransportClipboardData, Message, MessagePayload, MessageType, TransportManager,
+};
 
 #[derive(Debug, Clone)]
 pub struct SyncEvent {
@@ -42,7 +46,7 @@ impl SyncEngine {
         transport: Arc<TransportManager>,
     ) -> Self {
         let (event_sender, _) = broadcast::channel(100);
-        
+
         Self {
             config: Arc::clone(&config),
             clipboard,
@@ -80,19 +84,19 @@ impl SyncEngine {
         let transport = Arc::clone(&self.transport);
 
         discovery.start().await?;
-        
+
         let mut peer_updates = discovery.subscribe().await?;
-        
+
         loop {
             match peer_updates.recv().await {
                 Ok(peer) => {
                     info!("Discovered peer: {} at {}", peer.id, peer.address);
-                    
+
                     if let Err(e) = self.connect_to_peer(&peer).await {
                         warn!("Failed to connect to peer {}: {}", peer.id, e);
                         continue;
                     }
-                    
+
                     peers.write().await.insert(peer.id, peer);
                 }
                 Err(e) => {
@@ -105,7 +109,7 @@ impl SyncEngine {
 
     async fn connect_to_peer(&self, peer: &Peer) -> Result<()> {
         let _connection = self.transport.connect(&peer.address).await?;
-        
+
         // TODO: Implement proper authentication
         // For now, just log the connection
         info!("Connected to peer {} at {}", peer.id, peer.address);
@@ -118,20 +122,20 @@ impl SyncEngine {
         let event_sender = self.event_sender.clone();
         let last_update = Arc::clone(&self.last_local_update);
         let config = Arc::clone(&self.config);
-        
+
         let mut interval = interval(Duration::from_millis(200));
         let mut last_content_hash = None;
-        
+
         loop {
             interval.tick().await;
-            
+
             match clipboard.get_text().await {
                 Ok(content) => {
                     let content_hash = format!("{:x}", md5::compute(&content));
-                    
+
                     if Some(&content_hash) != last_content_hash.as_ref() {
                         debug!("Clipboard content changed locally");
-                        
+
                         let entry = ClipboardEntry {
                             id: Uuid::new_v4(),
                             content: ClipboardData::Text(content),
@@ -139,21 +143,21 @@ impl SyncEngine {
                             source: config.node_id(),
                             checksum: content_hash.clone(),
                         };
-                        
+
                         if let Err(e) = history.add_entry(&entry).await {
                             error!("Failed to save clipboard entry: {}", e);
                         }
-                        
+
                         let sync_event = SyncEvent {
                             timestamp: entry.timestamp,
                             source_peer: config.node_id(),
                             entry,
                         };
-                        
+
                         if let Err(e) = event_sender.send(sync_event) {
                             warn!("Failed to broadcast sync event: {}", e);
                         }
-                        
+
                         *last_update.write().await = SystemTime::now();
                         last_content_hash = Some(content_hash);
                     }
@@ -169,7 +173,7 @@ impl SyncEngine {
         let _transport = Arc::clone(&self.transport);
         let _peers = Arc::clone(&self.peers);
         let mut event_receiver = self.event_sender.subscribe();
-        
+
         loop {
             match event_receiver.recv().await {
                 Ok(sync_event) => {
@@ -188,13 +192,13 @@ impl SyncEngine {
                 }
             }
         }
-        
+
         Ok(())
     }
 
     async fn broadcast_to_peers(&self, event: &SyncEvent) {
         let peers = self.peers.read().await;
-        
+
         let clipboard_data = match &event.entry.content {
             ClipboardData::Text(text) => TransportClipboardData {
                 format: ClipboardFormat::Text,
@@ -204,12 +208,12 @@ impl SyncEngine {
                 metadata: std::collections::HashMap::new(),
             },
         };
-        
+
         let message = Message::new(
             MessageType::ClipboardData,
             MessagePayload::Clipboard(clipboard_data),
         );
-        
+
         for peer in peers.values() {
             if let Err(e) = self.transport.send_to_peer(peer.id, &message).await {
                 warn!("Failed to send sync event to peer {}: {}", peer.id, e);
@@ -219,12 +223,12 @@ impl SyncEngine {
 
     async fn handle_remote_sync_event(&self, event: &SyncEvent) {
         debug!("Handling remote sync event from peer {}", event.source_peer);
-        
+
         if let Err(e) = self.resolve_conflict(event).await {
             error!("Failed to resolve sync conflict: {}", e);
             return;
         }
-        
+
         match &event.entry.content {
             ClipboardData::Text(text) => {
                 if let Err(e) = self.clipboard.set_text(text).await {
@@ -232,7 +236,7 @@ impl SyncEngine {
                 }
             }
         }
-        
+
         if let Err(e) = self.history.add_entry(&event.entry).await {
             error!("Failed to save remote clipboard entry: {}", e);
         }
@@ -242,28 +246,32 @@ impl SyncEngine {
         let last_local = *self.last_local_update.read().await;
         let remote_timestamp = remote_event.timestamp.timestamp() as u64;
         let local_timestamp = last_local.duration_since(UNIX_EPOCH)?.as_secs();
-        
+
         if remote_timestamp <= local_timestamp {
             debug!("Remote event is older than local, ignoring");
             return Ok(());
         }
-        
-        if let Some(existing) = self.history.get_by_checksum(&remote_event.entry.checksum).await? {
+
+        if let Some(existing) = self
+            .history
+            .get_by_checksum(&remote_event.entry.checksum)
+            .await?
+        {
             if existing.timestamp >= remote_event.entry.timestamp {
                 debug!("Already have newer version of this content");
                 return Ok(());
             }
         }
-        
+
         Ok(())
     }
 
     async fn start_transport_handler(&self) -> Result<()> {
         let transport = Arc::clone(&self.transport);
         let event_sender = self.event_sender.clone();
-        
+
         let mut message_receiver = transport.subscribe().await?;
-        
+
         loop {
             match message_receiver.recv().await {
                 Ok(message) => {
@@ -278,13 +286,16 @@ impl SyncEngine {
                                             continue;
                                         }
                                     }
-                                },
+                                }
                                 _ => {
-                                    debug!("Unsupported clipboard format: {:?}", clipboard_data.format);
+                                    debug!(
+                                        "Unsupported clipboard format: {:?}",
+                                        clipboard_data.format
+                                    );
                                     continue;
                                 }
                             };
-                            
+
                             let entry = ClipboardEntry {
                                 id: Uuid::new_v4(),
                                 content,
@@ -292,13 +303,13 @@ impl SyncEngine {
                                 source: Uuid::new_v4(), // TODO: extract from message context
                                 checksum: clipboard_data.checksum,
                             };
-                            
+
                             let sync_event = SyncEvent {
                                 timestamp: message.timestamp,
                                 source_peer: entry.source,
                                 entry,
                             };
-                            
+
                             if let Err(e) = event_sender.send(sync_event) {
                                 warn!("Failed to broadcast received sync event: {}", e);
                             }
@@ -326,7 +337,7 @@ impl SyncEngine {
 
     pub async fn force_sync(&self) -> Result<()> {
         info!("Forcing clipboard sync");
-        
+
         if let Ok(content) = self.clipboard.get_text().await {
             let checksum = format!("{:x}", md5::compute(&content));
             let entry = ClipboardEntry {
@@ -336,16 +347,16 @@ impl SyncEngine {
                 source: self.config.node_id(),
                 checksum,
             };
-            
+
             let sync_event = SyncEvent {
                 timestamp: entry.timestamp,
                 source_peer: self.config.node_id(),
                 entry,
             };
-            
+
             self.event_sender.send(sync_event)?;
         }
-        
+
         Ok(())
     }
 }

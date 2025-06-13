@@ -3,10 +3,10 @@
 pub mod database;
 pub mod encryption;
 
-use std::path::Path;
 use anyhow::Result;
-use uuid::Uuid;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
+use uuid::Uuid;
 
 /// Content to be stored in clipboard history
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,30 +53,30 @@ impl ClipboardHistory {
     pub async fn new(db_path: &Path) -> Result<Self> {
         let encryptor = encryption::Encryptor::new().await?;
         let db = database::HistoryDatabase::new(db_path, encryptor.get_key()).await?;
-        
+
         Ok(Self { db, encryptor })
     }
-    
+
     /// Add new content to history
     pub async fn add(&self, content: &ClipboardContent) -> Result<()> {
         self.db.insert(content, &self.encryptor).await
     }
-    
+
     /// Get the most recent entries from history
     pub async fn get_recent(&self, count: usize) -> Result<Vec<HistoryEntry>> {
         self.db.get_recent(count, &self.encryptor).await
     }
-    
+
     /// Get entry by index (0 = most recent)
     pub async fn get_by_index(&self, index: u8) -> Result<HistoryEntry> {
         self.db.get_by_index(index, &self.encryptor).await
     }
-    
+
     /// Search text entries for matching content
     pub async fn search(&self, query: &str) -> Result<Vec<HistoryEntry>> {
         self.db.search(query, &self.encryptor).await
     }
-    
+
     /// Clear all history entries
     pub async fn clear(&self) -> Result<()> {
         self.db.clear().await
