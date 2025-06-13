@@ -62,6 +62,7 @@ async fn test_clipboard_size_limit() {
 
 #[tokio::test]
 #[cfg(feature = "integration-tests")]
+#[ignore = "Clipboard watch test requires system clipboard access"]
 async fn test_clipboard_watch() {
     let provider = create_provider().await.unwrap();
     let mut watcher = provider.watch().await.unwrap();
