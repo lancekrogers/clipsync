@@ -627,7 +627,7 @@ impl Connection for MockConnection {
 #[ignore = "Mock connection test has channel issues - needs redesign"]
 async fn test_mock_connection() {
     use tokio::time::{timeout, Duration};
-    
+
     let (mut connection, recv_tx, mut send_rx) = MockConnection::new();
 
     // Test sending a message
