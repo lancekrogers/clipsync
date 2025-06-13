@@ -332,6 +332,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore = "Requires macOS clipboard access - run with --ignored flag"]
     async fn test_macos_clipboard_text() {
         let clipboard = MacOSClipboard::new().unwrap();
 
