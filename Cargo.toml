@@ -126,6 +126,4 @@ path = "src/main.rs"
 name = "clipsync"
 path = "src/lib.rs"
 
-[[bench]]
-name = "encryption_bench"
-harness = false
+# Benchmarks removed temporarily

@@ -1,0 +1,25 @@
+{
+  "error_codes": {
+    "0": "Success",
+    "1": "General error",
+    "2": "Configuration error",
+    "3": "Permission denied",
+    "4": "Network error",
+    "5": "Authentication failed",
+    "6": "Service already running",
+    "7": "Service not running",
+    "8": "Invalid clipboard content",
+    "9": "Database error",
+    "10": "Platform not supported",
+    "11": "Dependency missing",
+    "12": "Installation failed",
+    "13": "Uninstall failed",
+    "14": "Update failed",
+    "15": "Invalid command line arguments",
+    "16": "SSH key error",
+    "17": "Encryption error",
+    "18": "Discovery service error",
+    "19": "WebSocket connection error",
+    "20": "Timeout error"
+  }
+}

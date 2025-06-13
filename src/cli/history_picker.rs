@@ -9,7 +9,7 @@ use crossterm::{
 };
 use tracing::debug;
 
-use crate::adapters::{HistoryManager, ClipboardEntry};
+use crate::adapters::{ClipboardEntry, HistoryManager};
 
 pub struct HistoryPicker {
     history: Arc<HistoryManager>,
@@ -30,7 +30,7 @@ impl HistoryPicker {
 
     pub async fn show(&mut self) -> Result<()> {
         self.load_entries().await?;
-        
+
         if self.entries.is_empty() {
             println!("No clipboard history found");
             return Ok(());
@@ -79,18 +79,22 @@ impl HistoryPicker {
         println!("ClipSync History Picker");
         println!("======================");
         println!("Use ↑/↓ to navigate, Enter to select, Esc to exit");
-        
+
         if !self.search_term.is_empty() {
             println!("Search: {}", self.search_term);
         }
-        
+
         println!();
 
         let visible_entries = self.get_filtered_entries();
-        
+
         for (i, entry) in visible_entries.iter().enumerate() {
-            let prefix = if i == self.selected_index { "► " } else { "  " };
-            
+            let prefix = if i == self.selected_index {
+                "► "
+            } else {
+                "  "
+            };
+
             let content_preview = match &entry.content {
                 crate::adapters::ClipboardData::Text(text) => {
                     let preview = if text.len() > 80 {
@@ -98,13 +102,14 @@ impl HistoryPicker {
                     } else {
                         text.clone()
                     };
-                    
+
                     // Replace newlines with spaces for display
                     preview.replace('\n', " ").replace('\r', "")
                 }
             };
 
-            println!("{}{} | {}", 
+            println!(
+                "{}{} | {}",
                 prefix,
                 entry.timestamp.format("%m-%d %H:%M"),
                 content_preview
@@ -121,12 +126,10 @@ impl HistoryPicker {
         } else {
             self.entries
                 .iter()
-                .filter(|entry| {
-                    match &entry.content {
-                        crate::adapters::ClipboardData::Text(text) => {
-                            text.to_lowercase().contains(&self.search_term.to_lowercase())
-                        }
-                    }
+                .filter(|entry| match &entry.content {
+                    crate::adapters::ClipboardData::Text(text) => text
+                        .to_lowercase()
+                        .contains(&self.search_term.to_lowercase()),
                 })
                 .collect()
         }
@@ -165,7 +168,7 @@ impl HistoryPicker {
 
     async fn copy_entry_to_clipboard(&self, entry: &ClipboardEntry) -> Result<()> {
         debug!("Copying entry {} to clipboard", entry.id);
-        
+
         // In a real implementation, we would get the clipboard provider here
         // For now, we'll just print the selection
         match &entry.content {
@@ -174,7 +177,7 @@ impl HistoryPicker {
                 println!("{}", text);
             }
         }
-        
+
         Ok(())
     }
 }

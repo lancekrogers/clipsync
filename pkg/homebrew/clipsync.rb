@@ -1,25 +1,25 @@
 class Clipsync < Formula
   desc "Cross-platform clipboard synchronization service"
-  homepage "https://github.com/yourusername/clipsync"
+  homepage "https://github.com/lancekrogers/clipsync"
   version "0.1.0"
   license any_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/yourusername/clipsync/releases/download/v#{version}/clipsync-#{version}-x86_64-apple-darwin.tar.gz"
+      url "https://github.com/lancekrogers/clipsync/releases/download/v#{version}/clipsync-#{version}-x86_64-apple-darwin.tar.gz"
       sha256 "PLACEHOLDER_SHA256_INTEL"
     else
-      url "https://github.com/yourusername/clipsync/releases/download/v#{version}/clipsync-#{version}-aarch64-apple-darwin.tar.gz"
+      url "https://github.com/lancekrogers/clipsync/releases/download/v#{version}/clipsync-#{version}-aarch64-apple-darwin.tar.gz"
       sha256 "PLACEHOLDER_SHA256_ARM"
     end
   end
 
   on_linux do
     if Hardware::CPU.intel?
-      url "https://github.com/yourusername/clipsync/releases/download/v#{version}/clipsync-#{version}-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/lancekrogers/clipsync/releases/download/v#{version}/clipsync-#{version}-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "PLACEHOLDER_SHA256_LINUX_INTEL"
     else
-      url "https://github.com/yourusername/clipsync/releases/download/v#{version}/clipsync-#{version}-aarch64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/lancekrogers/clipsync/releases/download/v#{version}/clipsync-#{version}-aarch64-unknown-linux-gnu.tar.gz"
       sha256 "PLACEHOLDER_SHA256_LINUX_ARM"
     end
   end
