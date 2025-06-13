@@ -1,8 +1,8 @@
 //! Wayland clipboard implementation
 
 use super::{
-    ClipboardContent, ClipboardError, ClipboardEvent, ClipboardProvider,
-    ClipboardWatcher, MAX_CLIPBOARD_SIZE,
+    ClipboardContent, ClipboardError, ClipboardEvent, ClipboardProvider, ClipboardWatcher,
+    MAX_CLIPBOARD_SIZE,
 };
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
@@ -11,8 +11,8 @@ use tokio::sync::mpsc;
 use tokio::time::interval;
 use wayland_client::{
     protocol::{
-        wl_data_device_manager::{self, WlDataDeviceManager},
         wl_data_device::{self, WlDataDevice},
+        wl_data_device_manager::{self, WlDataDeviceManager},
         wl_data_offer::{self, WlDataOffer},
         wl_data_source::{self, WlDataSource},
         wl_seat::{self, WlSeat},
@@ -38,9 +38,10 @@ pub struct WaylandClipboard {
 impl WaylandClipboard {
     /// Create a new Wayland clipboard provider
     pub async fn new() -> Result<Self, ClipboardError> {
-        let connection = Connection::connect_to_env()
-            .map_err(|e| ClipboardError::Platform(format!("Failed to connect to Wayland: {}", e)))?;
-        
+        let connection = Connection::connect_to_env().map_err(|e| {
+            ClipboardError::Platform(format!("Failed to connect to Wayland: {}", e))
+        })?;
+
         let state = Arc::new(Mutex::new(WaylandState {
             data_device_manager: None,
             data_device: None,
@@ -48,59 +49,60 @@ impl WaylandClipboard {
             current_offer: None,
             clipboard_content: Arc::new(Mutex::new(None)),
         }));
-        
+
         // Initialize Wayland objects
         let display = connection.display();
         let mut event_queue = connection.new_event_queue();
         let qhandle = event_queue.handle();
-        
+
         // Get registry and bind required globals
         let registry = display.get_registry(&qhandle, ());
-        
+
         // Process initial events to get globals
-        event_queue.blocking_dispatch(&mut ())
+        event_queue
+            .blocking_dispatch(&mut ())
             .map_err(|e| ClipboardError::Platform(format!("Failed to dispatch events: {}", e)))?;
-        
-        Ok(Self {
-            connection,
-            state,
-        })
+
+        Ok(Self { connection, state })
     }
-    
+
     /// Read clipboard content
     async fn read_clipboard(&self) -> Result<Option<Vec<u8>>, ClipboardError> {
         let state = self.state.lock().unwrap();
         let content = state.clipboard_content.lock().unwrap();
         Ok(content.clone())
     }
-    
+
     /// Write clipboard content
     async fn write_clipboard(&self, data: Vec<u8>) -> Result<(), ClipboardError> {
         let mut state = self.state.lock().unwrap();
-        
+
         if let (Some(manager), Some(device)) = (&state.data_device_manager, &state.data_device) {
             let mut event_queue = self.connection.new_event_queue();
             let qhandle = event_queue.handle();
-            
+
             // Create data source
             let source = manager.create_data_source(&qhandle, ());
-            
+
             // Offer text/plain mime type
             source.offer("text/plain".to_string());
-            
+
             // Set selection
             device.set_selection(Some(&source), 0);
-            
+
             // Store the data
             *state.clipboard_content.lock().unwrap() = Some(data);
-            
+
             // Commit changes
-            self.connection.flush()
-                .map_err(|e| ClipboardError::Platform(format!("Failed to flush connection: {}", e)))?;
-            
+            self.connection.flush().map_err(|e| {
+                ClipboardError::Platform(format!("Failed to flush connection: {}", e))
+            })?;
+
             Ok(())
         } else {
-            Err(ClipboardError::Platform("Wayland not properly initialized".to_string()))
+            Err(ClipboardError::Platform(
+                "Wayland not properly initialized".to_string(),
+            ))
         }
     }
 }
@@ -123,7 +125,7 @@ impl ClipboardProvider for WaylandClipboard {
             Err(ClipboardError::NoContent)
         }
     }
-    
+
     async fn set_content(&self, content: &ClipboardContent) -> Result<(), ClipboardError> {
         // Check size limit
         if content.size() > MAX_CLIPBOARD_SIZE {
@@ -132,55 +134,56 @@ impl ClipboardProvider for WaylandClipboard {
                 max: MAX_CLIPBOARD_SIZE,
             });
         }
-        
+
         // For now, only support text content on Wayland
         if !content.is_text() {
             return Err(ClipboardError::UnsupportedType(content.mime_type.clone()));
         }
-        
+
         self.write_clipboard(content.data.clone()).await
     }
-    
+
     async fn clear(&self) -> Result<(), ClipboardError> {
         let state = self.state.lock().unwrap();
-        
+
         if let Some(device) = &state.data_device {
             device.set_selection(None, 0);
             *state.clipboard_content.lock().unwrap() = None;
-            
-            self.connection.flush()
-                .map_err(|e| ClipboardError::Platform(format!("Failed to flush connection: {}", e)))?;
+
+            self.connection.flush().map_err(|e| {
+                ClipboardError::Platform(format!("Failed to flush connection: {}", e))
+            })?;
         }
-        
+
         Ok(())
     }
-    
+
     fn name(&self) -> &str {
         "Wayland"
     }
-    
+
     async fn watch(&self) -> Result<ClipboardWatcher, ClipboardError> {
         let (tx, rx) = mpsc::channel(100);
         let state = Arc::clone(&self.state);
         let connection = self.connection.clone();
-        
+
         let handle = tokio::spawn(async move {
             let mut last_content: Option<Vec<u8>> = None;
             let mut ticker = interval(Duration::from_millis(200));
-            
+
             loop {
                 ticker.tick().await;
-                
+
                 // Check for clipboard changes
                 let current_content = {
                     let state = state.lock().unwrap();
                     state.clipboard_content.lock().unwrap().clone()
                 };
-                
+
                 if current_content != last_content {
                     if let Some(data) = &current_content {
                         last_content = current_content;
-                        
+
                         let content = if let Ok(text) = String::from_utf8(data.clone()) {
                             ClipboardContent::text(text)
                         } else {
@@ -190,12 +193,12 @@ impl ClipboardProvider for WaylandClipboard {
                                 timestamp: super::current_timestamp(),
                             }
                         };
-                        
+
                         let event = ClipboardEvent {
                             content,
                             selection: None, // Wayland doesn't have selections like X11
                         };
-                        
+
                         if tx.send(event).await.is_err() {
                             break;
                         }
@@ -203,7 +206,7 @@ impl ClipboardProvider for WaylandClipboard {
                 }
             }
         });
-        
+
         Ok(ClipboardWatcher::new(rx, handle))
     }
 }
@@ -310,7 +313,7 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_wayland_clipboard_name() {
         // We can't easily test Wayland functionality without a Wayland compositor

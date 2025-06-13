@@ -3,7 +3,7 @@ Version:        0.1.0
 Release:        1%{?dist}
 Summary:        Cross-platform clipboard synchronization service
 License:        MIT OR Apache-2.0
-URL:            https://github.com/yourusername/clipsync
+URL:            https://github.com/lancekrogers/clipsync
 Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  systemd-rpm-macros

@@ -894,8 +894,8 @@ ERROR Database error: disk full
 ### Self-Service Options
 
 1. **Run diagnostics:** `clipsync doctor`
-2. **Check documentation:** [GitHub Wiki](https://github.com/yourusername/clipsync/wiki)
-3. **Search issues:** [GitHub Issues](https://github.com/yourusername/clipsync/issues)
+2. **Check documentation:** [GitHub Wiki](https://github.com/lancekrogers/clipsync/wiki)
+3. **Search issues:** [GitHub Issues](https://github.com/lancekrogers/clipsync/issues)
 
 ### Community Support
 
@@ -905,8 +905,8 @@ ERROR Database error: disk full
 
 ### Professional Support
 
-1. **Bug Reports:** [Create an Issue](https://github.com/yourusername/clipsync/issues/new)
-2. **Feature Requests:** [Request Feature](https://github.com/yourusername/clipsync/issues/new)
+1. **Bug Reports:** [Create an Issue](https://github.com/lancekrogers/clipsync/issues/new)
+2. **Feature Requests:** [Request Feature](https://github.com/lancekrogers/clipsync/issues/new)
 3. **Security Issues:** Email security@clipsync.dev
 
 ### Information to Include

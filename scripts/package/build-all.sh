@@ -149,7 +149,7 @@ brew install clipsync
 ### Linux
 \`\`\`bash
 # Universal installer
-curl -fsSL https://raw.githubusercontent.com/yourusername/clipsync/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/lancekrogers/clipsync/main/scripts/install.sh | bash
 
 # Debian/Ubuntu
 sudo dpkg -i clipsync_$VERSION_amd64.deb

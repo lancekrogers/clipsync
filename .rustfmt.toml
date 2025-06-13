@@ -1,0 +1,8 @@
+# Rustfmt configuration
+edition = "2021"
+
+# Use field init shorthand when possible
+use_field_init_shorthand = true
+
+# Use the try operator (?) instead of try!
+use_try_shorthand = true

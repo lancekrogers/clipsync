@@ -174,7 +174,7 @@ To install ClipSync:
 3. ClipSync will start automatically
 
 For more information, visit:
-https://github.com/yourusername/clipsync
+https://github.com/lancekrogers/clipsync
 EOF
     
     # Try to use create-dmg if available

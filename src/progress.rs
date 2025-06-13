@@ -31,22 +31,23 @@ impl ProgressIndicator {
     /// Start showing the progress indicator
     pub async fn start(&mut self) {
         self.show_initial_message();
-        
+
         // Start async spinner task
         let message = self.message.clone();
         let spinner_chars = self.spinner_chars.clone();
-        
+
         tokio::spawn(async move {
             let mut char_index = 0;
             loop {
                 // Update spinner
-                print!("\r{} {} ({:.1}s)", 
-                    spinner_chars[char_index], 
+                print!(
+                    "\r{} {} ({:.1}s)",
+                    spinner_chars[char_index],
                     message,
                     Instant::now().duration_since(Instant::now()).as_secs_f32()
                 );
                 io::stdout().flush().unwrap_or(());
-                
+
                 char_index = (char_index + 1) % spinner_chars.len();
                 sleep(Duration::from_millis(100)).await;
             }
@@ -69,10 +70,9 @@ impl ProgressIndicator {
     fn show_current_progress(&self) {
         let elapsed = self.start_time.elapsed().as_secs_f32();
         if self.show_spinner {
-            print!("\r{} {} ({:.1}s)", 
-                self.spinner_chars[self.current_char], 
-                self.message, 
-                elapsed
+            print!(
+                "\r{} {} ({:.1}s)",
+                self.spinner_chars[self.current_char], self.message, elapsed
             );
         } else {
             print!("\r{} ({:.1}s)", self.message, elapsed);
@@ -154,13 +154,9 @@ impl ProgressBar {
             None
         };
 
-        print!("\r{} [{}] {}% ({}/{}) {:.1}s", 
-            self.message,
-            bar,
-            percentage,
-            self.current,
-            self.total,
-            elapsed
+        print!(
+            "\r{} [{}] {}% ({}/{}) {:.1}s",
+            self.message, bar, percentage, self.current, self.total, elapsed
         );
 
         if let Some(eta) = eta {
@@ -182,18 +178,18 @@ impl ProgressBar {
 macro_rules! with_progress {
     ($message:expr, $operation:expr) => {{
         use $crate::progress::ProgressIndicator;
-        
+
         let mut progress = ProgressIndicator::new($message);
         print!("{} ", $message);
         std::io::Write::flush(&mut std::io::stdout()).unwrap_or(());
-        
+
         let result = $operation.await;
-        
+
         match &result {
             Ok(_) => progress.success("completed"),
             Err(e) => progress.error(&format!("failed: {}", e)),
         }
-        
+
         result
     }};
 }
@@ -247,10 +243,11 @@ impl ConnectionProgress {
     /// Show current step
     fn show_current_step(&self) {
         let elapsed = self.start_time.elapsed().as_secs_f32();
-        println!("({:.1}s) Step {}/{}: {}", 
+        println!(
+            "({:.1}s) Step {}/{}: {}",
             elapsed,
-            self.current_step + 1, 
-            self.steps.len(), 
+            self.current_step + 1,
+            self.steps.len(),
             self.steps[self.current_step]
         );
     }
@@ -258,13 +255,19 @@ impl ConnectionProgress {
     /// Complete successfully
     pub fn success(&self, device_name: &str) {
         let elapsed = self.start_time.elapsed().as_secs_f32();
-        println!("✅ Successfully connected to '{}' in {:.1}s", device_name, elapsed);
+        println!(
+            "✅ Successfully connected to '{}' in {:.1}s",
+            device_name, elapsed
+        );
     }
 
     /// Complete with error
     pub fn error(&self, error_message: &str) {
         let elapsed = self.start_time.elapsed().as_secs_f32();
-        println!("❌ Connection failed after {:.1}s: {}", elapsed, error_message);
+        println!(
+            "❌ Connection failed after {:.1}s: {}",
+            elapsed, error_message
+        );
     }
 }
 
@@ -295,10 +298,10 @@ impl TransferProgress {
     /// Update transfer progress
     pub fn update(&mut self, transferred_bytes: u64) {
         self.transferred_bytes = transferred_bytes.min(self.total_bytes);
-        
+
         let now = Instant::now();
         let time_diff = now.duration_since(self.last_update).as_secs_f32();
-        
+
         // Update every 100ms to avoid too frequent updates
         if time_diff >= 0.1 {
             self.show_progress();
@@ -329,7 +332,8 @@ impl TransferProgress {
             None
         };
 
-        print!("\r📄 {} - {}% ({}) {}/s", 
+        print!(
+            "\r📄 {} - {}% ({}) {}/s",
             self.filename,
             percentage,
             format_bytes(self.transferred_bytes),
@@ -352,7 +356,8 @@ impl TransferProgress {
             0.0
         };
 
-        println!("\r✅ {} - transfer completed ({} in {:.1}s, avg {}/s)", 
+        println!(
+            "\r✅ {} - transfer completed ({} in {:.1}s, avg {}/s)",
             self.filename,
             format_bytes(self.total_bytes),
             elapsed,

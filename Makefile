@@ -1,4 +1,5 @@
 # ClipSync Makefile
+# Run 'make help' for a list of available commands
 
 CARGO := cargo
 TARGET_DIR := target
@@ -24,9 +25,49 @@ else ifeq ($(UNAME_S),Linux)
     endif
 endif
 
-.PHONY: all build release test clean install uninstall fmt lint bench
+.PHONY: all build release test clean install uninstall fmt lint bench check pre-commit help
 
-all: build
+# Default target - show help if no target specified
+all: help
+
+# Display help information
+help:
+	@echo "ClipSync Makefile Commands:"
+	@echo ""
+	@echo "  make help           Show this help message"
+	@echo "  make build          Build debug binary for current platform"
+	@echo "  make release        Build optimized release binary"
+	@echo "  make check          Run format and lint checks (fast)"
+	@echo "  make pre-commit     Run all pre-commit checks"
+	@echo "  make test           Run all tests"
+	@echo "  make test-integration Run integration tests"
+	@echo "  make fmt            Check code formatting"
+	@echo "  make fmt-fix        Fix code formatting issues"
+	@echo "  make lint           Run clippy linter and audit"
+	@echo "  make bench          Run benchmarks"
+	@echo "  make clean          Remove build artifacts"
+	@echo "  make install        Install clipsync system-wide"
+	@echo "  make uninstall      Remove clipsync from system"
+	@echo "  make package        Create distribution package"
+	@echo "  make build-all      Build for all supported platforms"
+	@echo ""
+	@echo "Platform: $(PLATFORM) ($(TARGET))"
+	@echo ""
+
+# Run all pre-commit checks
+pre-commit:
+	@./scripts/pre-commit-checks.sh
+
+# Quick check - formatting and linting only
+check:
+	@if [ -f .env ]; then source .env; fi && \
+	unset OPENSSL_LIB_DIR OPENSSL_INCLUDE_DIR && \
+	export OPENSSL_ROOT_DIR=/opt/homebrew/opt/openssl@3 && \
+	export OPENSSL_LIB_DIR=/opt/homebrew/opt/openssl@3/lib && \
+	export OPENSSL_INCLUDE_DIR=/opt/homebrew/opt/openssl@3/include && \
+	$(CARGO) fmt --check && \
+	$(CARGO) clippy -- -D warnings && \
+	$(CARGO) check --all-targets
 
 build:
 	$(CARGO) build --target $(TARGET)

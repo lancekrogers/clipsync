@@ -5,11 +5,13 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::{error, info};
 
-use crate::adapters::{get_clipboard_provider, PeerDiscovery, HistoryManager, ClipboardProviderWrapper};
+use crate::adapters::{
+    get_clipboard_provider, ClipboardProviderWrapper, HistoryManager, PeerDiscovery,
+};
 use crate::config::Config;
 use crate::hotkey::HotKeyManager;
 use crate::sync::SyncEngine;
-use crate::transport::{TransportManager, TransportConfig};
+use crate::transport::{TransportConfig, TransportManager};
 
 pub mod commands;
 pub mod history_picker;
@@ -50,7 +52,7 @@ pub enum Commands {
     History {
         #[arg(short, long, default_value = "10")]
         limit: usize,
-        
+
         #[arg(short, long)]
         interactive: bool,
     },
@@ -62,9 +64,7 @@ pub enum Commands {
     Peers,
 
     #[command(about = "Copy text to clipboard")]
-    Copy {
-        text: String,
-    },
+    Copy { text: String },
 
     #[command(about = "Get current clipboard content")]
     Paste,
@@ -80,13 +80,13 @@ pub enum Commands {
 pub enum ConfigAction {
     #[command(about = "Show current configuration")]
     Show,
-    
+
     #[command(about = "Generate example configuration")]
     Init {
         #[arg(long)]
         force: bool,
     },
-    
+
     #[command(about = "Validate configuration")]
     Validate,
 }
@@ -115,7 +115,7 @@ impl CliHandler {
             hotkey_manager: None,
         })
     }
-    
+
     /// Lazily initialize the history manager when needed
     async fn ensure_history(&mut self) -> Result<Arc<HistoryManager>> {
         if self.history.is_none() {
@@ -158,15 +158,9 @@ impl CliHandler {
 
     pub async fn handle_command(&mut self, command: Commands) -> Result<()> {
         match command {
-            Commands::Start { foreground } => {
-                self.start_daemon(foreground).await
-            }
-            Commands::Stop => {
-                self.stop_daemon().await
-            }
-            Commands::Status => {
-                self.show_status().await
-            }
+            Commands::Start { foreground } => self.start_daemon(foreground).await,
+            Commands::Stop => self.stop_daemon().await,
+            Commands::Status => self.show_status().await,
             Commands::History { limit, interactive } => {
                 if interactive {
                     self.show_interactive_history().await
@@ -174,21 +168,11 @@ impl CliHandler {
                     self.show_history(limit).await
                 }
             }
-            Commands::Sync => {
-                self.force_sync().await
-            }
-            Commands::Peers => {
-                self.show_peers().await
-            }
-            Commands::Copy { text } => {
-                self.copy_text(text).await
-            }
-            Commands::Paste => {
-                self.paste_text().await
-            }
-            Commands::Config { action } => {
-                self.handle_config_action(action).await
-            }
+            Commands::Sync => self.force_sync().await,
+            Commands::Peers => self.show_peers().await,
+            Commands::Copy { text } => self.copy_text(text).await,
+            Commands::Paste => self.paste_text().await,
+            Commands::Config { action } => self.handle_config_action(action).await,
         }
     }
 
@@ -221,10 +205,10 @@ impl CliHandler {
             Arc::clone(&clipboard),
             Arc::clone(&history),
         )?;
-        
+
         hotkey_manager.set_sync_engine(Arc::clone(&sync_engine));
         hotkey_manager.register_default_hotkeys().await?;
-        
+
         let hotkey_manager = Arc::new(hotkey_manager);
 
         self.sync_engine = Some(Arc::clone(&sync_engine));
@@ -242,7 +226,7 @@ impl CliHandler {
         };
 
         info!("ClipSync daemon started successfully");
-        
+
         tokio::try_join!(sync_task, hotkey_task)?;
 
         Ok(())
@@ -260,21 +244,21 @@ impl CliHandler {
         println!("  Version: {}", env!("CARGO_PKG_VERSION"));
         println!("  Config: Default");
         println!("  Node ID: {}", self.config.node_id());
-        
+
         if let Some(sync_engine) = &self.sync_engine {
             let peers = sync_engine.get_connected_peers().await;
             println!("  Connected Peers: {}", peers.len());
         } else {
             println!("  Status: Not running");
         }
-        
+
         Ok(())
     }
 
     async fn show_history(&mut self, limit: usize) -> Result<()> {
         let history = self.ensure_history().await?;
         let entries = history.get_recent_entries(limit).await?;
-        
+
         if entries.is_empty() {
             println!("No clipboard history found");
             return Ok(());
@@ -282,7 +266,8 @@ impl CliHandler {
 
         println!("Clipboard History (showing {} entries):", entries.len());
         for (i, entry) in entries.iter().enumerate() {
-            println!("{}. [{}] {}", 
+            println!(
+                "{}. [{}] {}",
                 i + 1,
                 entry.timestamp.format("%Y-%m-%d %H:%M:%S"),
                 match &entry.content {
@@ -296,7 +281,7 @@ impl CliHandler {
                 }
             );
         }
-        
+
         Ok(())
     }
 
@@ -319,7 +304,7 @@ impl CliHandler {
     async fn show_peers(&self) -> Result<()> {
         if let Some(sync_engine) = &self.sync_engine {
             let peers = sync_engine.get_connected_peers().await;
-            
+
             if peers.is_empty() {
                 println!("No connected peers");
                 return Ok(());
@@ -327,16 +312,12 @@ impl CliHandler {
 
             println!("Connected Peers ({}):", peers.len());
             for peer in peers {
-                println!("  {} - {} ({})", 
-                    peer.id, 
-                    peer.hostname, 
-                    peer.address
-                );
+                println!("  {} - {} ({})", peer.id, peer.hostname, peer.address);
             }
         } else {
             println!("ClipSync daemon is not running");
         }
-        
+
         Ok(())
     }
 

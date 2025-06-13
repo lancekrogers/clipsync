@@ -73,7 +73,7 @@ source ~/.cargo/env
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/clipsync.git
+git clone https://github.com/lancekrogers/clipsync.git
 cd clipsync
 
 # Install development tools

@@ -42,7 +42,7 @@ impl ClipboardContent {
             timestamp: current_timestamp(),
         }
     }
-    
+
     /// Create new RTF content
     pub fn rtf(data: Vec<u8>) -> Self {
         Self {
@@ -51,7 +51,7 @@ impl ClipboardContent {
             timestamp: current_timestamp(),
         }
     }
-    
+
     /// Create new image content
     pub fn image(data: Vec<u8>, format: &str) -> Self {
         Self {
@@ -60,7 +60,7 @@ impl ClipboardContent {
             timestamp: current_timestamp(),
         }
     }
-    
+
     /// Get content as text if possible
     pub fn as_text(&self) -> Option<String> {
         if self.mime_type == "text/plain" {
@@ -69,17 +69,17 @@ impl ClipboardContent {
             None
         }
     }
-    
+
     /// Check if content is text
     pub fn is_text(&self) -> bool {
         self.mime_type.starts_with("text/")
     }
-    
+
     /// Check if content is image
     pub fn is_image(&self) -> bool {
         self.mime_type.starts_with("image/")
     }
-    
+
     /// Get size of content in bytes
     pub fn size(&self) -> usize {
         self.data.len()
@@ -91,16 +91,16 @@ impl ClipboardContent {
 pub trait ClipboardProvider: Send + Sync {
     /// Get current clipboard content
     async fn get_content(&self) -> Result<ClipboardContent, ClipboardError>;
-    
+
     /// Set clipboard content
     async fn set_content(&self, content: &ClipboardContent) -> Result<(), ClipboardError>;
-    
+
     /// Clear clipboard
     async fn clear(&self) -> Result<(), ClipboardError>;
-    
+
     /// Get provider name
     fn name(&self) -> &str;
-    
+
     /// Start watching for clipboard changes
     async fn watch(&self) -> Result<ClipboardWatcher, ClipboardError>;
 }
@@ -133,7 +133,10 @@ pub struct ClipboardWatcher {
 
 impl ClipboardWatcher {
     /// Create a new watcher with the given receiver
-    pub fn new(receiver: mpsc::Receiver<ClipboardEvent>, handle: impl Send + Sync + 'static) -> Self {
+    pub fn new(
+        receiver: mpsc::Receiver<ClipboardEvent>,
+        handle: impl Send + Sync + 'static,
+    ) -> Self {
         Self {
             receiver,
             _handle: Box::new(handle),
@@ -147,23 +150,23 @@ pub enum ClipboardError {
     /// Platform-specific error
     #[error("Platform error: {0}")]
     Platform(String),
-    
+
     /// Content too large
     #[error("Content too large: {size} bytes (max: {max} bytes)")]
     TooLarge { size: usize, max: usize },
-    
+
     /// Unsupported content type
     #[error("Unsupported content type: {0}")]
     UnsupportedType(String),
-    
+
     /// No content available
     #[error("No clipboard content available")]
     NoContent,
-    
+
     /// Watch error
     #[error("Failed to watch clipboard: {0}")]
     WatchError(String),
-    
+
     /// IO error
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -175,7 +178,7 @@ pub async fn create_provider() -> Result<Box<dyn ClipboardProvider>, ClipboardEr
     {
         Ok(Box::new(macos::MacOSClipboard::new()?))
     }
-    
+
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         // Try Wayland first, fall back to X11
@@ -195,7 +198,7 @@ pub async fn create_provider() -> Result<Box<dyn ClipboardProvider>, ClipboardEr
             }
         }
     }
-    
+
     #[cfg(not(any(target_os = "macos", unix)))]
     {
         Err(ClipboardError::Platform("Unsupported platform".to_string()))
@@ -213,7 +216,7 @@ fn current_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_clipboard_content_text() {
         let content = ClipboardContent::text("Hello, world!");
@@ -222,7 +225,7 @@ mod tests {
         assert!(content.is_text());
         assert!(!content.is_image());
     }
-    
+
     #[test]
     fn test_clipboard_content_image() {
         let content = ClipboardContent::image(vec![1, 2, 3], "png");
@@ -231,7 +234,7 @@ mod tests {
         assert!(!content.is_text());
         assert_eq!(content.size(), 3);
     }
-    
+
     #[test]
     fn test_clipboard_content_size() {
         let large_data = vec![0u8; 1024 * 1024]; // 1MB

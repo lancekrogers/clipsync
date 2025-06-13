@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use std::path::Path;
 use anyhow::Result;
-use uuid::Uuid;
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::config::Config;
 
@@ -36,7 +36,9 @@ pub struct AuthenticatedConnection {
 
 impl AuthenticatedConnection {
     pub async fn authenticate(&self) -> Result<AuthResult> {
-        Ok(AuthResult { authenticated: true })
+        Ok(AuthResult {
+            authenticated: true,
+        })
     }
 }
 
@@ -79,21 +81,25 @@ impl HistoryManager {
 
     pub async fn get_recent_entries(&self, limit: usize) -> Result<Vec<ClipboardEntry>> {
         let entries = self.inner.get_recent(limit).await?;
-        
-        Ok(entries.into_iter().map(|entry| {
-            let content = match String::from_utf8(entry.content) {
-                Ok(text) => ClipboardData::Text(text),
-                Err(_) => ClipboardData::Text("[Binary Data]".to_string()),
-            };
 
-            ClipboardEntry {
-                id: entry.id,
-                content,
-                timestamp: DateTime::from_timestamp(entry.timestamp, 0).unwrap_or_else(Utc::now),
-                source: entry.origin_node,
-                checksum: entry.checksum,
-            }
-        }).collect())
+        Ok(entries
+            .into_iter()
+            .map(|entry| {
+                let content = match String::from_utf8(entry.content) {
+                    Ok(text) => ClipboardData::Text(text),
+                    Err(_) => ClipboardData::Text("[Binary Data]".to_string()),
+                };
+
+                ClipboardEntry {
+                    id: entry.id,
+                    content,
+                    timestamp: DateTime::from_timestamp(entry.timestamp, 0)
+                        .unwrap_or_else(Utc::now),
+                    source: entry.origin_node,
+                    checksum: entry.checksum,
+                }
+            })
+            .collect())
     }
 
     pub async fn get_by_checksum(&self, checksum: &str) -> Result<Option<ClipboardEntry>> {
@@ -132,7 +138,7 @@ pub async fn get_clipboard_provider() -> Result<ClipboardProviderWrapper> {
         let provider = Box::new(crate::clipboard::macos::MacOSClipboard::new()?);
         Ok(ClipboardProviderWrapper::new(provider))
     }
-    
+
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         // Try X11 first, then Wayland
@@ -143,7 +149,7 @@ pub async fn get_clipboard_provider() -> Result<ClipboardProviderWrapper> {
         };
         Ok(ClipboardProviderWrapper::new(provider))
     }
-    
+
     #[cfg(windows)]
     {
         compile_error!("Windows clipboard support not implemented yet");
@@ -198,22 +204,28 @@ impl Config {
     }
 
     pub async fn save_config(&self) -> Result<()> {
-        self.save().map_err(|e| anyhow::anyhow!("Failed to save config: {}", e))
+        self.save()
+            .map_err(|e| anyhow::anyhow!("Failed to save config: {}", e))
     }
 
     pub async fn generate_example_config(force: bool) -> Result<()> {
         let config = Self::default();
         let example_path = std::path::PathBuf::from("config.example.toml");
-        
+
         if !force && example_path.exists() {
-            return Err(anyhow::anyhow!("Example config already exists. Use --force to overwrite."));
+            return Err(anyhow::anyhow!(
+                "Example config already exists. Use --force to overwrite."
+            ));
         }
-        
-        config.save().map_err(|e| anyhow::anyhow!("Failed to save example config: {}", e))
+
+        config
+            .save()
+            .map_err(|e| anyhow::anyhow!("Failed to save example config: {}", e))
     }
 
     pub async fn validate(path: &std::path::Path) -> Result<()> {
-        let _config = Self::load_from_path(path).map_err(|e| anyhow::anyhow!("Invalid config: {}", e))?;
+        let _config =
+            Self::load_from_path(path).map_err(|e| anyhow::anyhow!("Invalid config: {}", e))?;
         Ok(())
     }
 
