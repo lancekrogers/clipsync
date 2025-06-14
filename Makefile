@@ -3,7 +3,6 @@
 
 CARGO := cargo
 TARGET_DIR := target
-RELEASE_DIR := $(TARGET_DIR)/release
 
 # Platform detection
 UNAME_S := $(shell uname -s)
@@ -24,6 +23,9 @@ else ifeq ($(UNAME_S),Linux)
         TARGET := x86_64-unknown-linux-gnu
     endif
 endif
+
+# Set release directory based on target
+RELEASE_DIR := $(TARGET_DIR)/$(TARGET)/release
 
 .PHONY: all build release test clean install install-user uninstall fmt lint bench check pre-commit help
 
