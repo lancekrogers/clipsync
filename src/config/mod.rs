@@ -159,7 +159,7 @@ fn default_node_id() -> uuid::Uuid {
 }
 
 fn default_listen_addr() -> String {
-    ":8484".to_string()
+    "0.0.0.0:8484".to_string()
 }
 
 fn default_advertise_name() -> String {
