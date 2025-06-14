@@ -83,22 +83,24 @@ ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_clipsync
 ### 3️⃣ Start on Both Devices
 
 ```bash
-# Device 1 & 2: Start the service
+# Start ClipSync on both devices
 clipsync start
 
 # Check connection status
 clipsync status
 ```
 
-### 4️⃣ Connect Devices
+### 4️⃣ Trust Your Devices
 
-```bash
-# On device 1: Add device 2's public key
-clipsync auth add ~/.ssh/id_ed25519_clipsync.pub --name "laptop"
+When your devices discover each other, you'll see a trust prompt:
 
-# On device 2: Add device 1's public key
-clipsync auth add ~/.ssh/id_ed25519_clipsync.pub --name "desktop"
 ```
+New device discovered: laptop (192.168.1.100:8484)
+SSH Fingerprint: SHA256:xK8r5Qz...
+Do you want to trust this device? (T)rust/(R)eject/(I)gnore: T
+```
+
+Type `T` to trust the device. That's it!
 
 ### 5️⃣ Test It Out
 
@@ -139,10 +141,7 @@ clipsync history --search "text" # Search clipboard history
 
 ```bash
 clipsync peers                   # List connected devices
-clipsync peers --discover        # Scan for devices on network
-clipsync auth add <public_key>   # Add authorized device
-clipsync auth list               # List authorized keys
-clipsync auth remove <key_id>    # Remove device access
+# Devices are automatically discovered and you'll be prompted to trust them
 ```
 
 ### Configuration
