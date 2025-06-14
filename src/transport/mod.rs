@@ -66,6 +66,17 @@ impl TransportManager {
     pub async fn subscribe(&self) -> Result<broadcast::Receiver<Message>> {
         Ok(self.message_sender.subscribe())
     }
+
+    /// Register an authenticated peer connection
+    pub async fn register_peer_connection(
+        &self,
+        peer_id: Uuid,
+        connection: Box<dyn Connection>,
+    ) -> Result<()> {
+        let mut connections = self.connections.write().await;
+        connections.insert(peer_id, connection);
+        Ok(())
+    }
 }
 
 /// Transport layer errors with user-friendly messages

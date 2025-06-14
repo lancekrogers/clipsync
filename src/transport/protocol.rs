@@ -34,6 +34,10 @@ pub struct Message {
 
     /// Protocol version
     pub version: String,
+
+    /// Source peer ID (added for tracking message origin)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_peer_id: Option<Uuid>,
 }
 
 /// Message type enumeration
@@ -444,6 +448,7 @@ impl Message {
             timestamp: chrono::Utc::now(),
             correlation_id: None,
             version: PROTOCOL_VERSION.to_string(),
+            source_peer_id: None,
         }
     }
 

@@ -24,11 +24,25 @@ use wayland_client::{
 
 /// Wayland clipboard state
 struct WaylandState {
+    registry: Option<WlRegistry>,
     data_device_manager: Option<WlDataDeviceManager>,
     data_device: Option<WlDataDevice>,
     seat: Option<WlSeat>,
     current_offer: Option<WlDataOffer>,
     clipboard_content: Arc<Mutex<Option<Vec<u8>>>>,
+}
+
+impl WaylandState {
+    fn new() -> Self {
+        Self {
+            registry: None,
+            data_device_manager: None,
+            data_device: None,
+            seat: None,
+            current_offer: None,
+            clipboard_content: Arc::new(Mutex::new(None)),
+        }
+    }
 }
 
 /// Wayland clipboard provider
@@ -44,39 +58,81 @@ impl WaylandClipboard {
             ClipboardError::Platform(format!("Failed to connect to Wayland: {}", e))
         })?;
 
-        let state = Arc::new(Mutex::new(WaylandState {
-            data_device_manager: None,
-            data_device: None,
-            seat: None,
-            current_offer: None,
-            clipboard_content: Arc::new(Mutex::new(None)),
-        }));
+        let state = Arc::new(Mutex::new(WaylandState::new()));
 
         // Initialize Wayland objects
         let display = connection.display();
         let mut event_queue = connection.new_event_queue();
         let qhandle = event_queue.handle();
 
-        // Get registry and bind required globals  
-        let mut state_for_registry = WaylandState {
-            data_device_manager: None,
-            data_device: None,
-            seat: None,
-            current_offer: None,
-            clipboard_content: Arc::new(Mutex::new(None)),
-        };
+        // Get registry and bind required globals
         let registry = display.get_registry(&qhandle, ());
+
+        // Store registry in state
+        {
+            let mut state_guard = state.lock().unwrap();
+            state_guard.registry = Some(registry);
+        }
+
+        // Create a temporary state for event dispatching
+        let mut temp_state = WaylandState::new();
+        temp_state.registry = state.lock().unwrap().registry.clone();
 
         // Process initial events to get globals
         event_queue
-            .blocking_dispatch(&mut state_for_registry)
+            .roundtrip(&mut temp_state)
             .map_err(|e| ClipboardError::Platform(format!("Failed to dispatch events: {}", e)))?;
+
+        // Copy the globals from temp_state to the actual state
+        {
+            let mut state_guard = state.lock().unwrap();
+            state_guard.data_device_manager = temp_state.data_device_manager;
+            state_guard.seat = temp_state.seat;
+
+            // Create data device if we have both manager and seat
+            if let (Some(manager), Some(seat)) =
+                (&state_guard.data_device_manager, &state_guard.seat)
+            {
+                let data_device = manager.get_data_device(seat, &qhandle, ());
+                state_guard.data_device = Some(data_device);
+            }
+        }
+
+        // Flush the connection to ensure all requests are sent
+        connection
+            .flush()
+            .map_err(|e| ClipboardError::Platform(format!("Failed to flush connection: {}", e)))?;
 
         Ok(Self { connection, state })
     }
 
     /// Read clipboard content
     async fn read_clipboard(&self) -> Result<Option<Vec<u8>>, ClipboardError> {
+        // First, dispatch any pending events to ensure we have the latest clipboard state
+        let mut event_queue = self.connection.new_event_queue();
+        let mut temp_state = WaylandState::new();
+
+        // Copy current state to temp_state
+        {
+            let state_guard = self.state.lock().unwrap();
+            temp_state.registry = state_guard.registry.clone();
+            temp_state.data_device_manager = state_guard.data_device_manager.clone();
+            temp_state.data_device = state_guard.data_device.clone();
+            temp_state.seat = state_guard.seat.clone();
+            temp_state.current_offer = state_guard.current_offer.clone();
+            temp_state.clipboard_content = state_guard.clipboard_content.clone();
+        }
+
+        // Dispatch pending events
+        let _ = event_queue.dispatch_pending(&mut temp_state);
+
+        // Update state with any changes
+        {
+            let mut state_guard = self.state.lock().unwrap();
+            state_guard.current_offer = temp_state.current_offer;
+        }
+
+        // Now read the clipboard content
         let state = self.state.lock().unwrap();
         let content = state.clipboard_content.lock().unwrap();
         Ok(content.clone())
@@ -84,10 +140,10 @@ impl WaylandClipboard {
 
     /// Write clipboard content
     async fn write_clipboard(&self, data: Vec<u8>) -> Result<(), ClipboardError> {
-        let mut state = self.state.lock().unwrap();
+        let state = self.state.lock().unwrap();
 
         if let (Some(manager), Some(device)) = (&state.data_device_manager, &state.data_device) {
-            let mut event_queue: EventQueue<WaylandState> = self.connection.new_event_queue();
+            let mut event_queue = self.connection.new_event_queue();
             let qhandle = event_queue.handle();
 
             // Create data source
@@ -101,6 +157,13 @@ impl WaylandClipboard {
 
             // Store the data
             *state.clipboard_content.lock().unwrap() = Some(data);
+
+            // Create temp state for event handling
+            let mut temp_state = WaylandState::new();
+            temp_state.clipboard_content = state.clipboard_content.clone();
+
+            // Process events to handle the data source send requests
+            let _ = event_queue.roundtrip(&mut temp_state);
 
             // Commit changes
             self.connection.flush().map_err(|e| {
@@ -183,10 +246,23 @@ impl ClipboardProvider for WaylandClipboard {
             loop {
                 ticker.tick().await;
 
+                // Create an event queue for monitoring
+                let mut event_queue = connection.new_event_queue();
+                let mut temp_state = WaylandState::new();
+
+                // Copy current state
+                {
+                    let state_guard = state.lock().unwrap();
+                    temp_state.data_device = state_guard.data_device.clone();
+                    temp_state.clipboard_content = state_guard.clipboard_content.clone();
+                }
+
+                // Dispatch any pending events
+                let _ = event_queue.dispatch_pending(&mut temp_state);
+
                 // Check for clipboard changes
                 let current_content = {
-                    let state_guard = state.lock().unwrap();
-                    let clipboard_guard = state_guard.clipboard_content.lock().unwrap();
+                    let clipboard_guard = temp_state.clipboard_content.lock().unwrap();
                     clipboard_guard.clone()
                 };
 
@@ -222,6 +298,46 @@ impl ClipboardProvider for WaylandClipboard {
 }
 
 // Wayland event handling
+impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        registry: &WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        qhandle: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
+            match interface.as_str() {
+                "wl_data_device_manager" => {
+                    let manager = registry.bind::<WlDataDeviceManager, _, _>(
+                        name,
+                        version.min(3), // Use version 3 or lower
+                        qhandle,
+                        (),
+                    );
+                    state.data_device_manager = Some(manager);
+                }
+                "wl_seat" => {
+                    let seat = registry.bind::<WlSeat, _, _>(
+                        name,
+                        version.min(7), // Use version 7 or lower
+                        qhandle,
+                        (),
+                    );
+                    state.seat = Some(seat);
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
     fn event(
         state: &mut Self,
@@ -233,14 +349,17 @@ impl Dispatch<wl_seat::WlSeat, ()> for WaylandState {
     ) {
         if let wl_seat::Event::Capabilities { capabilities } = event {
             // We only care about pointer and keyboard for clipboard
-            state.seat = Some(seat.clone());
+            // Store the seat if we don't have it already
+            if state.seat.is_none() {
+                state.seat = Some(seat.clone());
+            }
         }
     }
 }
 
 impl Dispatch<wl_data_device_manager::WlDataDeviceManager, ()> for WaylandState {
     fn event(
-        state: &mut Self,
+        _state: &mut Self,
         _: &WlDataDeviceManager,
         _: wl_data_device_manager::Event,
         _: &(),
@@ -258,7 +377,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandState {
         event: wl_data_device::Event,
         _: &(),
         _: &Connection,
-        _: &QueueHandle<Self>,
+        qhandle: &QueueHandle<Self>,
     ) {
         match event {
             wl_data_device::Event::DataOffer { id } => {
@@ -268,6 +387,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandState {
                 // Handle selection change
                 if let Some(offer) = id {
                     state.current_offer = Some(offer);
+                    // TODO: Read data from the offer and update clipboard_content
                 }
             }
             _ => {}
@@ -277,7 +397,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandState {
 
 impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandState {
     fn event(
-        state: &mut Self,
+        _state: &mut Self,
         offer: &WlDataOffer,
         event: wl_data_offer::Event,
         _: &(),
@@ -289,6 +409,8 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandState {
             if mime_type == "text/plain" {
                 // Accept the offer
                 offer.accept(0, Some(mime_type));
+
+                // TODO: Actually receive the data via fd and update clipboard_content
             }
         }
     }
@@ -297,7 +419,7 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for WaylandState {
 impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandState {
     fn event(
         state: &mut Self,
-        source: &WlDataSource,
+        _source: &WlDataSource,
         event: wl_data_source::Event,
         _: &(),
         _: &Connection,
@@ -312,35 +434,15 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandState {
                         use std::os::unix::io::FromRawFd;
                         let mut file = unsafe { std::fs::File::from_raw_fd(fd.as_raw_fd()) };
                         let _ = std::io::Write::write_all(&mut file, data);
+                        // Important: we need to close the fd explicitly
+                        drop(file);
                     }
                 }
             }
-            _ => {}
-        }
-    }
-}
-
-impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
-    fn event(
-        state: &mut Self,
-        registry: &WlRegistry,
-        event: wl_registry::Event,
-        _: &(),
-        _: &Connection,
-        qhandle: &QueueHandle<Self>,
-    ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
-            match interface.as_str() {
-                "wl_data_device_manager" => {
-                    let manager = registry.bind::<WlDataDeviceManager, _, _>(name, version, qhandle, ());
-                    state.data_device_manager = Some(manager);
-                }
-                "wl_seat" => {
-                    let seat = registry.bind::<WlSeat, _, _>(name, version, qhandle, ());
-                    state.seat = Some(seat);
-                }
-                _ => {}
+            wl_data_source::Event::Cancelled => {
+                // Data source was cancelled, we can clean up if needed
             }
+            _ => {}
         }
     }
 }

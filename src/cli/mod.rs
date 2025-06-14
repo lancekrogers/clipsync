@@ -9,6 +9,7 @@ use crate::adapters::{
     get_clipboard_provider, ClipboardProviderWrapper, HistoryManager, PeerDiscovery,
 };
 use crate::config::Config;
+use crate::daemon;
 use crate::hotkey::HotKeyManager;
 use crate::sync::SyncEngine;
 use crate::transport::{TransportConfig, TransportManager};
@@ -179,9 +180,15 @@ impl CliHandler {
     async fn start_daemon(&mut self, foreground: bool) -> Result<()> {
         info!("Starting ClipSync daemon");
 
+        // Check if daemon is already running
+        if daemon::is_daemon_running()? {
+            println!("ClipSync daemon is already running");
+            return Ok(());
+        }
+
         if !foreground {
             info!("Running in daemon mode");
-            // TODO: Implement proper daemon mode with pidfile
+            daemon::daemonize()?;
         }
 
         // Ensure all components are initialized for daemon mode
@@ -215,26 +222,41 @@ impl CliHandler {
         self.hotkey_manager = Some(Arc::clone(&hotkey_manager));
 
         // Start services
-        let sync_task = {
-            let sync_engine = Arc::clone(&sync_engine);
-            async move { sync_engine.start().await }
-        };
-
-        let hotkey_task = {
-            let hotkey_manager = Arc::clone(&hotkey_manager);
-            async move { hotkey_manager.start_event_loop().await }
-        };
+        let sync_engine_task = Arc::clone(&sync_engine);
+        let hotkey_manager_task = Arc::clone(&hotkey_manager);
 
         info!("ClipSync daemon started successfully");
 
-        tokio::try_join!(sync_task, hotkey_task)?;
+        // Setup signal handler for graceful shutdown
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        daemon::setup_signal_handlers(shutdown_tx)?;
+
+        // Run services until shutdown signal
+        tokio::select! {
+            result = async move {
+                let sync_future = sync_engine_task.start();
+                let hotkey_future = hotkey_manager_task.start_event_loop();
+                tokio::try_join!(sync_future, hotkey_future)
+            } => {
+                if let Err(e) = result {
+                    error!("Service error: {}", e);
+                }
+            }
+            _ = shutdown_rx => {
+                info!("Received shutdown signal");
+            }
+        }
+
+        // Cleanup
+        daemon::remove_pidfile()?;
+        info!("ClipSync daemon stopped");
 
         Ok(())
     }
 
     async fn stop_daemon(&self) -> Result<()> {
         info!("Stopping ClipSync daemon");
-        // TODO: Implement daemon stop logic (send signal to running process)
+        daemon::stop_daemon()?;
         println!("ClipSync daemon stopped");
         Ok(())
     }
@@ -245,11 +267,20 @@ impl CliHandler {
         println!("  Config: Default");
         println!("  Node ID: {}", self.config.node_id());
 
-        if let Some(sync_engine) = &self.sync_engine {
-            let peers = sync_engine.get_connected_peers().await;
-            println!("  Connected Peers: {}", peers.len());
+        // Check if daemon is running
+        if daemon::is_daemon_running()? {
+            if let Some(pid) = daemon::read_pidfile()? {
+                println!("  Daemon: Running (PID: {})", pid);
+            } else {
+                println!("  Daemon: Running");
+            }
+
+            if let Some(sync_engine) = &self.sync_engine {
+                let peers = sync_engine.get_connected_peers().await;
+                println!("  Connected Peers: {}", peers.len());
+            }
         } else {
-            println!("  Status: Not running");
+            println!("  Daemon: Not running");
         }
 
         Ok(())
