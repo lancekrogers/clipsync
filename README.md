@@ -406,5 +406,4 @@ Built with excellent open-source projects:
 
 ---
 
-**Made with ❤️ and 🦀 Rust** • [Report Issues](https://github.com/lancekrogers/clipsync/issues) • [Join Discussions](https://github.com/lancekrogers/clipsync/discussions)
-
+**Made with ❤️ and 🦀 Rust** • [Report Issues](https://github.com/lancekrogers/clipsync/issues)

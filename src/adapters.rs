@@ -145,7 +145,7 @@ pub async fn get_clipboard_provider() -> Result<ClipboardProviderWrapper> {
         let provider = if let Ok(provider) = crate::clipboard::x11::X11Clipboard::new() {
             Box::new(provider) as Box<dyn crate::clipboard::ClipboardProvider>
         } else {
-            Box::new(crate::clipboard::wayland::WaylandClipboard::new()?)
+            Box::new(crate::clipboard::wayland::WaylandClipboard::new().await?)
         };
         Ok(ClipboardProviderWrapper::new(provider))
     }
