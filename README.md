@@ -178,8 +178,7 @@ clipsync --help                 # Show comprehensive help
 
 ClipSync uses a TOML configuration file located at:
 
-- **Linux**: `~/.config/clipsync/config.toml`
-- **macOS**: `~/Library/Application Support/clipsync/config.toml`
+- **All platforms**: `~/.config/clipsync/config.toml`
 
 ### Quick Configuration
 
@@ -235,11 +234,11 @@ log_level = "info"
 # Run diagnostics
 clipsync doctor
 
-# Check if devices can see each other
-clipsync peers --discover
+# Check connected peers
+clipsync peers
 
-# Verify SSH keys are set up correctly
-clipsync auth list
+# Verify configuration is valid
+clipsync config validate
 ```
 
 **Service Not Starting**
