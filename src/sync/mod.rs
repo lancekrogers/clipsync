@@ -1,3 +1,5 @@
+pub mod trust_sync;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -8,6 +10,8 @@ use tokio::sync::{broadcast, RwLock};
 use tokio::time::{interval, sleep};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
+
+pub use trust_sync::{setup_trust_sync, TrustAwareSyncEngine};
 
 use crate::adapters::{
     ClipboardData, ClipboardEntry, ClipboardProviderWrapper, HistoryManager, Peer, PeerDiscovery,

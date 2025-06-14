@@ -262,6 +262,7 @@ mod tests {
             platform: "test".to_string(),
             metadata: PeerMetadata {
                 ssh_fingerprint: None,
+                ssh_public_key: None,
                 capabilities: vec![],
                 device_name: None,
             },

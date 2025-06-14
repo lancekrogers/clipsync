@@ -10,7 +10,7 @@ use crate::adapters::{
 };
 use crate::config::Config;
 use crate::hotkey::HotKeyManager;
-use crate::sync::SyncEngine;
+use crate::sync::{SyncEngine, TrustAwareSyncEngine};
 use crate::transport::{TransportConfig, TransportManager};
 
 pub mod commands;
@@ -98,7 +98,7 @@ pub struct CliHandler {
     history: Option<Arc<HistoryManager>>,
     discovery: Option<Arc<PeerDiscovery>>,
     transport: Option<Arc<TransportManager>>,
-    sync_engine: Option<Arc<SyncEngine>>,
+    sync_engine: Option<Arc<TrustAwareSyncEngine>>,
     hotkey_manager: Option<Arc<HotKeyManager>>,
 }
 
@@ -214,14 +214,17 @@ impl CliHandler {
         let discovery = self.ensure_discovery().await?;
         let transport = self.ensure_transport().await?;
 
-        // Initialize sync engine
-        let sync_engine = Arc::new(SyncEngine::new(
-            Arc::clone(&self.config),
-            Arc::clone(&clipboard),
-            Arc::clone(&history),
-            Arc::clone(&discovery),
-            Arc::clone(&transport),
-        ));
+        // Initialize trust-aware sync engine
+        let sync_engine = Arc::new(
+            TrustAwareSyncEngine::new(
+                Arc::clone(&self.config),
+                Arc::clone(&clipboard),
+                Arc::clone(&history),
+                Arc::clone(&discovery),
+                Arc::clone(&transport),
+            )
+            .await?,
+        );
 
         // Initialize hotkey manager
         let mut hotkey_manager = HotKeyManager::new(
@@ -237,6 +240,11 @@ impl CliHandler {
 
         self.sync_engine = Some(Arc::clone(&sync_engine));
         self.hotkey_manager = Some(Arc::clone(&hotkey_manager));
+
+        // Start trust processing
+        sync_engine
+            .start_trust_processing(Arc::clone(&discovery))
+            .await?;
 
         // Start services
         let sync_task = {
@@ -372,7 +380,8 @@ impl CliHandler {
                 println!("{:#?}", self.config);
             }
             ConfigAction::Init { force } => {
-                Config::generate_example_config(force).await
+                Config::generate_example_config(force)
+                    .await
                     .map_err(|e| anyhow::anyhow!("Config error: {}", e))?;
                 println!("Example configuration generated");
             }
@@ -390,7 +399,10 @@ impl CliHandler {
                     println!("Checked locations:");
                     println!("  - CLIPSYNC_CONFIG environment variable");
                     if let Some(config_dir) = dirs::config_dir() {
-                        println!("  - {}", config_dir.join("clipsync").join("config.toml").display());
+                        println!(
+                            "  - {}",
+                            config_dir.join("clipsync").join("config.toml").display()
+                        );
                     }
                 }
             }

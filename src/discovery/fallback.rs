@@ -284,6 +284,7 @@ impl FallbackDiscovery {
             platform: "unknown".to_string(),
             metadata: PeerMetadata {
                 ssh_fingerprint: None,
+                ssh_public_key: None,
                 capabilities: vec![],
                 device_name: Some(manual_peer.address.clone()),
             },

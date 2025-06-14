@@ -204,6 +204,21 @@ impl AuthorizedKeys {
         }
     }
 
+    /// Add a key from OpenSSH string format
+    pub fn add_key_from_openssh(
+        &mut self,
+        openssh_key: &str,
+        comment: Option<String>,
+    ) -> Result<(), AuthError> {
+        let public_key = PublicKey::from_openssh(openssh_key)?;
+        self.add_key(AuthorizedKey {
+            public_key,
+            comment,
+            options: vec![],
+        });
+        Ok(())
+    }
+
     /// Remove a key by fingerprint
     pub fn remove_key_by_fingerprint(&mut self, fingerprint: &str) -> bool {
         let initial_len = self.keys.len();
