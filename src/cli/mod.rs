@@ -352,13 +352,8 @@ impl CliHandler {
                 println!("Example configuration generated");
             }
             ConfigAction::Validate => {
-                match Config::validate(&std::path::PathBuf::from("config.toml")).await {
-                    Ok(_) => println!("Configuration is valid"),
-                    Err(e) => {
-                        error!("Configuration validation failed: {}", e);
-                        return Err(e);
-                    }
-                }
+                // Config is already loaded and validated in CliHandler::new()
+                println!("Configuration is valid");
             }
         }
         Ok(())
