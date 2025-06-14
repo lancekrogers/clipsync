@@ -6,6 +6,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::discovery::Discovery;
 
 // Adapter types for the new sync engine interface
 
@@ -158,32 +159,104 @@ pub async fn get_clipboard_provider() -> Result<ClipboardProviderWrapper> {
 
 // PeerDiscovery adapter
 pub struct PeerDiscovery {
-    inner: crate::discovery::DiscoveryService,
+    inner: tokio::sync::Mutex<crate::discovery::DiscoveryService>,
+    event_tx: tokio::sync::broadcast::Sender<Peer>,
+    started: std::sync::atomic::AtomicBool,
 }
 
 impl PeerDiscovery {
     pub async fn new(config: Arc<Config>) -> Result<Self> {
         let inner = crate::discovery::DiscoveryService::new(&config)?;
-        Ok(Self { inner })
+        let (event_tx, _) = tokio::sync::broadcast::channel(100);
+        Ok(Self {
+            inner: tokio::sync::Mutex::new(inner),
+            event_tx,
+            started: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     pub async fn start(&self) -> Result<()> {
-        // Start discovery service
+        // Check if already started
+        if self.started.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Ok(()); // Already started
+        }
+
+        // Start the discovery service
+        let mut inner = self.inner.lock().await;
+        inner.start().await?;
+
+        // Get event receiver from the discovery service
+        let mut event_rx = inner.subscribe_changes();
+        drop(inner); // Release the lock
+
+        let event_tx = self.event_tx.clone();
+
+        // Spawn task to convert discovery events to Peer events
+        tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                match event {
+                    crate::discovery::DiscoveryEvent::PeerDiscovered(peer_info)
+                    | crate::discovery::DiscoveryEvent::PeerUpdated(peer_info) => {
+                        if let Some(address) = peer_info.best_address() {
+                            let peer = Peer {
+                                id: peer_info.id,
+                                hostname: peer_info.name,
+                                address: address.to_string(),
+                            };
+                            let _ = event_tx.send(peer);
+                        }
+                    }
+                    crate::discovery::DiscoveryEvent::PeerLost(_) => {
+                        // Could emit a peer lost event if needed
+                    }
+                    crate::discovery::DiscoveryEvent::Error(_) => {
+                        // Could handle errors if needed
+                    }
+                }
+            }
+        });
+
         Ok(())
     }
 
     pub async fn subscribe(&self) -> Result<tokio::sync::broadcast::Receiver<Peer>> {
-        let (_tx, rx) = tokio::sync::broadcast::channel(100);
-        // In a real implementation, this would forward discovery events
-        Ok(rx)
+        Ok(self.event_tx.subscribe())
+    }
+
+    pub async fn announce(&self, node_id: Uuid, port: u16) -> Result<()> {
+        let service_info = crate::discovery::ServiceInfo::from_config(node_id, port);
+        let mut inner = self.inner.lock().await;
+        inner.announce(service_info).await
+    }
+
+    pub async fn get_peers(&self) -> Result<Vec<Peer>> {
+        let mut inner = self.inner.lock().await;
+        let peer_infos = inner.discover_peers().await?;
+        Ok(peer_infos
+            .into_iter()
+            .filter_map(|peer_info| {
+                peer_info.best_address().map(|address| Peer {
+                    id: peer_info.id,
+                    hostname: peer_info.name,
+                    address: address.to_string(),
+                })
+            })
+            .collect())
+    }
+
+    pub async fn stop(&self) -> Result<()> {
+        self.started
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let mut inner = self.inner.lock().await;
+        inner.stop().await
     }
 }
 
 // Config extensions
 impl Config {
     pub fn node_id(&self) -> Uuid {
-        // Generate a consistent node ID based on config
-        Uuid::new_v4() // In practice, this should be persistent
+        // Return the persistent node ID from config
+        self.node_id
     }
 
     pub fn sync_interval_ms(&self) -> u64 {
@@ -222,7 +295,6 @@ impl Config {
             .save()
             .map_err(|e| anyhow::anyhow!("Failed to save example config: {}", e))
     }
-
 
     pub fn default_with_path(_path: std::path::PathBuf) -> Self {
         Self::default()

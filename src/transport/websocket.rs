@@ -40,6 +40,9 @@ pub struct WebSocketTransport {
 
     /// Transport configuration
     config: WebSocketConfig,
+
+    /// Local node ID
+    node_id: Uuid,
 }
 
 /// WebSocket transport configuration
@@ -114,6 +117,9 @@ pub struct WebSocketListener {
 
     /// Connection counter
     sequence_counter: Arc<AtomicU64>,
+
+    /// Local node ID
+    node_id: Uuid,
 }
 
 impl Default for WebSocketConfig {
@@ -137,6 +143,7 @@ impl WebSocketTransport {
         bind_addr: SocketAddr,
         authenticator: Arc<dyn Authenticator>,
         config: WebSocketConfig,
+        node_id: Uuid,
     ) -> Self {
         Self {
             bind_addr,
@@ -144,6 +151,7 @@ impl WebSocketTransport {
             connections: Arc::new(RwLock::new(HashMap::new())),
             sequence_counter: Arc::new(AtomicU64::new(1)),
             config,
+            node_id,
         }
     }
 
@@ -153,6 +161,7 @@ impl WebSocketTransport {
         peer: &PeerInfo,
         authenticator: Arc<dyn Authenticator>,
         config: WebSocketConfig,
+        node_id: Uuid,
     ) -> Result<WebSocketConnection> {
         let mut progress = ConnectionProgress::new();
         progress.start_connecting(&peer.name);
@@ -196,7 +205,7 @@ impl WebSocketTransport {
         // Perform handshake and authentication
         progress.start_handshake();
         connection
-            .perform_handshake(&*authenticator)
+            .perform_handshake(&*authenticator, node_id)
             .await
             .map_err(|e| {
                 progress.error("Handshake failed");
@@ -237,6 +246,7 @@ impl WebSocketTransport {
             authenticator: self.authenticator.clone(),
             config: self.config.clone(),
             sequence_counter: self.sequence_counter.clone(),
+            node_id: self.node_id,
         })
     }
 }
@@ -367,6 +377,7 @@ impl WebSocketConnection {
 
         // Inbound message task
         let connection_id = self.id;
+        let peer_info_id = self.peer_info.id;
         tokio::spawn(async move {
             debug!(
                 "Starting inbound message task for connection {}",
@@ -376,8 +387,11 @@ impl WebSocketConnection {
             while let Some(ws_msg) = ws_stream.next().await {
                 match ws_msg {
                     Ok(WsMessage::Text(text)) => match serde_json::from_str::<Message>(&text) {
-                        Ok(message) => {
+                        Ok(mut message) => {
                             debug!("Received {} message", message.message_type);
+
+                            // Set the source peer ID for tracking
+                            message.source_peer_id = Some(peer_info_id);
 
                             if recv_tx.send(message).is_err() {
                                 debug!("Receive channel closed");
@@ -424,7 +438,11 @@ impl WebSocketConnection {
     }
 
     /// Perform connection handshake
-    async fn perform_handshake(&mut self, authenticator: &dyn Authenticator) -> Result<()> {
+    async fn perform_handshake(
+        &mut self,
+        authenticator: &dyn Authenticator,
+        node_id: Uuid,
+    ) -> Result<()> {
         self.state = ConnectionState::Connecting;
 
         // Get our public key for the handshake
@@ -436,7 +454,7 @@ impl WebSocketConnection {
         // Create handshake payload
         let handshake_payload = HandshakePayload {
             version: PROTOCOL_VERSION.to_string(),
-            peer_id: Uuid::new_v4(), // This should be our peer ID
+            peer_id: node_id, // Use our actual node ID
             capabilities: vec![
                 "clipboard_sync".to_string(),
                 "streaming".to_string(),
@@ -489,6 +507,8 @@ impl WebSocketConnection {
                         });
                     }
                     info!("Handshake completed with peer {}", payload.peer_id);
+                    // Update peer info with the actual peer ID
+                    self.peer_info.id = payload.peer_id;
                     self.state = ConnectionState::Connected;
                     Ok(())
                 } else {
@@ -706,7 +726,7 @@ impl Listener for WebSocketListener {
 
         // Handle incoming handshake and authentication
         connection
-            .handle_incoming_handshake(&*self.authenticator)
+            .handle_incoming_handshake(&*self.authenticator, self.node_id)
             .await?;
         connection
             .handle_incoming_authentication(&*self.authenticator)
@@ -737,6 +757,7 @@ impl WebSocketConnection {
     async fn handle_incoming_handshake(
         &mut self,
         _authenticator: &dyn Authenticator,
+        node_id: Uuid,
     ) -> Result<()> {
         // Wait for handshake
         let handshake = self.receive_message().await?;
@@ -774,7 +795,7 @@ impl WebSocketConnection {
             // Send handshake response
             let response_payload = HandshakePayload {
                 version: PROTOCOL_VERSION.to_string(),
-                peer_id: Uuid::new_v4(), // Our peer ID
+                peer_id: node_id, // Use our actual node ID
                 capabilities: vec![
                     "clipboard_sync".to_string(),
                     "streaming".to_string(),
@@ -804,8 +825,10 @@ impl WebSocketConnection {
                             .to_string(),
                 })?;
 
+            // Update peer info with the actual peer ID from handshake
+            self.peer_info.id = payload.peer_id;
             self.state = ConnectionState::Connected;
-            info!("Handshake completed with client");
+            info!("Handshake completed with client {}", payload.peer_id);
 
             Ok(())
         } else {

@@ -108,11 +108,21 @@ impl SyncEngine {
     }
 
     async fn connect_to_peer(&self, peer: &Peer) -> Result<()> {
-        let _connection = self.transport.connect(&peer.address).await?;
+        // Store the connection with proper authentication
+        let connection = self.transport.connect(&peer.address).await?;
 
-        // TODO: Implement proper authentication
-        // For now, just log the connection
-        info!("Connected to peer {} at {}", peer.id, peer.address);
+        // The transport layer now handles authentication automatically
+        // through the WebSocket handshake and SSH key verification
+        info!(
+            "Connected and authenticated with peer {} at {}",
+            peer.id, peer.address
+        );
+
+        // Store the authenticated connection for message routing
+        self.transport
+            .register_peer_connection(peer.id, connection)
+            .await?;
+
         Ok(())
     }
 
@@ -296,11 +306,17 @@ impl SyncEngine {
                                 }
                             };
 
+                            // Extract the source peer ID from the message
+                            let source_peer_id = message.source_peer_id.unwrap_or_else(|| {
+                                warn!("Message missing source_peer_id, using random UUID");
+                                Uuid::new_v4()
+                            });
+
                             let entry = ClipboardEntry {
                                 id: Uuid::new_v4(),
                                 content,
                                 timestamp: message.timestamp,
-                                source: Uuid::new_v4(), // TODO: extract from message context
+                                source: source_peer_id,
                                 checksum: clipboard_data.checksum,
                             };
 

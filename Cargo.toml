@@ -90,7 +90,7 @@ x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
 wayland-client = "0.31"
 wayland-protocols = "0.31"
 wayland-protocols-wlr = "0.2"
-nix = { version = "0.29", features = ["poll"] }
+nix = { version = "0.29", features = ["poll", "process", "signal", "user", "fs"] }
 
 # Validation
 validator = { version = "0.18", features = ["derive"] }

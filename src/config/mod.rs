@@ -34,6 +34,10 @@ pub enum ConfigError {
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Unique node identifier (generated on first run)
+    #[serde(default = "default_node_id")]
+    pub node_id: uuid::Uuid,
+
     /// Network address to listen on
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
@@ -128,6 +132,10 @@ pub struct SecurityConfig {
 }
 
 // Default value functions
+fn default_node_id() -> uuid::Uuid {
+    uuid::Uuid::new_v4()
+}
+
 fn default_listen_addr() -> String {
     ":8484".to_string()
 }
@@ -237,6 +245,7 @@ impl Default for SecurityConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            node_id: default_node_id(),
             listen_addr: default_listen_addr(),
             advertise_name: default_advertise_name(),
             auth: AuthConfig::default(),

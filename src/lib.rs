@@ -22,6 +22,7 @@ pub mod auth;
 pub mod cli;
 pub mod clipboard;
 pub mod config;
+pub mod daemon;
 pub mod discovery;
 pub mod history;
 pub mod hotkey;
