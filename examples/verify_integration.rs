@@ -1,6 +1,5 @@
 use anyhow::Result;
-use clipsync::adapters::{get_clipboard_provider, ClipboardProviderWrapper};
-use std::sync::Arc;
+use clipsync::adapters::get_clipboard_provider;
 
 #[tokio::main]
 async fn main() -> Result<()> {

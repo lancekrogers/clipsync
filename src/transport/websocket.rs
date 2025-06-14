@@ -336,7 +336,7 @@ impl WebSocketConnection {
                                     }
                                 };
 
-                                if let Err(e) = ws_sink.send(WsMessage::Text(serialized)).await {
+                                if let Err(e) = ws_sink.send(WsMessage::Text(serialized.into())).await {
                                     error!("Failed to send WebSocket message: {}", e);
                                     break;
                                 }

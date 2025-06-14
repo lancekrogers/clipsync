@@ -8,6 +8,7 @@ use tempfile::TempDir;
 /// Mock transport layer that uses authentication
 struct MockTransport {
     authenticator: Arc<SshAuthenticator>,
+    #[allow(dead_code)]
     config: Arc<Config>,
 }
 

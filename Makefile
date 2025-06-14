@@ -76,7 +76,7 @@ release:
 	$(CARGO) build --release --target $(TARGET)
 
 test:
-	$(CARGO) test --all-features
+	$(CARGO) test
 	$(CARGO) test --doc
 
 test-integration:

@@ -1,7 +1,6 @@
 //! Demonstration of ClipSync SSH authentication
 
 use clipsync::auth::*;
-use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[tokio::main]

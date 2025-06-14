@@ -292,7 +292,14 @@ mod tests {
     async fn setup_test_db() -> Result<(HistoryDatabase, Encryptor, TempDir)> {
         let temp_dir = TempDir::new()?;
         let db_path = temp_dir.path().join("test.db");
-        let encryptor = Encryptor::new().await?;
+
+        // Create a test encryptor with a fixed key
+        use rand::RngCore;
+        let mut key = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key);
+
+        let encryptor = Encryptor::new_for_tests(key)?;
+
         let db = HistoryDatabase::new(&db_path, encryptor.get_key()).await?;
         Ok((db, encryptor, temp_dir))
     }
