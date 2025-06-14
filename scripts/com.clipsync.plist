@@ -7,15 +7,18 @@
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/clipsync</string>
+        <string>start</string>
         <string>--daemon</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
-    <key>StandardErrorPath</key>
-    <string>/tmp/clipsync.err</string>
     <key>StandardOutPath</key>
     <string>/tmp/clipsync.out</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/clipsync.err</string>
+    <key>WorkingDirectory</key>
+    <string>/Users</string>
 </dict>
 </plist>

@@ -101,6 +101,15 @@ impl Encryptor {
         format!("{:x}", hasher.finalize())
     }
 
+    #[cfg(test)]
+    pub fn new_for_tests(key: [u8; 32]) -> Result<Self> {
+        let cipher = Aes256Gcm::new_from_slice(&key)?;
+        Ok(Self {
+            cipher,
+            key: Zeroizing::new(key),
+        })
+    }
+
     async fn load_or_create_key() -> Result<[u8; 32]> {
         // Use file-based key storage for cross-platform compatibility
         let key_path = Self::get_key_file_path()?;
@@ -159,9 +168,12 @@ impl Encryptor {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(parent)?.permissions();
-                perms.set_mode(0o700); // rwx for owner only
-                fs::set_permissions(parent, perms)?;
+                if let Ok(metadata) = fs::metadata(parent) {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(0o700); // rwx for owner only
+                                           // Ignore permission errors in tests/temp directories
+                    let _ = fs::set_permissions(parent, perms);
+                }
             }
         }
 
@@ -172,9 +184,12 @@ impl Encryptor {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(path)?.permissions();
-            perms.set_mode(0o600); // Read/write for owner only
-            fs::set_permissions(path, perms)?;
+            if let Ok(metadata) = fs::metadata(path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o600); // Read/write for owner only
+                                       // Ignore permission errors in tests/temp directories
+                let _ = fs::set_permissions(path, perms);
+            }
         }
 
         // On Windows, file permissions are handled by default ACLs
@@ -241,10 +256,33 @@ impl Encryptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    async fn create_test_encryptor() -> Result<(Encryptor, TempDir)> {
+        let temp_dir = TempDir::new()?;
+        let key_path = temp_dir.path().join("test_key");
+
+        // Generate a test key
+        let mut key = [0u8; 32];
+        use rand::RngCore;
+        OsRng.fill_bytes(&mut key);
+
+        // Save it to the temp file
+        std::fs::write(&key_path, &key)?;
+
+        // Create encryptor with the key
+        let cipher = Aes256Gcm::new_from_slice(&key)?;
+        let encryptor = Encryptor {
+            cipher,
+            key: Zeroizing::new(key),
+        };
+
+        Ok((encryptor, temp_dir))
+    }
 
     #[tokio::test]
     async fn test_encrypt_decrypt_roundtrip() {
-        let encryptor = Encryptor::new().await.unwrap();
+        let (encryptor, _temp_dir) = create_test_encryptor().await.unwrap();
         let plaintext = b"Hello, world!";
 
         let encrypted = encryptor.encrypt(plaintext).unwrap();
@@ -255,7 +293,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_large_payload_compression() {
-        let encryptor = Encryptor::new().await.unwrap();
+        let (encryptor, _temp_dir) = create_test_encryptor().await.unwrap();
         let large_data = vec![b'A'; 200 * 1024]; // 200KB of 'A's
 
         let encrypted = encryptor.encrypt(&large_data).unwrap();

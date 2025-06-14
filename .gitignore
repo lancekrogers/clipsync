@@ -61,6 +61,7 @@ logs/
 tmp/
 temp/
 *.tmp
+test_config.toml
 
 # OS specific
 Thumbs.db
@@ -92,3 +93,11 @@ debug/
 *.icns
 !assets/*.ico
 !assets/*.icns
+
+# User-specific installation
+~/.local/bin/clipsync
+~/.config/clipsync/
+
+# Rust
+**/*.rs.bk
+*.pdb

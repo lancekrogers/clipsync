@@ -320,14 +320,14 @@ mod reconnection_tests {
             peer_id: Uuid::new_v4(),
             health_status: HealthStatus::Healthy,
             attempt_count: 1,
-            successful_checks: 95,  // Changed to make success rate > 0.9
+            successful_checks: 95, // Changed to make success rate > 0.9
             failed_checks: 5,
             avg_response_time: std::time::Duration::from_millis(50),
             uptime: std::time::Duration::from_secs(120),
             last_check: Some(std::time::Instant::now()),
         };
 
-        assert!(stats.success_rate() > 0.9);  // Now 0.95
+        assert!(stats.success_rate() > 0.9); // Now 0.95
         assert!(stats.is_stable());
 
         let unstable_stats = ConnectionStats {

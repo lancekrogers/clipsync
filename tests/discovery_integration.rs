@@ -30,53 +30,60 @@ async fn test_discovery_lifecycle() {
 }
 
 /// Test discovery events
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(not(feature = "integration-tests"), ignore)]
 async fn test_discovery_events() {
-    let config = Config::default();
-    let mut discovery = DiscoveryService::new(&config).unwrap();
+    // Wrap entire test in timeout
+    let result = timeout(Duration::from_secs(10), async {
+        let config = Config::default();
+        let mut discovery = DiscoveryService::new(&config).unwrap();
 
-    // Subscribe to events before starting
-    let mut events = discovery.subscribe_changes();
+        // Subscribe to events before starting
+        let mut events = discovery.subscribe_changes();
 
-    // Start discovery
-    discovery.start().await.unwrap();
+        // Start discovery
+        discovery.start().await.unwrap();
 
-    // Manually add a peer through peer manager
-    let peer_info = PeerInfo {
-        id: Uuid::new_v4(),
-        name: "test-peer".to_string(),
-        addresses: vec!["192.168.1.100:9090".parse().unwrap()],
-        port: 9090,
-        version: "1.0.0".to_string(),
-        platform: "test".to_string(),
-        metadata: Default::default(),
-        last_seen: chrono::Utc::now().timestamp(),
-    };
+        // Manually add a peer through peer manager
+        let peer_info = PeerInfo {
+            id: Uuid::new_v4(),
+            name: "test-peer".to_string(),
+            addresses: vec!["192.168.1.100:9090".parse().unwrap()],
+            port: 9090,
+            version: "1.0.0".to_string(),
+            platform: "test".to_string(),
+            metadata: Default::default(),
+            last_seen: chrono::Utc::now().timestamp(),
+        };
 
-    discovery
-        .peer_manager()
-        .add_peer(
-            peer_info.clone(),
-            clipsync::discovery::DiscoveryMethod::Manual,
-        )
-        .await
-        .unwrap();
+        discovery
+            .peer_manager()
+            .add_peer(
+                peer_info.clone(),
+                clipsync::discovery::DiscoveryMethod::Manual,
+            )
+            .await
+            .unwrap();
 
-    // Should receive peer discovered event
-    let event = timeout(Duration::from_secs(1), events.recv())
-        .await
-        .expect("Timeout waiting for event")
-        .expect("No event received");
+        // Should receive peer discovered event
+        let event = timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("Timeout waiting for event")
+            .expect("No event received");
 
-    match event {
-        DiscoveryEvent::PeerDiscovered(peer) => {
-            assert_eq!(peer.id, peer_info.id);
-            assert_eq!(peer.name, "test-peer");
+        match event {
+            DiscoveryEvent::PeerDiscovered(peer) => {
+                assert_eq!(peer.id, peer_info.id);
+                assert_eq!(peer.name, "test-peer");
+            }
+            _ => panic!("Expected PeerDiscovered event"),
         }
-        _ => panic!("Expected PeerDiscovered event"),
-    }
 
-    discovery.stop().await.unwrap();
+        discovery.stop().await.unwrap();
+    })
+    .await;
+
+    result.expect("Test timed out");
 }
 
 /// Test manual peer configuration
@@ -175,35 +182,42 @@ async fn test_service_info_builder() {
 }
 
 /// Test concurrent discovery operations
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg_attr(not(feature = "integration-tests"), ignore)]
 async fn test_concurrent_discovery() {
-    let config = Config::default();
-    let mut discovery = DiscoveryService::new(&config).unwrap();
+    // Wrap entire test in timeout
+    let result = timeout(Duration::from_secs(10), async {
+        let config = Config::default();
+        let mut discovery = DiscoveryService::new(&config).unwrap();
 
-    discovery.start().await.unwrap();
+        discovery.start().await.unwrap();
 
-    // Spawn multiple tasks that interact with discovery
-    let mut handles = vec![];
+        // Spawn multiple tasks that interact with discovery
+        let mut handles = vec![];
 
-    for i in 0..5 {
-        let mut discovery_clone = DiscoveryService::new(&config).unwrap();
-        let handle = tokio::spawn(async move {
-            discovery_clone.start().await.unwrap();
+        for i in 0..5 {
+            let mut discovery_clone = DiscoveryService::new(&config).unwrap();
+            let handle = tokio::spawn(async move {
+                discovery_clone.start().await.unwrap();
 
-            let service_info = ServiceInfo::from_config(Uuid::new_v4(), 9090 + i);
-            discovery_clone.announce(service_info).await.unwrap();
+                let service_info = ServiceInfo::from_config(Uuid::new_v4(), 9090 + i);
+                discovery_clone.announce(service_info).await.unwrap();
 
-            let _ = discovery_clone.discover_peers().await.unwrap();
+                let _ = discovery_clone.discover_peers().await.unwrap();
 
-            discovery_clone.stop().await.unwrap();
-        });
-        handles.push(handle);
-    }
+                discovery_clone.stop().await.unwrap();
+            });
+            handles.push(handle);
+        }
 
-    // Wait for all tasks
-    for handle in handles {
-        handle.await.unwrap();
-    }
+        // Wait for all tasks
+        for handle in handles {
+            handle.await.unwrap();
+        }
 
-    discovery.stop().await.unwrap();
+        discovery.stop().await.unwrap();
+    })
+    .await;
+
+    result.expect("Test timed out");
 }

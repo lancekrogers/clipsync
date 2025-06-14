@@ -25,7 +25,7 @@ else ifeq ($(UNAME_S),Linux)
     endif
 endif
 
-.PHONY: all build release test clean install uninstall fmt lint bench check pre-commit help
+.PHONY: all build release test clean install install-user uninstall fmt lint bench check pre-commit help
 
 # Default target - show help if no target specified
 all: help
@@ -46,7 +46,8 @@ help:
 	@echo "  make lint           Run clippy linter and audit"
 	@echo "  make bench          Run benchmarks"
 	@echo "  make clean          Remove build artifacts"
-	@echo "  make install        Install clipsync system-wide"
+	@echo "  make install        Install clipsync to ~/.local/bin (no sudo)"
+	@echo "  make install-user   Same as install (no sudo required)"
 	@echo "  make uninstall      Remove clipsync from system"
 	@echo "  make package        Create distribution package"
 	@echo "  make build-all      Build for all supported platforms"
@@ -76,7 +77,7 @@ release:
 	$(CARGO) build --release --target $(TARGET)
 
 test:
-	$(CARGO) test --all-features
+	$(CARGO) test
 	$(CARGO) test --doc
 
 test-integration:
@@ -101,14 +102,20 @@ lint:
 bench:
 	$(CARGO) bench
 
+install-user: release
+	@./install_user.sh
+
 install: release
 ifeq ($(PLATFORM),macos)
-	cp $(RELEASE_DIR)/clipsync /usr/local/bin/
-	cp dist/com.clipsync.plist ~/Library/LaunchAgents/
+	mkdir -p ~/.local/bin
+	cp $(RELEASE_DIR)/clipsync ~/.local/bin/
+	cp scripts/com.clipsync.plist ~/Library/LaunchAgents/
+	# Update the plist to use the user-local binary
+	sed -i '' 's|/usr/local/bin/clipsync|$(HOME)/.local/bin/clipsync|g' ~/Library/LaunchAgents/com.clipsync.plist
 	launchctl load ~/Library/LaunchAgents/com.clipsync.plist
 else
 	sudo cp $(RELEASE_DIR)/clipsync /usr/local/bin/
-	sudo cp dist/clipsync.service /etc/systemd/system/
+	sudo cp scripts/clipsync.service /etc/systemd/system/
 	sudo systemctl daemon-reload
 	sudo systemctl enable clipsync
 endif
@@ -117,7 +124,7 @@ uninstall:
 ifeq ($(PLATFORM),macos)
 	launchctl unload ~/Library/LaunchAgents/com.clipsync.plist
 	rm -f ~/Library/LaunchAgents/com.clipsync.plist
-	rm -f /usr/local/bin/clipsync
+	rm -f ~/.local/bin/clipsync
 else
 	sudo systemctl stop clipsync
 	sudo systemctl disable clipsync

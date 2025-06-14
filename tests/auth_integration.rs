@@ -19,7 +19,7 @@ async fn test_full_authentication_flow() {
 
     // Create first authenticator (peer A)
     let auth_a = SshAuthenticator::new(config.clone()).await.unwrap();
-    let pubkey_a = auth_a.get_public_key().await.unwrap();
+    let _pubkey_a = auth_a.get_public_key().await.unwrap();
 
     // Create second key pair for peer B
     let keypair_b = KeyPair::generate(KeyType::Ed25519).unwrap();
