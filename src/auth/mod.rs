@@ -9,10 +9,12 @@ use thiserror::Error;
 pub mod authorized;
 pub mod keys;
 pub mod ssh;
+pub mod trust;
 
 pub use authorized::{AuthorizedKey, AuthorizedKeys};
 pub use keys::{KeyPair, KeyType, PublicKey};
 pub use ssh::{AuthToken, PeerId, SshAuthenticator};
+pub use trust::{TrustDecision, TrustManager, TrustStatus};
 
 /// Authentication errors
 #[derive(Debug, Error)]

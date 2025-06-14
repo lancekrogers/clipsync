@@ -439,9 +439,6 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for WaylandState {
                     }
                 }
             }
-            wl_data_source::Event::Cancelled => {
-                // Data source was cancelled, we can clean up if needed
-            }
             _ => {}
         }
     }

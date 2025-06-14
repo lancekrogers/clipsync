@@ -30,6 +30,8 @@ pub struct PeerInfo {
 pub struct PeerMetadata {
     /// SSH public key fingerprint for encryption
     pub ssh_fingerprint: Option<String>,
+    /// SSH public key in OpenSSH format
+    pub ssh_public_key: Option<String>,
     /// Supported features/capabilities
     pub capabilities: Vec<String>,
     /// User-defined device name
@@ -146,6 +148,11 @@ impl PeerInfo {
             .find(|(k, _)| k == "ssh_fp")
             .map(|(_, v)| v.clone());
 
+        let ssh_public_key = txt_data
+            .iter()
+            .find(|(k, _)| k == "pubkey")
+            .map(|(_, v)| v.clone());
+
         let capabilities = txt_data
             .iter()
             .find(|(k, _)| k == "caps")
@@ -166,6 +173,7 @@ impl PeerInfo {
             platform,
             metadata: PeerMetadata {
                 ssh_fingerprint,
+                ssh_public_key,
                 capabilities,
                 device_name,
             },
