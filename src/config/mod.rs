@@ -389,6 +389,51 @@ impl Config {
         Ok(())
     }
 
+    /// Validate configuration file at given path
+    pub async fn validate(path: &std::path::Path) -> Result<(), ConfigError> {
+        // Try to load and validate the config
+        match Self::load_from_path(path) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e)
+        }
+    }
+
+    /// Load configuration with optional custom path (async wrapper)
+    pub async fn load_config(config_path: Option<std::path::PathBuf>) -> Result<Self, ConfigError> {
+        if let Some(path) = config_path {
+            Self::load_from_path(&path)
+        } else {
+            Self::load()
+        }
+    }
+
+    /// Generate example configuration file
+    pub async fn generate_example_config(force: bool) -> Result<(), ConfigError> {
+        let config = Self::default();
+        let example_content = Self::generate_example();
+        
+        let config_dir = dirs::config_dir()
+            .ok_or_else(|| {
+                ConfigError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "Could not find config directory",
+                ))
+            })?
+            .join("clipsync");
+        
+        std::fs::create_dir_all(&config_dir)?;
+        let config_path = config_dir.join("config.toml");
+        
+        if !force && config_path.exists() {
+            return Err(ConfigError::Validation(
+                "Config file already exists. Use --force to overwrite.".to_string()
+            ));
+        }
+        
+        std::fs::write(config_path, example_content)?;
+        Ok(())
+    }
+
     /// Generate example configuration file
     pub fn generate_example() -> String {
         let config = Config::default();
