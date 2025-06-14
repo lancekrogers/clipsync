@@ -9,6 +9,7 @@ use crate::adapters::{
     get_clipboard_provider, ClipboardProviderWrapper, HistoryManager, PeerDiscovery,
 };
 use crate::config::Config;
+#[cfg(target_os = "linux")]
 use crate::daemon;
 use crate::hotkey::HotKeyManager;
 use crate::sync::{SyncEngine, TrustAwareSyncEngine};
@@ -204,15 +205,25 @@ impl CliHandler {
     async fn start_daemon(&mut self, foreground: bool) -> Result<()> {
         info!("Starting ClipSync daemon");
 
-        // Check if daemon is already running
-        if daemon::is_daemon_running()? {
-            println!("ClipSync daemon is already running");
-            return Ok(());
+        #[cfg(target_os = "linux")]
+        {
+            // Check if daemon is already running
+            if daemon::is_daemon_running()? {
+                println!("ClipSync daemon is already running");
+                return Ok(());
+            }
+
+            if !foreground {
+                info!("Running in daemon mode");
+                daemon::daemonize()?;
+            }
         }
 
-        if !foreground {
-            info!("Running in daemon mode");
-            daemon::daemonize()?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            if !foreground {
+                println!("Warning: Daemon mode not supported on this platform, running in foreground");
+            }
         }
 
         // Ensure all components are initialized for daemon mode
@@ -261,7 +272,20 @@ impl CliHandler {
 
         // Setup signal handler for graceful shutdown
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        #[cfg(target_os = "linux")]
         daemon::setup_signal_handlers(shutdown_tx)?;
+        
+        #[cfg(not(target_os = "linux"))]
+        {
+            // For non-Linux platforms, we'll handle Ctrl+C manually
+            let shutdown_tx = Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx)));
+            tokio::spawn(async move {
+                tokio::signal::ctrl_c().await.ok();
+                if let Some(tx) = shutdown_tx.lock().await.take() {
+                    let _ = tx.send(());
+                }
+            });
+        }
 
         // Run services until shutdown signal
         tokio::select! {
@@ -280,6 +304,7 @@ impl CliHandler {
         }
 
         // Cleanup
+        #[cfg(target_os = "linux")]
         daemon::remove_pidfile()?;
         info!("ClipSync daemon stopped");
 
@@ -288,8 +313,15 @@ impl CliHandler {
 
     async fn stop_daemon(&self) -> Result<()> {
         info!("Stopping ClipSync daemon");
-        daemon::stop_daemon()?;
-        println!("ClipSync daemon stopped");
+        #[cfg(target_os = "linux")]
+        {
+            daemon::stop_daemon()?;
+            println!("ClipSync daemon stopped");
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            println!("Daemon stop not supported on this platform");
+        }
         Ok(())
     }
 
@@ -300,19 +332,26 @@ impl CliHandler {
         println!("  Node ID: {}", self.config.node_id());
 
         // Check if daemon is running
-        if daemon::is_daemon_running()? {
-            if let Some(pid) = daemon::read_pidfile()? {
-                println!("  Daemon: Running (PID: {})", pid);
+        #[cfg(target_os = "linux")]
+        {
+            if daemon::is_daemon_running()? {
+                if let Some(pid) = daemon::read_pidfile()? {
+                    println!("  Daemon: Running (PID: {})", pid);
+                } else {
+                    println!("  Daemon: Running");
+                }
             } else {
-                println!("  Daemon: Running");
+                println!("  Daemon: Not running");
             }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            println!("  Daemon: Not supported on this platform");
+        }
 
-            if let Some(sync_engine) = &self.sync_engine {
-                let peers = sync_engine.get_connected_peers().await;
-                println!("  Connected Peers: {}", peers.len());
-            }
-        } else {
-            println!("  Daemon: Not running");
+        if let Some(sync_engine) = &self.sync_engine {
+            let peers = sync_engine.get_connected_peers().await;
+            println!("  Connected Peers: {}", peers.len());
         }
 
         Ok(())
