@@ -3,13 +3,13 @@ Description=ClipSync - Cross-platform clipboard synchronization
 After=network.target
 
 [Service]
-Type=simple
-ExecStart=/usr/local/bin/clipsync start --daemon
+Type=forking
+ExecStart=/usr/local/bin/clipsync start
 Restart=always
 RestartSec=10
-User=%i
-Environment="DISPLAY=:0"
-Environment="HOME=/home/%i"
+User=clipsync
+Group=clipsync
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
 
 [Install]
-WantedBy=default.target
+WantedBy=multi-user.target
