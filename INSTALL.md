@@ -35,7 +35,22 @@ make release
 
 ### macOS
 
-#### Option 1: Manual Installation
+#### Option 1: User Installation (No sudo required) - Recommended
+```bash
+# Run the user installation script
+./install_user.sh
+
+# Or manually:
+mkdir -p ~/.local/bin
+cp target/release/clipsync ~/.local/bin/
+~/.local/bin/clipsync config init > ~/.config/clipsync/config.toml
+
+# Add to PATH in your shell config
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+#### Option 2: System-wide Installation (Requires sudo)
 ```bash
 # Build the release binary
 make release
@@ -43,15 +58,12 @@ make release
 # Copy binary to system path
 sudo cp target/release/clipsync /usr/local/bin/
 
-# Create LaunchAgent directory if it doesn't exist
-mkdir -p ~/Library/LaunchAgents
-
 # Install LaunchAgent (for auto-start)
 cp scripts/com.clipsync.plist ~/Library/LaunchAgents/
 launchctl load ~/Library/LaunchAgents/com.clipsync.plist
 ```
 
-#### Option 2: Using Make
+#### Option 3: Using Make (User installation)
 ```bash
 make install
 ```
