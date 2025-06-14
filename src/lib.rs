@@ -1,4 +1,9 @@
-#![doc = include_str!("../README.md")]
+//! # ClipSync
+//!
+//! Cross-platform clipboard synchronization service for macOS and Linux.
+//!
+//! ClipSync provides secure, peer-to-peer clipboard synchronization between
+//! devices with support for text, images, and files.
 // Temporarily allow all warnings to focus on compilation errors
 #![allow(warnings)]
 #![allow(clippy::all)]

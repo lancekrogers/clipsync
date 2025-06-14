@@ -1,15 +1,15 @@
 [Unit]
-Description=ClipSync - Clipboard Synchronization Service
+Description=ClipSync - Cross-platform clipboard synchronization
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/clipsync --daemon
+ExecStart=/usr/local/bin/clipsync start --daemon
 Restart=always
 RestartSec=10
 User=%i
 Environment="DISPLAY=:0"
-Environment="WAYLAND_DISPLAY=wayland-0"
+Environment="HOME=/home/%i"
 
 [Install]
 WantedBy=default.target

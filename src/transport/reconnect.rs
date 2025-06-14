@@ -501,14 +501,14 @@ mod tests {
             peer_id: Uuid::new_v4(),
             health_status: HealthStatus::Healthy,
             attempt_count: 1,
-            successful_checks: 10,  // Changed to 10 successes
+            successful_checks: 10, // Changed to 10 successes
             failed_checks: 1,
             avg_response_time: Duration::from_millis(100),
             uptime: Duration::from_secs(120),
             last_check: Some(Instant::now()),
         };
 
-        assert!(stats.success_rate() > 0.9);  // Now ~0.909
+        assert!(stats.success_rate() > 0.9); // Now ~0.909
         assert!(stats.is_stable());
     }
 

@@ -1,8 +1,6 @@
 //! Example demonstrating clipboard operations
 
 use clipsync::clipboard::{create_provider, ClipboardContent};
-use std::time::Duration;
-use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

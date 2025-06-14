@@ -22,7 +22,6 @@ fn test_max_payload_size() {
 #[tokio::test]
 async fn test_config_creation() {
     let config = Config::default();
-    
     // Basic validation
     assert!(config.clipboard.max_size > 0);
     assert!(config.clipboard.history_size > 0);
@@ -32,7 +31,7 @@ async fn test_config_creation() {
 #[test]
 fn test_config_paths() {
     let config = Config::default();
-    
+
     // Check that paths are set
     assert!(!config.clipboard.history_db.as_os_str().is_empty());
     assert!(!config.auth.authorized_keys.as_os_str().is_empty());
