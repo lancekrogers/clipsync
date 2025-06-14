@@ -194,35 +194,11 @@ impl Config {
         self.clipboard.history_db.clone()
     }
 
-    pub async fn load_config(config_path: Option<std::path::PathBuf>) -> Result<Self> {
-        if let Some(path) = config_path {
-            Self::load_from_path(&path).map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))
-        } else {
-            // Use Config::load() which properly expands paths
-            Self::load().map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))
-        }
-    }
 
     pub async fn save_config(&self) -> Result<()> {
         self.save()
             .map_err(|e| anyhow::anyhow!("Failed to save config: {}", e))
     }
-
-    pub async fn generate_example_config(force: bool) -> Result<()> {
-        let config = Self::default();
-        let example_path = std::path::PathBuf::from("config.example.toml");
-
-        if !force && example_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Example config already exists. Use --force to overwrite."
-            ));
-        }
-
-        config
-            .save()
-            .map_err(|e| anyhow::anyhow!("Failed to save example config: {}", e))
-    }
-
 
     pub fn default_with_path(_path: std::path::PathBuf) -> Self {
         Self::default()

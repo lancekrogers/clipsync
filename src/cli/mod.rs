@@ -93,6 +93,7 @@ pub enum ConfigAction {
 
 pub struct CliHandler {
     config: Arc<Config>,
+    config_path: Option<PathBuf>,
     clipboard: Option<Arc<ClipboardProviderWrapper>>,
     history: Option<Arc<HistoryManager>>,
     discovery: Option<Arc<PeerDiscovery>>,
@@ -103,10 +104,11 @@ pub struct CliHandler {
 
 impl CliHandler {
     pub async fn new(config_path: Option<PathBuf>) -> Result<Self> {
-        let config = Arc::new(Config::load_config(config_path).await?);
+        let config = Arc::new(Config::load_config(config_path.clone()).await?);
 
         Ok(Self {
             config,
+            config_path,
             clipboard: None,
             history: None,
             discovery: None,
@@ -114,6 +116,28 @@ impl CliHandler {
             sync_engine: None,
             hotkey_manager: None,
         })
+    }
+
+    /// Get the resolved config path for validation
+    fn get_config_path_for_validation(&self) -> Option<PathBuf> {
+        if let Some(ref path) = self.config_path {
+            // CLI explicitly specified a config path
+            Some(path.clone())
+        } else {
+            // Use the same logic as Config::find_config_path()
+            // Check environment variable first
+            if let Ok(path) = std::env::var("CLIPSYNC_CONFIG") {
+                let path = PathBuf::from(path);
+                if path.exists() {
+                    return Some(path);
+                }
+            }
+
+            // Check default location
+            dirs::config_dir()
+                .map(|p| p.join("clipsync").join("config.toml"))
+                .filter(|p| p.exists())
+        }
     }
 
     /// Lazily initialize the history manager when needed
@@ -348,12 +372,27 @@ impl CliHandler {
                 println!("{:#?}", self.config);
             }
             ConfigAction::Init { force } => {
-                Config::generate_example_config(force).await?;
+                Config::generate_example_config(force).await
+                    .map_err(|e| anyhow::anyhow!("Config error: {}", e))?;
                 println!("Example configuration generated");
             }
             ConfigAction::Validate => {
-                // Config is already loaded and validated in CliHandler::new()
-                println!("Configuration is valid");
+                if let Some(config_path) = self.get_config_path_for_validation() {
+                    match Config::validate(&config_path).await {
+                        Ok(_) => println!("Configuration is valid"),
+                        Err(e) => {
+                            error!("Configuration validation failed: {}", e);
+                            return Err(anyhow::anyhow!("Config error: {}", e));
+                        }
+                    }
+                } else {
+                    println!("No configuration file found to validate");
+                    println!("Checked locations:");
+                    println!("  - CLIPSYNC_CONFIG environment variable");
+                    if let Some(config_dir) = dirs::config_dir() {
+                        println!("  - {}", config_dir.join("clipsync").join("config.toml").display());
+                    }
+                }
             }
         }
         Ok(())
