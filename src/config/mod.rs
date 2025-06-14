@@ -34,6 +34,9 @@ pub enum ConfigError {
 /// Main configuration structure
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    /// Node ID (generated if not specified)
+    #[serde(default = "generate_node_id")]
+    pub node_id: uuid::Uuid,
     /// Network address to listen on
     #[serde(default = "default_listen_addr")]
     pub listen_addr: String,
@@ -73,6 +76,29 @@ pub struct AuthConfig {
     /// Path to authorized keys file
     #[serde(default = "default_authorized_keys")]
     pub authorized_keys: PathBuf,
+}
+
+impl AuthConfig {
+    /// Get the public key path based on the private key path
+    pub fn get_public_key_path(&self) -> PathBuf {
+        let mut pub_path = self.ssh_key.clone();
+        let filename = pub_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        pub_path.set_file_name(format!("{}.pub", filename));
+        pub_path
+    }
+
+    /// Load the public key content
+    pub async fn load_public_key(&self) -> Result<String, ConfigError> {
+        let pub_path = self.get_public_key_path();
+        if !pub_path.exists() {
+            return Err(ConfigError::SshKeyNotFound(pub_path));
+        }
+
+        let content = tokio::fs::read_to_string(&pub_path)
+            .await
+            .map_err(|e| ConfigError::Io(e))?;
+        Ok(content.trim().to_string())
+    }
 }
 
 /// Clipboard configuration
@@ -193,6 +219,10 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+fn generate_node_id() -> uuid::Uuid {
+    uuid::Uuid::new_v4()
+}
+
 // Default implementations
 impl Default for AuthConfig {
     fn default() -> Self {
@@ -237,6 +267,7 @@ impl Default for SecurityConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            node_id: generate_node_id(),
             listen_addr: default_listen_addr(),
             advertise_name: default_advertise_name(),
             auth: AuthConfig::default(),
@@ -394,7 +425,7 @@ impl Config {
         // Try to load and validate the config
         match Self::load_from_path(path) {
             Ok(_) => Ok(()),
-            Err(e) => Err(e)
+            Err(e) => Err(e),
         }
     }
 
@@ -411,7 +442,7 @@ impl Config {
     pub async fn generate_example_config(force: bool) -> Result<(), ConfigError> {
         let config = Self::default();
         let example_content = Self::generate_example();
-        
+
         let config_dir = dirs::config_dir()
             .ok_or_else(|| {
                 ConfigError::Io(std::io::Error::new(
@@ -420,16 +451,16 @@ impl Config {
                 ))
             })?
             .join("clipsync");
-        
+
         std::fs::create_dir_all(&config_dir)?;
         let config_path = config_dir.join("config.toml");
-        
+
         if !force && config_path.exists() {
             return Err(ConfigError::Validation(
-                "Config file already exists. Use --force to overwrite.".to_string()
+                "Config file already exists. Use --force to overwrite.".to_string(),
             ));
         }
-        
+
         std::fs::write(config_path, example_content)?;
         Ok(())
     }

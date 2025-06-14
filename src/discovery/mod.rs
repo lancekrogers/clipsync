@@ -3,6 +3,7 @@
 pub mod fallback;
 pub mod mdns;
 pub mod peers;
+pub mod trust_integration;
 pub mod types;
 
 #[cfg(test)]
@@ -15,6 +16,7 @@ use tokio::sync::mpsc::Receiver;
 pub use fallback::FallbackDiscovery;
 pub use mdns::MdnsDiscovery;
 pub use peers::PeerManager;
+pub use trust_integration::TrustAwareDiscovery;
 pub use types::{DiscoveryEvent, DiscoveryMethod, PeerInfo, PeerMetadata, ServiceInfo};
 
 /// Trait for service discovery implementations

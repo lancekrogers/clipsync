@@ -148,6 +148,7 @@ async fn test_peer_capabilities() {
         platform: "linux".to_string(),
         metadata: clipsync::discovery::PeerMetadata {
             ssh_fingerprint: Some("SHA256:abcd1234".to_string()),
+            ssh_public_key: None,
             capabilities: vec!["encryption".to_string(), "compression".to_string()],
             device_name: Some("My Device".to_string()),
         },

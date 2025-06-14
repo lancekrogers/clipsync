@@ -57,7 +57,7 @@ impl WaylandClipboard {
         let mut event_queue = connection.new_event_queue();
         let qhandle = event_queue.handle();
 
-        // Get registry and bind required globals  
+        // Get registry and bind required globals
         let mut state_for_registry = WaylandState {
             data_device_manager: None,
             data_device: None,
@@ -329,10 +329,16 @@ impl Dispatch<wl_registry::WlRegistry, ()> for WaylandState {
         _: &Connection,
         qhandle: &QueueHandle<Self>,
     ) {
-        if let wl_registry::Event::Global { name, interface, version } = event {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
             match interface.as_str() {
                 "wl_data_device_manager" => {
-                    let manager = registry.bind::<WlDataDeviceManager, _, _>(name, version, qhandle, ());
+                    let manager =
+                        registry.bind::<WlDataDeviceManager, _, _>(name, version, qhandle, ());
                     state.data_device_manager = Some(manager);
                 }
                 "wl_seat" => {

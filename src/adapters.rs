@@ -6,6 +6,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::config::Config;
+use crate::discovery::Discovery;
 
 // Adapter types for the new sync engine interface
 
@@ -158,32 +159,131 @@ pub async fn get_clipboard_provider() -> Result<ClipboardProviderWrapper> {
 
 // PeerDiscovery adapter
 pub struct PeerDiscovery {
-    inner: crate::discovery::DiscoveryService,
+    inner: Arc<tokio::sync::Mutex<crate::discovery::DiscoveryService>>,
+    event_tx: tokio::sync::broadcast::Sender<Peer>,
+    discovery_event_tx: tokio::sync::broadcast::Sender<crate::discovery::DiscoveryEvent>,
+    config: Arc<Config>,
 }
 
 impl PeerDiscovery {
     pub async fn new(config: Arc<Config>) -> Result<Self> {
         let inner = crate::discovery::DiscoveryService::new(&config)?;
-        Ok(Self { inner })
+        let (event_tx, _) = tokio::sync::broadcast::channel(100);
+        let (discovery_event_tx, _) = tokio::sync::broadcast::channel(100);
+        Ok(Self {
+            inner: Arc::new(tokio::sync::Mutex::new(inner)),
+            event_tx,
+            discovery_event_tx,
+            config,
+        })
     }
 
     pub async fn start(&self) -> Result<()> {
-        // Start discovery service
+        // Load public key for announcement
+        let public_key = self
+            .config
+            .auth
+            .load_public_key()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to load public key: {}", e))?;
+
+        // Create service info with public key
+        let mut service_info = crate::discovery::ServiceInfo::from_config(
+            self.config.node_id(),
+            8484, // TODO: Get from config
+        );
+
+        // Add public key to TXT records
+        service_info
+            .txt_data
+            .push(("pubkey".to_string(), public_key));
+
+        // Start discovery and announce
+        let mut inner = self.inner.lock().await;
+        inner.start().await?;
+        inner.announce(service_info).await?;
+        drop(inner); // Release lock
+
+        // Start event forwarding task
+        let inner_clone = Arc::clone(&self.inner);
+        let event_tx = self.event_tx.clone();
+        let discovery_event_tx = self.discovery_event_tx.clone();
+        let config = Arc::clone(&self.config);
+
+        tokio::spawn(async move {
+            // Get a receiver once at the start
+            let mut event_rx = {
+                let mut inner = inner_clone.lock().await;
+                inner.subscribe_changes()
+            };
+
+            loop {
+                match event_rx.recv().await {
+                    Some(event) => {
+                        // Forward the raw discovery event
+                        let _ = discovery_event_tx.send(event.clone());
+
+                        match event {
+                            crate::discovery::DiscoveryEvent::PeerDiscovered(peer_info) => {
+                                let peer = Peer {
+                                    id: peer_info.id,
+                                    hostname: peer_info.name.clone(),
+                                    address: peer_info
+                                        .best_address()
+                                        .map(|a| a.to_string())
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                };
+                                let _ = event_tx.send(peer);
+                            }
+                            crate::discovery::DiscoveryEvent::PeerUpdated(peer_info) => {
+                                // Handle peer updates
+                                tracing::debug!("Peer updated: {}", peer_info.name);
+                            }
+                            crate::discovery::DiscoveryEvent::PeerLost(peer_id) => {
+                                tracing::debug!("Peer lost: {}", peer_id);
+                            }
+                            crate::discovery::DiscoveryEvent::Error(err) => {
+                                tracing::warn!("Discovery error: {}", err);
+                            }
+                        }
+                    }
+                    None => {
+                        // Channel closed, try to get a new receiver
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        match inner_clone.lock().await.subscribe_changes().recv().await {
+                            Some(_) => {
+                                // Got new receiver, continue
+                                event_rx = inner_clone.lock().await.subscribe_changes();
+                            }
+                            None => {
+                                // Discovery service stopped
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
         Ok(())
     }
 
     pub async fn subscribe(&self) -> Result<tokio::sync::broadcast::Receiver<Peer>> {
-        let (_tx, rx) = tokio::sync::broadcast::channel(100);
-        // In a real implementation, this would forward discovery events
-        Ok(rx)
+        Ok(self.event_tx.subscribe())
+    }
+
+    /// Get a receiver for raw discovery events (for trust processing)
+    pub fn get_discovery_event_receiver(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::discovery::DiscoveryEvent> {
+        self.discovery_event_tx.subscribe()
     }
 }
 
 // Config extensions
 impl Config {
     pub fn node_id(&self) -> Uuid {
-        // Generate a consistent node ID based on config
-        Uuid::new_v4() // In practice, this should be persistent
+        self.node_id
     }
 
     pub fn sync_interval_ms(&self) -> u64 {
@@ -193,7 +293,6 @@ impl Config {
     pub fn database_path(&self) -> std::path::PathBuf {
         self.clipboard.history_db.clone()
     }
-
 
     pub async fn save_config(&self) -> Result<()> {
         self.save()
