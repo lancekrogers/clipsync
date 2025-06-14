@@ -223,11 +223,6 @@ impl Config {
             .map_err(|e| anyhow::anyhow!("Failed to save example config: {}", e))
     }
 
-    pub async fn validate(path: &std::path::Path) -> Result<()> {
-        let _config =
-            Self::load_from_path(path).map_err(|e| anyhow::anyhow!("Invalid config: {}", e))?;
-        Ok(())
-    }
 
     pub fn default_with_path(_path: std::path::PathBuf) -> Self {
         Self::default()
