@@ -79,6 +79,8 @@ pub struct SshAuthenticator {
     active_tokens: Arc<RwLock<std::collections::HashMap<String, AuthToken>>>,
     /// Random number generator
     rng: SystemRandom,
+    /// Trust manager
+    trust_manager: Option<Arc<crate::auth::TrustManager>>,
 }
 
 impl SshAuthenticator {
@@ -108,6 +110,7 @@ impl SshAuthenticator {
             authorized_keys: Arc::new(RwLock::new(authorized_keys)),
             active_tokens: Arc::new(RwLock::new(std::collections::HashMap::new())),
             rng: SystemRandom::new(),
+            trust_manager: None,
         })
     }
 
@@ -178,6 +181,42 @@ impl SshAuthenticator {
     async fn cleanup_expired_tokens(&self) {
         let mut tokens = self.active_tokens.write().await;
         tokens.retain(|_, token| !token.is_expired());
+    }
+
+    /// Set the trust manager
+    pub fn set_trust_manager(&mut self, trust_manager: Arc<crate::auth::TrustManager>) {
+        self.trust_manager = Some(trust_manager);
+    }
+
+    /// Add a trusted peer's public key to authorized_keys
+    pub async fn add_trusted_peer(
+        &self,
+        openssh_key: &str,
+        comment: Option<String>,
+    ) -> Result<(), AuthError> {
+        let mut authorized_keys = self.authorized_keys.write().await;
+        authorized_keys.add_key_from_openssh(openssh_key, comment)?;
+
+        // Save to file
+        authorized_keys
+            .save_to_file(&self.config.authorized_keys_path)
+            .await?;
+        Ok(())
+    }
+
+    /// Remove a peer from authorized_keys
+    pub async fn remove_peer(&self, fingerprint: &str) -> Result<bool, AuthError> {
+        let mut authorized_keys = self.authorized_keys.write().await;
+        let removed = authorized_keys.remove_key_by_fingerprint(fingerprint);
+
+        if removed {
+            // Save to file
+            authorized_keys
+                .save_to_file(&self.config.authorized_keys_path)
+                .await?;
+        }
+
+        Ok(removed)
     }
 }
 

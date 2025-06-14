@@ -159,58 +159,107 @@ pub async fn get_clipboard_provider() -> Result<ClipboardProviderWrapper> {
 
 // PeerDiscovery adapter
 pub struct PeerDiscovery {
-    inner: tokio::sync::Mutex<crate::discovery::DiscoveryService>,
+    inner: Arc<tokio::sync::Mutex<crate::discovery::DiscoveryService>>,
     event_tx: tokio::sync::broadcast::Sender<Peer>,
-    started: std::sync::atomic::AtomicBool,
+    discovery_event_tx: tokio::sync::broadcast::Sender<crate::discovery::DiscoveryEvent>,
+    config: Arc<Config>,
 }
 
 impl PeerDiscovery {
     pub async fn new(config: Arc<Config>) -> Result<Self> {
         let inner = crate::discovery::DiscoveryService::new(&config)?;
         let (event_tx, _) = tokio::sync::broadcast::channel(100);
+        let (discovery_event_tx, _) = tokio::sync::broadcast::channel(100);
         Ok(Self {
-            inner: tokio::sync::Mutex::new(inner),
+            inner: Arc::new(tokio::sync::Mutex::new(inner)),
             event_tx,
-            started: std::sync::atomic::AtomicBool::new(false),
+            discovery_event_tx,
+            config,
         })
     }
 
     pub async fn start(&self) -> Result<()> {
-        // Check if already started
-        if self.started.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            return Ok(()); // Already started
-        }
+        // Load public key for announcement
+        let public_key = self
+            .config
+            .auth
+            .load_public_key()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to load public key: {}", e))?;
 
-        // Start the discovery service
+        // Create service info with public key
+        let mut service_info = crate::discovery::ServiceInfo::from_config(
+            self.config.node_id(),
+            8484, // TODO: Get from config
+        );
+
+        // Add public key to TXT records
+        service_info
+            .txt_data
+            .push(("pubkey".to_string(), public_key));
+
+        // Start discovery and announce
         let mut inner = self.inner.lock().await;
         inner.start().await?;
+        inner.announce(service_info).await?;
+        drop(inner); // Release lock
 
-        // Get event receiver from the discovery service
-        let mut event_rx = inner.subscribe_changes();
-        drop(inner); // Release the lock
-
+        // Start event forwarding task
+        let inner_clone = Arc::clone(&self.inner);
         let event_tx = self.event_tx.clone();
+        let discovery_event_tx = self.discovery_event_tx.clone();
+        let config = Arc::clone(&self.config);
 
-        // Spawn task to convert discovery events to Peer events
         tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                match event {
-                    crate::discovery::DiscoveryEvent::PeerDiscovered(peer_info)
-                    | crate::discovery::DiscoveryEvent::PeerUpdated(peer_info) => {
-                        if let Some(address) = peer_info.best_address() {
-                            let peer = Peer {
-                                id: peer_info.id,
-                                hostname: peer_info.name,
-                                address: address.to_string(),
-                            };
-                            let _ = event_tx.send(peer);
+            // Get a receiver once at the start
+            let mut event_rx = {
+                let mut inner = inner_clone.lock().await;
+                inner.subscribe_changes()
+            };
+
+            loop {
+                match event_rx.recv().await {
+                    Some(event) => {
+                        // Forward the raw discovery event
+                        let _ = discovery_event_tx.send(event.clone());
+
+                        match event {
+                            crate::discovery::DiscoveryEvent::PeerDiscovered(peer_info) => {
+                                let peer = Peer {
+                                    id: peer_info.id,
+                                    hostname: peer_info.name.clone(),
+                                    address: peer_info
+                                        .best_address()
+                                        .map(|a| a.to_string())
+                                        .unwrap_or_else(|| "unknown".to_string()),
+                                };
+                                let _ = event_tx.send(peer);
+                            }
+                            crate::discovery::DiscoveryEvent::PeerUpdated(peer_info) => {
+                                // Handle peer updates
+                                tracing::debug!("Peer updated: {}", peer_info.name);
+                            }
+                            crate::discovery::DiscoveryEvent::PeerLost(peer_id) => {
+                                tracing::debug!("Peer lost: {}", peer_id);
+                            }
+                            crate::discovery::DiscoveryEvent::Error(err) => {
+                                tracing::warn!("Discovery error: {}", err);
+                            }
                         }
                     }
-                    crate::discovery::DiscoveryEvent::PeerLost(_) => {
-                        // Could emit a peer lost event if needed
-                    }
-                    crate::discovery::DiscoveryEvent::Error(_) => {
-                        // Could handle errors if needed
+                    None => {
+                        // Channel closed, try to get a new receiver
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        match inner_clone.lock().await.subscribe_changes().recv().await {
+                            Some(_) => {
+                                // Got new receiver, continue
+                                event_rx = inner_clone.lock().await.subscribe_changes();
+                            }
+                            None => {
+                                // Discovery service stopped
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -223,39 +272,17 @@ impl PeerDiscovery {
         Ok(self.event_tx.subscribe())
     }
 
-    pub async fn announce(&self, node_id: Uuid, port: u16) -> Result<()> {
-        let service_info = crate::discovery::ServiceInfo::from_config(node_id, port);
-        let mut inner = self.inner.lock().await;
-        inner.announce(service_info).await
-    }
-
-    pub async fn get_peers(&self) -> Result<Vec<Peer>> {
-        let mut inner = self.inner.lock().await;
-        let peer_infos = inner.discover_peers().await?;
-        Ok(peer_infos
-            .into_iter()
-            .filter_map(|peer_info| {
-                peer_info.best_address().map(|address| Peer {
-                    id: peer_info.id,
-                    hostname: peer_info.name,
-                    address: address.to_string(),
-                })
-            })
-            .collect())
-    }
-
-    pub async fn stop(&self) -> Result<()> {
-        self.started
-            .store(false, std::sync::atomic::Ordering::SeqCst);
-        let mut inner = self.inner.lock().await;
-        inner.stop().await
+    /// Get a receiver for raw discovery events (for trust processing)
+    pub fn get_discovery_event_receiver(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::discovery::DiscoveryEvent> {
+        self.discovery_event_tx.subscribe()
     }
 }
 
 // Config extensions
 impl Config {
     pub fn node_id(&self) -> Uuid {
-        // Return the persistent node ID from config
         self.node_id
     }
 
@@ -267,33 +294,9 @@ impl Config {
         self.clipboard.history_db.clone()
     }
 
-    pub async fn load_config(config_path: Option<std::path::PathBuf>) -> Result<Self> {
-        if let Some(path) = config_path {
-            Self::load_from_path(&path).map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))
-        } else {
-            // Use Config::load() which properly expands paths
-            Self::load().map_err(|e| anyhow::anyhow!("Failed to load config: {}", e))
-        }
-    }
-
     pub async fn save_config(&self) -> Result<()> {
         self.save()
             .map_err(|e| anyhow::anyhow!("Failed to save config: {}", e))
-    }
-
-    pub async fn generate_example_config(force: bool) -> Result<()> {
-        let config = Self::default();
-        let example_path = std::path::PathBuf::from("config.example.toml");
-
-        if !force && example_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Example config already exists. Use --force to overwrite."
-            ));
-        }
-
-        config
-            .save()
-            .map_err(|e| anyhow::anyhow!("Failed to save example config: {}", e))
     }
 
     pub fn default_with_path(_path: std::path::PathBuf) -> Self {

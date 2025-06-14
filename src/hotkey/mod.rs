@@ -12,7 +12,7 @@ use tracing::{debug, error, info, warn};
 use crate::adapters::{ClipboardProviderWrapper, HistoryManager};
 use crate::cli::history_picker::HistoryPicker;
 use crate::config::Config;
-use crate::sync::SyncEngine;
+use crate::sync::TrustAwareSyncEngine;
 
 #[derive(Debug, Clone)]
 pub enum HotKeyAction {
@@ -34,7 +34,7 @@ pub struct HotKeyManager {
     config: Arc<Config>,
     clipboard: Arc<ClipboardProviderWrapper>,
     history: Arc<HistoryManager>,
-    sync_engine: Option<Arc<SyncEngine>>,
+    sync_engine: Option<Arc<TrustAwareSyncEngine>>,
     hotkeys: HashMap<u32, HotKeyAction>,
     event_sender: broadcast::Sender<HotKeyEvent>,
 }
@@ -59,7 +59,7 @@ impl HotKeyManager {
         })
     }
 
-    pub fn set_sync_engine(&mut self, sync_engine: Arc<SyncEngine>) {
+    pub fn set_sync_engine(&mut self, sync_engine: Arc<TrustAwareSyncEngine>) {
         self.sync_engine = Some(sync_engine);
     }
 
@@ -172,7 +172,7 @@ impl HotKeyManager {
         action: &HotKeyAction,
         clipboard: Arc<ClipboardProviderWrapper>,
         history: Arc<HistoryManager>,
-        sync_engine: Option<Arc<SyncEngine>>,
+        sync_engine: Option<Arc<TrustAwareSyncEngine>>,
     ) -> Result<()> {
         match action {
             HotKeyAction::ShowHistory => {
