@@ -108,6 +108,32 @@ impl HistoryManager {
         let entries = self.get_recent_entries(100).await?;
         Ok(entries.into_iter().find(|e| e.checksum == checksum))
     }
+
+    pub async fn search_entries(&self, search_term: &str, limit: usize) -> Result<Vec<ClipboardEntry>> {
+        let inner_entries = self.inner.search(search_term).await?;
+        
+        let entries = inner_entries
+            .into_iter()
+            .take(limit)
+            .map(|entry| {
+                let content = match String::from_utf8(entry.content) {
+                    Ok(text) => ClipboardData::Text(text),
+                    Err(_) => ClipboardData::Text("[Binary Data]".to_string()),
+                };
+
+                ClipboardEntry {
+                    id: entry.id,
+                    content,
+                    timestamp: DateTime::from_timestamp(entry.timestamp, 0)
+                        .unwrap_or_else(Utc::now),
+                    source: entry.origin_node,
+                    checksum: entry.checksum,
+                }
+            })
+            .collect();
+
+        Ok(entries)
+    }
 }
 
 // ClipboardProvider wrapper to add text methods
@@ -128,6 +154,11 @@ impl ClipboardProviderWrapper {
     pub async fn set_text(&self, text: &str) -> Result<()> {
         let content = crate::clipboard::ClipboardContent::text(text);
         self.inner.set_content(&content).await?;
+        Ok(())
+    }
+
+    pub async fn clear(&self) -> Result<()> {
+        self.inner.clear().await?;
         Ok(())
     }
 }
@@ -278,6 +309,21 @@ impl PeerDiscovery {
     ) -> tokio::sync::broadcast::Receiver<crate::discovery::DiscoveryEvent> {
         self.discovery_event_tx.subscribe()
     }
+
+    pub async fn discover_peers_timeout(&self, timeout: std::time::Duration) -> Result<Vec<crate::discovery::PeerInfo>> {
+        let mut inner = self.inner.lock().await;
+        
+        // Start the discovery process
+        inner.start().await?;
+        
+        // Wait for the timeout period
+        tokio::time::sleep(timeout).await;
+        
+        // Get discovered peers
+        let peers = inner.discover_peers().await?;
+        
+        Ok(peers)
+    }
 }
 
 // Config extensions
@@ -292,6 +338,15 @@ impl Config {
 
     pub fn database_path(&self) -> std::path::PathBuf {
         self.clipboard.history_db.clone()
+    }
+
+    pub fn websocket_port(&self) -> u16 {
+        // Extract port from listen_addr or use default
+        if let Some(port_str) = self.listen_addr.split(':').last() {
+            port_str.parse().unwrap_or(8484)
+        } else {
+            8484
+        }
     }
 
     pub async fn save_config(&self) -> Result<()> {
