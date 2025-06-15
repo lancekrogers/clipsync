@@ -105,7 +105,7 @@ bench:
 	$(CARGO) bench
 
 install-user: release
-	@./install_user.sh
+	@./scripts/install_user.sh
 
 install: release
 ifeq ($(PLATFORM),macos)
