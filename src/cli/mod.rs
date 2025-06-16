@@ -302,7 +302,48 @@ impl CliHandler {
             }
         }
 
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            if !foreground {
+                // On macOS, use launchctl to start the service
+                let plist_path = dirs::home_dir()
+                    .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+                    .join("Library/LaunchAgents/com.clipsync.plist");
+
+                if !plist_path.exists() {
+                    println!("ClipSync LaunchAgent not installed.");
+                    println!("Please run 'make install-user' first to install the service.");
+                    return Err(anyhow::anyhow!("LaunchAgent not installed"));
+                }
+
+                // Check if already loaded
+                let status_output = Command::new("launchctl")
+                    .args(&["list", "com.clipsync"])
+                    .output()?;
+
+                if status_output.status.success() {
+                    println!("ClipSync daemon is already running");
+                    return Ok(());
+                }
+
+                // Load and start the LaunchAgent
+                println!("Starting ClipSync daemon via launchctl...");
+                let load_output = Command::new("launchctl")
+                    .args(&["load", "-w", plist_path.to_str().unwrap()])
+                    .output()?;
+
+                if !load_output.status.success() {
+                    let error_msg = String::from_utf8_lossy(&load_output.stderr);
+                    return Err(anyhow::anyhow!("Failed to start daemon: {}", error_msg));
+                }
+
+                println!("ClipSync daemon started successfully");
+                println!("Use 'clipsync status' to check if it's running");
+                return Ok(());
+            }
+        }
+
+        #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
         {
             if !foreground {
                 println!("Warning: Daemon mode not supported on this platform, running in foreground");
@@ -401,7 +442,35 @@ impl CliHandler {
             daemon::stop_daemon()?;
             println!("ClipSync daemon stopped");
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            // Check if service is loaded
+            let status_output = Command::new("launchctl")
+                .args(&["list", "com.clipsync"])
+                .output()?;
+
+            if !status_output.status.success() {
+                println!("ClipSync daemon is not running");
+                return Ok(());
+            }
+
+            // Unload the LaunchAgent
+            let plist_path = dirs::home_dir()
+                .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+                .join("Library/LaunchAgents/com.clipsync.plist");
+
+            let unload_output = Command::new("launchctl")
+                .args(&["unload", plist_path.to_str().unwrap()])
+                .output()?;
+
+            if !unload_output.status.success() {
+                let error_msg = String::from_utf8_lossy(&unload_output.stderr);
+                return Err(anyhow::anyhow!("Failed to stop daemon: {}", error_msg));
+            }
+
+            println!("ClipSync daemon stopped");
+        }
+        #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
         {
             println!("Daemon stop not supported on this platform");
         }
@@ -427,7 +496,31 @@ impl CliHandler {
                 println!("  Daemon: Not running");
             }
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            // Check launchctl status
+            let status_output = Command::new("launchctl")
+                .args(&["list", "com.clipsync"])
+                .output()?;
+
+            if status_output.status.success() {
+                // Parse PID from output
+                let output_str = String::from_utf8_lossy(&status_output.stdout);
+                let parts: Vec<&str> = output_str.trim().split_whitespace().collect();
+                if parts.len() >= 1 && parts[0] != "-" {
+                    if let Ok(pid) = parts[0].parse::<i32>() {
+                        println!("  Daemon: Running (PID: {})", pid);
+                    } else {
+                        println!("  Daemon: Running");
+                    }
+                } else {
+                    println!("  Daemon: Loaded but not running");
+                }
+            } else {
+                println!("  Daemon: Not running");
+            }
+        }
+        #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
         {
             println!("  Daemon: Not supported on this platform");
         }
@@ -546,7 +639,22 @@ impl CliHandler {
             println!("ClipSync daemon restarted successfully");
         }
         
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
+        {
+            println!("Restarting ClipSync daemon...");
+            
+            // Stop if running
+            let _ = self.stop_daemon().await;
+            
+            // Wait briefly
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            
+            // Start again
+            self.start_daemon(false).await?;
+            println!("ClipSync daemon restarted successfully");
+        }
+        
+        #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
         {
             println!("Daemon restart not supported on this platform");
         }
