@@ -173,13 +173,29 @@ pub async fn get_clipboard_provider() -> Result<ClipboardProviderWrapper> {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        // Try X11 first, then Wayland
-        let provider = if let Ok(provider) = crate::clipboard::x11::X11Clipboard::new() {
-            Box::new(provider) as Box<dyn crate::clipboard::ClipboardProvider>
-        } else {
-            Box::new(crate::clipboard::wayland::WaylandClipboard::new().await?)
-        };
-        Ok(ClipboardProviderWrapper::new(provider))
+        // Try X11 first, then Wayland with better error reporting
+        match crate::clipboard::x11::X11Clipboard::new() {
+            Ok(provider) => {
+                tracing::debug!("Using X11 clipboard provider");
+                Ok(ClipboardProviderWrapper::new(Box::new(provider)))
+            }
+            Err(x11_error) => {
+                tracing::debug!("X11 clipboard failed: {}, trying Wayland", x11_error);
+                match crate::clipboard::wayland::WaylandClipboard::new().await {
+                    Ok(provider) => {
+                        tracing::debug!("Using Wayland clipboard provider");
+                        Ok(ClipboardProviderWrapper::new(Box::new(provider)))
+                    }
+                    Err(wayland_error) => {
+                        Err(anyhow::anyhow!(
+                            "Both clipboard providers failed - X11: {}, Wayland: {}. \
+                            Try running in a terminal with proper DISPLAY and WAYLAND_DISPLAY variables.",
+                            x11_error, wayland_error
+                        ))
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(windows)]

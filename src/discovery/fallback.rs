@@ -142,7 +142,14 @@ impl FallbackDiscovery {
             .ok_or_else(|| anyhow!("No broadcast socket"))?;
 
         let info = our_info.read().await;
-        let info = info.as_ref().ok_or_else(|| anyhow!("No service info"))?;
+        let info = match info.as_ref() {
+            Some(info) => info,
+            None => {
+                // Service info not available yet - this is normal during startup
+                // Skip broadcast until announce() is called
+                return Ok(());
+            }
+        };
 
         // Create broadcast packet
         let packet = Self::create_broadcast_packet(info)?;
