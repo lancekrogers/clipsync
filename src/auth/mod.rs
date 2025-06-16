@@ -8,6 +8,7 @@ use thiserror::Error;
 
 pub mod authorized;
 pub mod keys;
+pub mod openssh;
 pub mod ssh;
 pub mod trust;
 
