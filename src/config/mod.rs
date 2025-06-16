@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.listen_addr, ":8484");
+        assert_eq!(config.listen_addr, "0.0.0.0:8484");
         assert_eq!(config.clipboard.max_size, 5_242_880);
         assert_eq!(config.clipboard.history_size, 20);
         assert!(config.clipboard.sync_primary);
