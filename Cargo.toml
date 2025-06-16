@@ -18,7 +18,7 @@ async-trait = "0.1"
 arboard = "3.5"
 
 # Networking
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.27"
 ssh2 = "0.9"
 bytes = "1.10"
 futures-util = "0.3"
@@ -30,7 +30,7 @@ rusqlite = { version = "0.36", features = ["bundled-sqlcipher"] }
 aes-gcm = "0.10"
 argon2 = "0.5"
 zeroize = "1.8"
-rand = "0.8"
+rand = "0.9"
 sha2 = "0.10"
 hex = "0.4"
 ring = "0.17"
@@ -43,8 +43,8 @@ toml = "0.8"
 bincode = "1.3"
 
 # Service discovery
-mdns-sd = "0.10"
-if-addrs = "0.10"
+mdns-sd = "0.13"
+if-addrs = "0.13"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
@@ -82,24 +82,24 @@ cocoa = "0.26"
 objc = "0.2"
 objc_id = "0.1"
 core-foundation = "0.10"
-core-graphics = "0.23"
+core-graphics = "0.24"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 x11-clipboard = "0.9"
 x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
 wayland-client = "0.31"
-wayland-protocols = "0.31"
-wayland-protocols-wlr = "0.2"
-nix = { version = "0.29", features = ["poll", "process", "signal", "user", "fs"] }
+wayland-protocols = "0.32"
+wayland-protocols-wlr = "0.3"
+nix = { version = "0.30", features = ["poll", "process", "signal", "user", "fs"] }
 
 # Validation
-validator = { version = "0.18", features = ["derive"] }
+validator = { version = "0.20", features = ["derive"] }
 
 [build-dependencies]
 chrono = { version = "0.4", features = ["clock"] }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.6"
 tempfile = "3.20"
 mockall = "0.13"
 tokio-test = "0.4"
