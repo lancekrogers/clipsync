@@ -117,7 +117,10 @@ ifeq ($(PLATFORM),macos)
 	launchctl load ~/Library/LaunchAgents/com.clipsync.plist
 else
 	sudo cp $(RELEASE_DIR)/clipsync /usr/local/bin/
-	sudo cp scripts/clipsync.service /etc/systemd/system/
+	# Copy service file and replace placeholders
+	sed "s/%USER%/$(USER)/g" scripts/clipsync.service | sudo tee /etc/systemd/system/clipsync.service > /dev/null
+	# Also update XDG_RUNTIME_DIR to use correct UID
+	sudo sed -i "s|/run/user/1000|/run/user/$$(id -u)|g" /etc/systemd/system/clipsync.service
 	sudo systemctl daemon-reload
 	sudo systemctl enable clipsync
 endif
@@ -128,10 +131,15 @@ ifeq ($(PLATFORM),macos)
 	rm -f ~/Library/LaunchAgents/com.clipsync.plist
 	rm -f ~/.local/bin/clipsync
 else
-	sudo systemctl stop clipsync
-	sudo systemctl disable clipsync
-	sudo rm -f /etc/systemd/system/clipsync.service
-	sudo rm -f /usr/local/bin/clipsync
+	# Stop and disable systemd service if it exists
+	-sudo systemctl stop clipsync 2>/dev/null
+	-sudo systemctl disable clipsync 2>/dev/null
+	-sudo rm -f /etc/systemd/system/clipsync.service
+	# Remove system installation if it exists
+	-sudo rm -f /usr/local/bin/clipsync
+	# Remove user installation if it exists
+	-rm -f ~/.local/bin/clipsync
+	@echo "ClipSync uninstalled from both system and user locations"
 endif
 
 package: release
