@@ -967,7 +967,36 @@ impl CliHandler {
 
         if !log_file_found {
             println!("No log files found in standard locations.");
-            println!("Logs may be managed by systemd/journald. Try:");
+            println!("Checking systemd/journald logs...\n");
+            
+            // Try user systemd first
+            let user_cmd = Command::new("journalctl")
+                .args(&["--user", "-u", "clipsync", "-n", &limit.to_string(), "--no-pager"])
+                .output();
+                
+            if let Ok(output) = user_cmd {
+                if output.status.success() && !output.stdout.is_empty() {
+                    println!("User systemd logs:");
+                    println!("{}", String::from_utf8_lossy(&output.stdout));
+                    return Ok(());
+                }
+            }
+            
+            // Try system systemd
+            let system_cmd = Command::new("journalctl")
+                .args(&["-u", "clipsync", "-n", &limit.to_string(), "--no-pager"])
+                .output();
+                
+            if let Ok(output) = system_cmd {
+                if output.status.success() && !output.stdout.is_empty() {
+                    println!("System systemd logs:");
+                    println!("{}", String::from_utf8_lossy(&output.stdout));
+                    return Ok(());
+                }
+            }
+            
+            println!("No logs found. Try running:");
+            println!("  journalctl --user -u clipsync -n {}", limit);
             println!("  journalctl -u clipsync -n {}", limit);
             println!("\nOr check if logs are being written to stderr/stdout when running in foreground mode.");
         }

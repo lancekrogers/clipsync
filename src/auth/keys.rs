@@ -181,8 +181,8 @@ impl KeyPair {
 
         use tokio::io::AsyncWriteExt;
 
-        // Write OpenSSH format
-        let pem_content = self.to_openssh_private_key()?;
+        // Write PKCS8 PEM format
+        let pem_content = self.to_pkcs8_pem()?;
         file.write_all(pem_content.as_bytes()).await?;
 
         // Also write public key
@@ -205,13 +205,29 @@ impl KeyPair {
             });
         }
 
-        // Try to parse OpenSSH format
-        let key_str = std::str::from_utf8(key_data)
-            .map_err(|e| AuthError::InvalidKeyFormat(format!("Invalid UTF-8: {}", e)))?;
-
-        if key_str.contains("BEGIN OPENSSH PRIVATE KEY") {
-            // Parse OpenSSH format (simplified for Ed25519)
-            return Self::from_openssh_private_key(key_str);
+        // Check if this might be a text-based key format (PEM)
+        // Only try UTF-8 conversion if the data looks like it might be text
+        // (starts with ASCII characters typical of PEM headers)
+        if key_data.len() > 5 && key_data[0..5].iter().all(|&b| b.is_ascii()) {
+            if let Ok(key_str) = std::str::from_utf8(key_data) {
+                if key_str.contains("BEGIN OPENSSH PRIVATE KEY") {
+                    // Parse OpenSSH format (simplified for Ed25519)
+                    return Self::from_openssh_private_key(key_str);
+                }
+                
+                // Check for PKCS8 PEM format
+                if key_str.contains("BEGIN PRIVATE KEY") {
+                    return Self::from_pkcs8_pem(key_str);
+                }
+                
+                // Check for other PEM formats
+                if key_str.contains("BEGIN RSA PRIVATE KEY") {
+                    // For now, we don't support PKCS#1 format
+                    return Err(AuthError::InvalidKeyFormat(
+                        "RSA PKCS#1 private keys are not yet supported".to_string(),
+                    ));
+                }
+            }
         }
 
         Err(AuthError::InvalidKeyFormat(
@@ -219,15 +235,15 @@ impl KeyPair {
         ))
     }
 
-    /// Convert to OpenSSH private key format
-    fn to_openssh_private_key(&self) -> Result<String, AuthError> {
+    /// Convert to PKCS8 PEM format
+    fn to_pkcs8_pem(&self) -> Result<String, AuthError> {
         match self.key_type {
             KeyType::Ed25519 => {
-                // For simplicity, we'll use the PKCS8 format wrapped in PEM
+                // Encode PKCS8 data in standard PEM format
                 let encoded = BASE64.encode(&self.private_key);
                 let pem =
                     format!(
-                    "-----BEGIN OPENSSH PRIVATE KEY-----\n{}\n-----END OPENSSH PRIVATE KEY-----\n",
+                    "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
                     encoded.chars().collect::<Vec<_>>().chunks(64)
                         .map(|chunk| chunk.iter().collect::<String>())
                         .collect::<Vec<_>>()
@@ -239,6 +255,39 @@ impl KeyPair {
                 "RSA export not implemented".to_string(),
             )),
         }
+    }
+
+    /// Parse PKCS8 PEM format
+    fn from_pkcs8_pem(pem: &str) -> Result<Self, AuthError> {
+        // Extract base64 content between markers
+        let start_marker = "-----BEGIN PRIVATE KEY-----";
+        let end_marker = "-----END PRIVATE KEY-----";
+
+        let start = pem
+            .find(start_marker)
+            .ok_or_else(|| AuthError::InvalidKeyFormat("Missing start marker".to_string()))?;
+        let end = pem
+            .find(end_marker)
+            .ok_or_else(|| AuthError::InvalidKeyFormat("Missing end marker".to_string()))?;
+
+        let base64_content = &pem[start + start_marker.len()..end];
+        let decoded = BASE64
+            .decode(base64_content.replace(['\n', '\r'], ""))
+            .map_err(|e| AuthError::InvalidKeyFormat(format!("Invalid base64: {}", e)))?;
+
+        // Try to parse as PKCS8
+        if let Ok(key_pair) = Ed25519KeyPair::from_pkcs8(&decoded) {
+            let public_key_bytes = key_pair.public_key().as_ref().to_vec();
+            return Ok(Self {
+                key_type: KeyType::Ed25519,
+                private_key: decoded,
+                public_key: PublicKey::new(KeyType::Ed25519, public_key_bytes),
+            });
+        }
+
+        Err(AuthError::InvalidKeyFormat(
+            "Invalid PKCS8 private key".to_string(),
+        ))
     }
 
     /// Parse OpenSSH private key format
@@ -259,8 +308,25 @@ impl KeyPair {
             .decode(base64_content.replace(['\n', '\r'], ""))
             .map_err(|e| AuthError::InvalidKeyFormat(format!("Invalid base64: {}", e)))?;
 
-        // Try to parse as PKCS8
-        Self::from_private_key_bytes(&decoded)
+        // OpenSSH format has a specific structure - we need to parse it properly
+        // For now, we only support Ed25519 keys stored in OpenSSH format
+        // The format contains a header, followed by the private key material
+        
+        // Check for OpenSSH magic bytes "openssh-key-v1\0"
+        const OPENSSH_MAGIC: &[u8] = b"openssh-key-v1\0";
+        if decoded.len() < OPENSSH_MAGIC.len() || &decoded[..OPENSSH_MAGIC.len()] != OPENSSH_MAGIC {
+            return Err(AuthError::InvalidKeyFormat(
+                "Invalid OpenSSH private key format: missing magic bytes".to_string(),
+            ));
+        }
+        
+        // For now, we don't fully parse the OpenSSH format structure
+        // Instead, we return an error indicating it's not yet supported
+        // A full implementation would need to parse the OpenSSH format structure
+        // which includes cipher info, kdf info, number of keys, public key, private key, etc.
+        Err(AuthError::InvalidKeyFormat(
+            "OpenSSH format private keys are not yet fully supported. Please use PKCS8 format for Ed25519 keys or convert your key.".to_string(),
+        ))
     }
 
     /// Get the public key
