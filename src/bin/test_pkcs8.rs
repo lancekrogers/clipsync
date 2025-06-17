@@ -1,5 +1,5 @@
 use ring::rand::SystemRandom;
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use ring::signature::Ed25519KeyPair;
 
 fn main() {
     println!("Testing PKCS8 generation...");

@@ -1,4 +1,5 @@
 use clipsync::auth::openssh::{parse_openssh_private_key, KeyTypeData};
+use base64::Engine as _;
 use std::fs;
 
 fn main() {
@@ -14,7 +15,8 @@ fn main() {
     let base64_content = &key_data[start + 35..end];
     
     // Decode base64
-    let decoded = base64::decode(base64_content.replace(['\n', '\r'], ""))
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(base64_content.replace(['\n', '\r'], ""))
         .expect("Failed to decode base64");
     
     println!("Decoded {} bytes", decoded.len());
