@@ -17,7 +17,7 @@ use crate::auth::{AuthorizedKey, AuthorizedKeys, PublicKey};
 use crate::config::Config;
 #[cfg(target_os = "linux")]
 use crate::daemon;
-use crate::hotkey::HotKeyManager;
+// use crate::hotkey::HotKeyManager; // Removed - we work with system clipboard
 use crate::sync::{SyncEngine, TrustAwareSyncEngine};
 use crate::transport::{TransportConfig, TransportManager};
 
@@ -164,7 +164,6 @@ pub struct CliHandler {
     discovery: Option<Arc<PeerDiscovery>>,
     transport: Option<Arc<TransportManager>>,
     sync_engine: Option<Arc<TrustAwareSyncEngine>>,
-    hotkey_manager: Option<Arc<HotKeyManager>>,
 }
 
 impl CliHandler {
@@ -179,7 +178,6 @@ impl CliHandler {
             discovery: None,
             transport: None,
             sync_engine: None,
-            hotkey_manager: None,
         })
     }
 
@@ -368,20 +366,17 @@ impl CliHandler {
             .await?,
         );
 
-        // Initialize hotkey manager
-        let mut hotkey_manager = HotKeyManager::new(
-            Arc::clone(&self.config),
-            Arc::clone(&clipboard),
-            Arc::clone(&history),
-        )?;
-
-        hotkey_manager.set_sync_engine(Arc::clone(&sync_engine));
-        hotkey_manager.register_default_hotkeys().await?;
-
-        let hotkey_manager = Arc::new(hotkey_manager);
+        // Skip hotkey registration - we want to work with system clipboard, not override it
+        // let mut hotkey_manager = HotKeyManager::new(
+        //     Arc::clone(&self.config),
+        //     Arc::clone(&clipboard),
+        //     Arc::clone(&history),
+        // )?;
+        //
+        // hotkey_manager.set_sync_engine(Arc::clone(&sync_engine));
+        // hotkey_manager.register_default_hotkeys().await?;
 
         self.sync_engine = Some(Arc::clone(&sync_engine));
-        self.hotkey_manager = Some(Arc::clone(&hotkey_manager));
 
         // Start trust processing
         sync_engine
@@ -390,7 +385,6 @@ impl CliHandler {
 
         // Start services
         let sync_engine_task = Arc::clone(&sync_engine);
-        let hotkey_manager_task = Arc::clone(&hotkey_manager);
 
         info!("ClipSync daemon started successfully");
 
@@ -413,11 +407,7 @@ impl CliHandler {
 
         // Run services until shutdown signal
         tokio::select! {
-            result = async move {
-                let sync_future = sync_engine_task.start();
-                let hotkey_future = hotkey_manager_task.start_event_loop();
-                tokio::try_join!(sync_future, hotkey_future)
-            } => {
+            result = sync_engine_task.start() => {
                 if let Err(e) = result {
                     error!("Service error: {}", e);
                 }

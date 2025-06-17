@@ -26,7 +26,7 @@ pub mod config;
 pub mod daemon;
 pub mod discovery;
 pub mod history;
-pub mod hotkey;
+// pub mod hotkey; // Removed - we work with system clipboard
 pub mod progress;
 pub mod setup;
 pub mod sync;
