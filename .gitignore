@@ -98,6 +98,10 @@ debug/
 ~/.local/bin/clipsync
 ~/.config/clipsync/
 
+# Local sandbox configurations
+scripts/local-*.sh
+.sandbox-config
+
 # Rust
 **/*.rs.bk
 *.pdb

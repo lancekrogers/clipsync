@@ -1,0 +1,56 @@
+# AppArmor profile for clipsync
+# Place this file in /etc/apparmor.d/usr.local.bin.clipsync
+
+#include <tunables/global>
+
+/usr/local/bin/clipsync {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/user-tmp>
+  
+  # Allow network access for peer discovery
+  network inet stream,
+  network inet dgram,
+  network inet6 stream,
+  network inet6 dgram,
+  
+  # Allow reading clipboard (Wayland)
+  /run/user/[0-9]*/wayland-[0-9]* rw,
+  /dev/shm/wayland.* rw,
+  
+  # Allow reading clipboard (X11)
+  /tmp/.X11-unix/* rw,
+  @{HOME}/.Xauthority r,
+  
+  # Config and data directories
+  @{HOME}/.config/clipsync/ r,
+  @{HOME}/.config/clipsync/** rw,
+  @{HOME}/.local/share/clipsync/ r,
+  @{HOME}/.local/share/clipsync/** rw,
+  
+  # Rust runtime
+  /proc/sys/kernel/random/uuid r,
+  /proc/self/exe r,
+  /proc/self/maps r,
+  /proc/self/stat r,
+  /proc/self/status r,
+  
+  # Deny access to sensitive files
+  deny @{HOME}/.ssh/** rwx,
+  deny @{HOME}/.gnupg/** rwx,
+  deny /etc/passwd* rwx,
+  deny /etc/shadow* rwx,
+  deny /etc/sudoers* rwx,
+  deny /etc/pam.d/** rwx,
+  deny @{HOME}/.bash_history rwx,
+  deny @{HOME}/.zsh_history rwx,
+  
+  # Deny executing other programs
+  deny /bin/** x,
+  deny /usr/bin/** x,
+  deny /sbin/** x,
+  deny /usr/sbin/** x,
+  
+  # Allow self execution
+  /usr/local/bin/clipsync rix,
+}
