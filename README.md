@@ -2,7 +2,11 @@
 
 > **Secure, Real-Time Clipboard Synchronization Across Your Devices**
 
+⚠️ **EXPERIMENTAL SOFTWARE - UNDER ACTIVE DEVELOPMENT** ⚠️
+
 ClipSync is a fast, secure, and easy-to-use clipboard synchronization service that keeps your clipboard in sync across macOS and Linux devices. Built in Rust for maximum performance and security.
+
+**Note:** This project is in early development. Features may be incomplete, and breaking changes may occur. Use at your own risk and always backup important data.
 
 ```
 Copy on your laptop → Instantly available on your desktop → Paste anywhere

@@ -1,6 +1,8 @@
 # ClipSync Sandboxing Scripts
 
-These scripts provide various sandboxing options for safe development and testing of ClipSync.
+⚠️ **EXPERIMENTAL - UNDER ACTIVE DEVELOPMENT** ⚠️
+
+These scripts provide various sandboxing options for safe development and testing of ClipSync. They are experimental and should be tested carefully in your environment before relying on them for security.
 
 ## Setup
 

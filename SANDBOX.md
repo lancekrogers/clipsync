@@ -1,6 +1,8 @@
 # ClipSync Development Sandboxing Guide
 
-This guide provides multiple layers of sandboxing to prevent the clipboard sync tool from interfering with your system during development.
+⚠️ **EXPERIMENTAL - UNDER ACTIVE DEVELOPMENT** ⚠️
+
+This guide provides multiple layers of sandboxing to prevent the clipboard sync tool from interfering with your system during development. These sandboxing methods are experimental and may need adjustments for your specific environment.
 
 ## Quick Start
 
