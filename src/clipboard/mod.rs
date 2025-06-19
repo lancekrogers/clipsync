@@ -3,6 +3,8 @@
 //! This module provides a platform-agnostic interface for clipboard operations
 //! with implementations for macOS, X11, and Wayland.
 
+pub mod safety;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};

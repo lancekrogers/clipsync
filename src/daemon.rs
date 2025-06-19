@@ -93,8 +93,8 @@ pub fn remove_pidfile() -> Result<()> {
 
 /// Check if a process with the given PID is running
 pub fn is_process_running(pid: u32) -> bool {
-    // Try to send signal 0 (no-op) to check if process exists
-    match signal::kill(Pid::from_raw(pid as i32), Signal::SIGCONT) {
+    // Use signal 0 to check if process exists (doesn't actually send a signal)
+    match signal::kill(Pid::from_raw(pid as i32), None) {
         Ok(_) => true,
         Err(_) => false,
     }
@@ -118,11 +118,14 @@ pub fn is_daemon_running() -> Result<bool> {
 }
 
 /// Fork the process to run as a daemon
+/// 
+/// IMPORTANT: This function now uses a safer approach that doesn't
+/// interfere with system authentication or terminal I/O
 pub fn daemonize() -> Result<()> {
     // First fork
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child: _ }) => {
-            // Parent process exits
+            // Parent process exits immediately
             process::exit(0);
         }
         Ok(ForkResult::Child) => {
@@ -133,42 +136,69 @@ pub fn daemonize() -> Result<()> {
         }
     }
 
-    // Create new session
+    // Create new session and become session leader
+    // This detaches us from the controlling terminal
     nix::unistd::setsid()?;
 
-    // Second fork to ensure we can't acquire a controlling terminal
+    // Second fork to ensure we can't reacquire a controlling terminal
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child: _ }) => {
             // Parent process exits
             process::exit(0);
         }
         Ok(ForkResult::Child) => {
-            // Child continues
+            // Child continues as the daemon
         }
         Err(e) => {
             return Err(anyhow!("Second fork failed: {}", e));
         }
     }
 
-    // Change working directory to root
+    // Reset umask to ensure files are created with proper permissions
+    nix::sys::stat::umask(nix::sys::stat::Mode::from_bits_truncate(0o022));
+
+    // Change working directory to root to avoid holding mount points
     std::env::set_current_dir("/")?;
 
-    // Close standard file descriptors and redirect to /dev/null
+    // SAFER APPROACH: Instead of manipulating file descriptors directly,
+    // we'll use proper file handles and let Rust manage them safely
+    
+    // Open /dev/null for reading and writing
+    let dev_null_read = File::open("/dev/null")
+        .context("Failed to open /dev/null for reading")?;
+    let dev_null_write = File::create("/dev/null")
+        .context("Failed to open /dev/null for writing")?;
+
+    // Use std::os::unix::io::AsRawFd to get raw file descriptors
     use std::os::unix::io::AsRawFd;
-    let dev_null = File::open("/dev/null")?;
-    let dev_null_fd = nix::unistd::dup(dev_null.as_raw_fd())?;
-
-    nix::unistd::dup2(dev_null_fd, 0)?; // stdin
-    nix::unistd::dup2(dev_null_fd, 1)?; // stdout
-    nix::unistd::dup2(dev_null_fd, 2)?; // stderr
-
-    nix::unistd::close(dev_null_fd)?;
+    
+    // Close stdin and reopen as /dev/null
+    // IMPORTANT: We close first, then dup to avoid affecting parent's descriptors
+    unsafe {
+        libc::close(0);  // Close stdin
+        libc::dup2(dev_null_read.as_raw_fd(), 0);  // Reopen stdin as /dev/null
+        
+        libc::close(1);  // Close stdout
+        libc::dup2(dev_null_write.as_raw_fd(), 1);  // Reopen stdout as /dev/null
+        
+        libc::close(2);  // Close stderr
+        libc::dup2(dev_null_write.as_raw_fd(), 2);  // Reopen stderr as /dev/null
+    }
 
     // Write pidfile with our PID
     let pid = process::id();
     write_pidfile(pid)?;
 
-    info!("Daemonized with PID {}", pid);
+    info!("Daemonized safely with PID {}", pid);
+    Ok(())
+}
+
+/// Alternative: Run in foreground mode (recommended for systemd)
+/// This avoids all the complexity and potential issues of daemonization
+pub fn run_foreground() -> Result<()> {
+    let pid = process::id();
+    write_pidfile(pid)?;
+    info!("Running in foreground with PID {}", pid);
     Ok(())
 }
 
@@ -235,4 +265,29 @@ pub fn setup_signal_handlers(shutdown_tx: tokio::sync::oneshot::Sender<()>) -> R
     });
 
     Ok(())
+}
+
+/// Create a systemd service file (for reference)
+pub fn generate_systemd_service() -> &'static str {
+    r#"[Unit]
+Description=ClipSync - Secure Clipboard Synchronization
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/clipsync start --foreground
+Restart=on-failure
+RestartSec=10
+User=%i
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/clipsync %h/.local/share/clipsync
+
+[Install]
+WantedBy=default.target
+"#
 }

@@ -297,6 +297,9 @@ impl CliHandler {
             if !foreground {
                 info!("Running in daemon mode");
                 daemon::daemonize()?;
+            } else {
+                info!("Running in foreground mode");
+                daemon::run_foreground()?;
             }
         }
 

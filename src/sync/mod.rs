@@ -137,7 +137,9 @@ impl SyncEngine {
         let last_update = Arc::clone(&self.last_local_update);
         let config = Arc::clone(&self.config);
 
-        let mut interval = interval(Duration::from_millis(200));
+        // Use a reasonable interval of 1 second instead of 200ms
+        // This prevents excessive CPU usage and potential interference with password managers
+        let mut interval = interval(Duration::from_secs(1));
         let mut last_content_hash = None;
 
         loop {
@@ -145,6 +147,18 @@ impl SyncEngine {
 
             match clipboard.get_text().await {
                 Ok(content) => {
+                    // Safety check: Skip potentially sensitive content
+                    if crate::clipboard::safety::is_potentially_sensitive(&content) {
+                        debug!("Skipping potentially sensitive clipboard content");
+                        continue;
+                    }
+                    
+                    // Safety check: Skip if in sensitive context
+                    if crate::clipboard::safety::is_sensitive_context() {
+                        debug!("Skipping clipboard sync in sensitive context");
+                        continue;
+                    }
+                    
                     let content_hash = format!("{:x}", md5::compute(&content));
 
                     if Some(&content_hash) != last_content_hash.as_ref() {
