@@ -3,7 +3,13 @@ use base64::Engine as _;
 use std::fs;
 
 fn main() {
-    let key_path = "/home/lance/.ssh/id_ed25519";
+    let key_path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| {
+            eprintln!("Usage: test_openssh <path_to_key>");
+            eprintln!("Example: test_openssh ~/.ssh/id_ed25519");
+            std::process::exit(1);
+        });
     println!("Testing OpenSSH key parsing for: {}", key_path);
     
     // Read key file
