@@ -24,7 +24,7 @@ bytes = "1.10"
 futures-util = "0.3"
 
 # Database
-rusqlite = { version = "0.36", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
 
 # Encryption & Security
 aes-gcm = "0.10"
