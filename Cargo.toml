@@ -44,7 +44,7 @@ bincode = "2.0"
 
 # Service discovery
 mdns-sd = "0.13"
-if-addrs = "0.13"
+if-addrs = "0.15"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
