@@ -466,7 +466,7 @@ dependencies = [
  "gethostname",
  "global-hotkey",
  "hex",
- "if-addrs",
+ "if-addrs 0.15.0",
  "libc",
  "md5",
  "mdns-sd",
@@ -1358,6 +1358,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "image"
 version = "0.25.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1581,7 +1591,7 @@ checksum = "a61a86e69b0d6f1ace38f9f51e1c03c2d1b60cc16d3436ee9f036945344b0a75"
 dependencies = [
  "fastrand",
  "flume",
- "if-addrs",
+ "if-addrs 0.13.4",
  "log",
  "mio",
  "socket2",
@@ -3236,6 +3246,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2f500e4d28234f72040990ec9d39e3a6b950f9f22d3dba18416c35882612bcb"
 dependencies = [
  "windows-targets 0.53.2",
+]
+
+[[package]]
+name = "windows-sys"
+version = "0.61.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
+dependencies = [
+ "windows-link 0.2.1",
 ]
 
 [[package]]
