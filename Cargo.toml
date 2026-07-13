@@ -27,7 +27,7 @@ futures-util = "0.3"
 rusqlite = { version = "0.36", features = ["bundled-sqlcipher"] }
 
 # Encryption & Security
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 argon2 = "0.5"
 zeroize = "1.8"
 rand = "0.9"
