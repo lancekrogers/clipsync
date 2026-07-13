@@ -49,7 +49,7 @@ if-addrs = "0.13"
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"
-global-hotkey = "0.7"
+global-hotkey = "0.8"
 
 # Error handling
 thiserror = "2.0"
