@@ -90,7 +90,7 @@ core-graphics = "0.25"
 x11-clipboard = "0.9"
 x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
 wayland-client = "0.31"
-wayland-protocols = "0.31"
+wayland-protocols = "0.32"
 wayland-protocols-wlr = "0.3"
 nix = { version = "0.30", features = ["poll", "process", "signal", "user", "fs"] }
 
