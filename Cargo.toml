@@ -39,7 +39,7 @@ base64 = "0.22"
 # Configuration and serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+toml = "0.9"
 bincode = "2.0"
 
 # Service discovery
