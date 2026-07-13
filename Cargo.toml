@@ -18,7 +18,7 @@ async-trait = "0.1"
 arboard = "3.5"
 
 # Networking
-tokio-tungstenite = "0.27"
+tokio-tungstenite = "0.30"
 ssh2 = "0.9"
 bytes = "1.10"
 futures-util = "0.3"
