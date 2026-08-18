@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/hero.jpg" width="880" alt="Laptop and desktop showing the same clipboard history over a LAN cable">
+</p>
+
 # clipsync
 
 **Copy on this machine. Paste on the other. No cloud.**
