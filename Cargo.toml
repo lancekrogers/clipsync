@@ -43,7 +43,7 @@ toml = "0.9"
 bincode = "2.0"
 
 # Service discovery
-mdns-sd = "0.13"
+mdns-sd = "0.15"
 if-addrs = "0.15"
 
 # CLI
