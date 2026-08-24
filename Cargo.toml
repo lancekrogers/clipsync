@@ -106,7 +106,7 @@ tempfile = "3.20"
 mockall = "0.13"
 tokio-test = "0.4"
 proptest = "1.7"
-rstest = "0.25"
+rstest = "0.26"
 pretty_assertions = "1.4"
 
 [features]
