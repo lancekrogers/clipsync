@@ -88,7 +88,7 @@ core-graphics = "0.25"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 x11-clipboard = "0.9"
-x11rb = { version = "0.13", features = ["allow-unsafe-code"] }
+x11rb = { version = "0.14", features = ["allow-unsafe-code"] }
 wayland-client = "0.31"
 wayland-protocols = "0.32"
 wayland-protocols-wlr = "0.3"
