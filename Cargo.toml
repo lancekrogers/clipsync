@@ -30,7 +30,7 @@ rusqlite = { version = "0.37", features = ["bundled-sqlcipher"] }
 aes-gcm = "0.10"
 argon2 = "0.5"
 zeroize = "1.8"
-rand = "0.9"
+rand = "0.10"
 sha2 = "0.10"
 hex = "0.4"
 ring = "0.17"
