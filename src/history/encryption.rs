@@ -79,6 +79,9 @@ impl Encryptor {
 
     /// Decrypt data and decompress if needed
     pub fn decrypt(&self, encrypted: &EncryptedData) -> Result<Vec<u8>> {
+        if encrypted.nonce.len() != 12 {
+            return Err(anyhow!("Invalid history nonce length"));
+        }
         let nonce = Nonce::from_slice(&encrypted.nonce);
         let mut plaintext = self
             .cipher
@@ -111,27 +114,65 @@ impl Encryptor {
     }
 
     async fn load_or_create_key() -> Result<[u8; 32]> {
-        // Use file-based key storage for cross-platform compatibility
-        let key_path = Self::get_key_file_path()?;
+        Self::load_or_create_at(&Self::get_key_file_path()?, false).await
+    }
 
-        if key_path.exists() {
-            // Try to load existing key
-            match Self::load_from_file(&key_path).await {
-                Ok(key) => return Ok(key),
-                Err(e) => {
-                    tracing::warn!("Failed to load existing key: {}", e);
-                    // Continue to check for migration or generate new key
+    pub async fn for_store(key_path: &Path, existing_store: bool) -> Result<Self> {
+        let key = Self::load_or_create_at(key_path, existing_store).await?;
+        Ok(Self {
+            cipher: Aes256Gcm::new_from_slice(&key)?,
+            key: Zeroizing::new(key),
+        })
+    }
+
+    async fn load_or_create_at(path: &Path, existing_store: bool) -> Result<[u8; 32]> {
+        // Only absence permits initialization. Preserve every existing key on error.
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                if !meta.file_type().is_file() {
+                    return Err(anyhow!("History key must be a regular file"));
                 }
+                return Self::load_from_file(path).await;
             }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
-
-        // Generate new key
+        if existing_store {
+            return Err(anyhow!(
+                "History key is missing; restore it from backup before opening existing history"
+            ));
+        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow!("Key path has no parent"))?;
+        fs::create_dir_all(parent)?;
+        let temporary = parent.join(format!(".history-key-{}", uuid::Uuid::new_v4()));
         let mut key = [0u8; 32];
         OsRng.fill_bytes(&mut key);
-
-        // Save to file with proper permissions
-        Self::save_to_file(&key_path, &key).await?;
-        Ok(key)
+        let result = (|| -> Result<()> {
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&temporary)?;
+            file.write_all(&key)?;
+            file.sync_all()?;
+            // Publish fully written bytes without replacing a competing initializer.
+            match fs::hard_link(&temporary, path) {
+                Ok(()) => {
+                    fs::File::open(parent)?.sync_all()?;
+                    Ok(())
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+                Err(e) => Err(e.into()),
+            }
+        })();
+        let _ = fs::remove_file(&temporary);
+        key.zeroize();
+        result?;
+        Self::load_from_file(path).await
     }
 
     async fn load_from_file(path: &Path) -> Result<[u8; 32]> {
@@ -159,52 +200,7 @@ impl Encryptor {
         Ok(key)
     }
 
-    async fn save_to_file(path: &Path, key: &[u8; 32]) -> Result<()> {
-        // Create directory if needed
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-
-            // Set directory permissions on Unix
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(metadata) = fs::metadata(parent) {
-                    let mut perms = metadata.permissions();
-                    perms.set_mode(0o700); // rwx for owner only
-                                           // Ignore permission errors in tests/temp directories
-                    let _ = fs::set_permissions(parent, perms);
-                }
-            }
-        }
-
-        // Write key file
-        fs::write(path, key)?;
-
-        // Set restrictive permissions on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if let Ok(metadata) = fs::metadata(path) {
-                let mut perms = metadata.permissions();
-                perms.set_mode(0o600); // Read/write for owner only
-                                       // Ignore permission errors in tests/temp directories
-                let _ = fs::set_permissions(path, perms);
-            }
-        }
-
-        // On Windows, file permissions are handled by default ACLs
-        #[cfg(windows)]
-        {
-            // Windows file permissions are more complex and typically handled
-            // by the default ACLs. The file will be created with permissions
-            // inherited from the parent directory.
-        }
-
-        tracing::info!("Encryption key saved to {:?}", path);
-        Ok(())
-    }
-
-    fn get_key_file_path() -> Result<PathBuf> {
+    pub(crate) fn get_key_file_path() -> Result<PathBuf> {
         // Use platform-specific config directory
         let config_dir = if cfg!(target_os = "linux") {
             // On Linux, prefer XDG_CONFIG_HOME or ~/.config

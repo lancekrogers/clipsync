@@ -261,6 +261,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "Requires a disposable X11 clipboard session"]
     async fn test_x11_clipboard_text() {
         // This test will only work on systems with X11
         if std::env::var("DISPLAY").is_err() {

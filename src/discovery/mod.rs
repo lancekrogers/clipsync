@@ -70,14 +70,12 @@ impl DiscoveryService {
 #[async_trait]
 impl Discovery for DiscoveryService {
     async fn start(&mut self) -> Result<()> {
-        // Start mDNS discovery
+        self.event_rx = Some(self.peer_manager.subscribe());
+        // Subscribe before any discovery task can publish.
         self.mdns.start().await?;
 
         // Start fallback discovery
         self.fallback.start().await?;
-
-        // Subscribe to events from peer manager
-        self.event_rx = Some(self.peer_manager.subscribe());
 
         Ok(())
     }

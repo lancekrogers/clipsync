@@ -45,14 +45,14 @@ impl PublicKey {
     /// Get the fingerprint of the public key (SHA256 hash)
     pub fn fingerprint(&self) -> String {
         use ring::digest;
-        let hash = digest::digest(&digest::SHA256, &self.key_data);
+        let hash = digest::digest(&digest::SHA256, &self.to_openssh_format());
         let encoded = BASE64.encode(hash.as_ref());
         format!("SHA256:{}", encoded.trim_end_matches('='))
     }
 
     /// Export to OpenSSH format
     pub fn to_openssh(&self) -> String {
-        let encoded = BASE64.encode(&self.key_data);
+        let encoded = BASE64.encode(self.to_openssh_format());
         format!("{} {}", self.key_type.ssh_name(), encoded)
     }
 
@@ -80,6 +80,22 @@ impl PublicKey {
             .decode(parts[1])
             .map_err(|e| AuthError::InvalidKeyFormat(format!("Invalid base64: {}", e)))?;
 
+        if key_type == KeyType::Ed25519 {
+            // Accept legacy ClipSync raw keys, but emit standard OpenSSH wire keys.
+            let raw = if key_data.len() == 32 {
+                key_data
+            } else {
+                if key_data.len() != 51
+                    || &key_data[..19] != b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20"
+                {
+                    return Err(AuthError::InvalidKeyFormat(
+                        "Invalid Ed25519 public key".into(),
+                    ));
+                }
+                key_data[19..].to_vec()
+            };
+            return Ok(Self::new(key_type, raw));
+        }
         Ok(Self::new(key_type, key_data))
     }
 
@@ -102,16 +118,20 @@ impl PublicKey {
 
     /// Export to OpenSSH wire format (binary format)
     pub fn to_openssh_format(&self) -> Vec<u8> {
-        // Simplified - returns the key data directly
-        // In a real implementation, this would encode according to RFC 4251
-        self.key_data.clone()
+        if self.key_type == KeyType::Ed25519 {
+            [
+                b"\x00\x00\x00\x0bssh-ed25519\x00\x00\x00\x20".as_slice(),
+                &self.key_data,
+            ]
+            .concat()
+        } else {
+            self.key_data.clone()
+        }
     }
 
     /// Parse from OpenSSH wire format (binary format)
     pub fn from_openssh_format(data: &[u8]) -> Result<Self, AuthError> {
-        // Simplified - assumes Ed25519 key data
-        // In a real implementation, this would parse according to RFC 4251
-        Ok(Self::new(KeyType::Ed25519, data.to_vec()))
+        Self::from_openssh(&format!("ssh-ed25519 {}", BASE64.encode(data)))
     }
 }
 
@@ -149,6 +169,10 @@ impl KeyPair {
                 "RSA key generation not implemented".to_string(),
             )),
         }
+    }
+
+    pub(crate) fn pkcs8(&self) -> Vec<u8> {
+        self.private_key.clone()
     }
 
     /// Load from private key file
@@ -214,12 +238,12 @@ impl KeyPair {
                     // Parse OpenSSH format (simplified for Ed25519)
                     return Self::from_openssh_private_key(key_str);
                 }
-                
+
                 // Check for PKCS8 PEM format
                 if key_str.contains("BEGIN PRIVATE KEY") {
                     return Self::from_pkcs8_pem(key_str);
                 }
-                
+
                 // Check for other PEM formats
                 if key_str.contains("BEGIN RSA PRIVATE KEY") {
                     // For now, we don't support PKCS#1 format
@@ -227,7 +251,7 @@ impl KeyPair {
                         "RSA PKCS#1 private keys are not yet supported. Please convert to PKCS8 format using: openssl pkcs8 -topk8 -inform PEM -outform PEM -nocrypt -in <keyfile> -out <keyfile>.pkcs8".to_string(),
                     ));
                 }
-                
+
                 if key_str.contains("BEGIN EC PRIVATE KEY") {
                     return Err(AuthError::InvalidKeyFormat(
                         "EC private keys are not supported. ClipSync supports Ed25519 and RSA keys only.".to_string(),
@@ -240,7 +264,8 @@ impl KeyPair {
             "Unsupported private key format. ClipSync supports:\n\
              - OpenSSH format (unencrypted Ed25519 keys from ssh-keygen)\n\
              - PKCS8 format (Ed25519 keys)\n\
-             - RSA keys must be in PKCS8 format (use ssh-keygen -p -m PKCS8)".to_string(),
+             - RSA keys must be in PKCS8 format (use ssh-keygen -p -m PKCS8)"
+                .to_string(),
         ))
     }
 
@@ -250,10 +275,12 @@ impl KeyPair {
             KeyType::Ed25519 => {
                 // Encode PKCS8 data in standard PEM format
                 let encoded = BASE64.encode(&self.private_key);
-                let pem =
-                    format!(
+                let pem = format!(
                     "-----BEGIN PRIVATE KEY-----\n{}\n-----END PRIVATE KEY-----\n",
-                    encoded.chars().collect::<Vec<_>>().chunks(64)
+                    encoded
+                        .chars()
+                        .collect::<Vec<_>>()
+                        .chunks(64)
                         .map(|chunk| chunk.iter().collect::<String>())
                         .collect::<Vec<_>>()
                         .join("\n")
@@ -320,30 +347,33 @@ impl KeyPair {
         // Parse OpenSSH format using our parser
         let openssh_key = crate::auth::openssh::parse_openssh_private_key(&decoded)
             .map_err(|e| AuthError::InvalidKeyFormat(format!("OpenSSH parse error: {}", e)))?;
-        
+
         if openssh_key.is_encrypted {
             return Err(AuthError::InvalidKeyFormat(
                 "Encrypted OpenSSH keys are not yet supported. Please decrypt with: ssh-keygen -p -N \"\" -f <keyfile>".to_string()
             ));
         }
-        
+
         // Parse private section
-        let private_key_data = crate::auth::openssh::parser::parse_private_section(&openssh_key.private_section)
-            .map_err(|e| AuthError::InvalidKeyFormat(format!("Private section parse error: {}", e)))?;
-        
+        let private_key_data =
+            crate::auth::openssh::parser::parse_private_section(&openssh_key.private_section)
+                .map_err(|e| {
+                    AuthError::InvalidKeyFormat(format!("Private section parse error: {}", e))
+                })?;
+
         // Convert to our format based on key type
         match &private_key_data.private_data {
             crate::auth::openssh::KeyTypeData::Ed25519 { public, private } => {
                 // Convert to PKCS8 format
                 let pkcs8_bytes = crate::auth::openssh::ed25519::ed25519_openssh_to_pkcs8(&private_key_data.private_data)
                     .map_err(|e| AuthError::InvalidKeyFormat(format!("Failed to convert to PKCS8: {}", e)))?;
-                
+
                 // Verify the key works with ring
                 let key_pair = Ed25519KeyPair::from_pkcs8(&pkcs8_bytes)
                     .map_err(|_| AuthError::InvalidKeyFormat("Failed to load converted Ed25519 key".to_string()))?;
-                
+
                 let public_key_bytes = key_pair.public_key().as_ref().to_vec();
-                
+
                 Ok(Self {
                     key_type: KeyType::Ed25519,
                     private_key: pkcs8_bytes,
@@ -467,11 +497,11 @@ AAAEBe/8xizfsHR6WQs/wOvqEHXBTYM0kNZQNG9BUbE5C8EInSDzxyO6Jg1c+46RVzeqvI
 
         // Test that we can now parse OpenSSH format keys
         let result = KeyPair::from_private_key_bytes(openssh_key.as_bytes());
-        
+
         match result {
             Ok(key_pair) => {
                 assert_eq!(key_pair.key_type, KeyType::Ed25519);
-                
+
                 // Test that we can sign with the key
                 let message = b"test message";
                 let signature = key_pair.sign(message).unwrap();
@@ -486,26 +516,27 @@ AAAEBe/8xizfsHR6WQs/wOvqEHXBTYM0kNZQNG9BUbE5C8EInSDzxyO6Jg1c+46RVzeqvI
             }
         }
     }
-    
+
     #[test]
     fn test_openssh_format_detection() {
         // Test that we correctly detect OpenSSH format
-        let openssh_key = "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----";
+        let openssh_key =
+            "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----";
         let result = KeyPair::from_private_key_bytes(openssh_key.as_bytes());
         assert!(result.is_err());
-        
-        // Test PKCS8 format detection  
+
+        // Test PKCS8 format detection
         let pkcs8_key = "-----BEGIN PRIVATE KEY-----\ntest\n-----END PRIVATE KEY-----";
         let result = KeyPair::from_private_key_bytes(pkcs8_key.as_bytes());
         assert!(result.is_err()); // Will fail due to invalid base64, but should try to parse as PKCS8
     }
-    
+
     #[test]
     fn test_pkcs8_private_key_ed25519() {
         // Test that PKCS8 format still works
         let key_pair = KeyPair::generate(KeyType::Ed25519).unwrap();
         let pkcs8_pem = key_pair.to_pkcs8_pem().unwrap();
-        
+
         let loaded_key = KeyPair::from_private_key_bytes(pkcs8_pem.as_bytes()).unwrap();
         assert_eq!(loaded_key.key_type, KeyType::Ed25519);
         assert_eq!(
@@ -513,7 +544,7 @@ AAAEBe/8xizfsHR6WQs/wOvqEHXBTYM0kNZQNG9BUbE5C8EInSDzxyO6Jg1c+46RVzeqvI
             key_pair.public_key().fingerprint()
         );
     }
-    
+
     #[test]
     fn test_encrypted_openssh_key_error() {
         // This is an encrypted OpenSSH key (should fail with helpful error)
@@ -525,7 +556,7 @@ xWi6OdqJL4mfYvMU3KH5SrXDXYs5AAAAkPNoMkdRTbkYKKnGMXPGKa3L3BfQlJ0ELnmh0h
 xYoVF2I8r7VZmF6r+Zop0KF1C7HJLR3O2FMvhI3RiQKNXVdQVVfdiN5Owg5E8JU7PyL7NK
 aY7tQ5PKEZmw==
 -----END OPENSSH PRIVATE KEY-----"#;
-        
+
         let result = KeyPair::from_private_key_bytes(encrypted_key.as_bytes());
         assert!(result.is_err());
         match result {
@@ -533,16 +564,17 @@ aY7tQ5PKEZmw==
                 // The error might be from parsing failure, not encryption detection
                 // Accept either error message
                 assert!(
-                    msg.contains("Encrypted OpenSSH keys are not yet supported") ||
-                    msg.contains("OpenSSH parse error") ||
-                    msg.contains("failed to fill whole buffer"),
-                    "Unexpected error message: {}", msg
+                    msg.contains("Encrypted OpenSSH keys are not yet supported")
+                        || msg.contains("OpenSSH parse error")
+                        || msg.contains("failed to fill whole buffer"),
+                    "Unexpected error message: {}",
+                    msg
                 );
             }
             _ => panic!("Expected InvalidKeyFormat error"),
         }
     }
-    
+
     #[test]
     fn test_rsa_openssh_key_error() {
         // Test that RSA OpenSSH format gives helpful error
@@ -551,88 +583,102 @@ aY7tQ5PKEZmw==
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAABwAAAAdzc2gtcn
 NhAAAAAwEAAQ==
 -----END OPENSSH PRIVATE KEY-----"#;
-        
+
         // Since we don't have a full RSA key, just test the error message format
         let key_pair = KeyPair::generate(KeyType::Ed25519).unwrap();
         assert_eq!(key_pair.key_type, KeyType::Ed25519);
     }
-    
+
     #[test]
     fn test_invalid_key_format_errors() {
         // Test various invalid formats
         let invalid_cases = vec![
             ("", "Unsupported private key format"),
             ("invalid data", "Unsupported private key format"),
-            ("-----BEGIN RSA PRIVATE KEY-----\ninvalid\n-----END RSA PRIVATE KEY-----", 
-             "RSA PKCS#1 private keys are not yet supported"),
-            ("-----BEGIN EC PRIVATE KEY-----\ninvalid\n-----END EC PRIVATE KEY-----",
-             "EC private keys are not supported"),
+            (
+                "-----BEGIN RSA PRIVATE KEY-----\ninvalid\n-----END RSA PRIVATE KEY-----",
+                "RSA PKCS#1 private keys are not yet supported",
+            ),
+            (
+                "-----BEGIN EC PRIVATE KEY-----\ninvalid\n-----END EC PRIVATE KEY-----",
+                "EC private keys are not supported",
+            ),
         ];
-        
+
         for (key_data, expected_msg) in invalid_cases {
             let result = KeyPair::from_private_key_bytes(key_data.as_bytes());
             assert!(result.is_err());
             if let Err(AuthError::InvalidKeyFormat(msg)) = result {
-                assert!(msg.contains(expected_msg), 
-                    "Expected error containing '{}', got '{}'", expected_msg, msg);
+                assert!(
+                    msg.contains(expected_msg),
+                    "Expected error containing '{}', got '{}'",
+                    expected_msg,
+                    msg
+                );
             }
         }
     }
-    
+
     #[tokio::test]
     async fn test_real_world_key_compatibility() {
         use tempfile::TempDir;
         use tokio::process::Command;
-        
+
         // Skip this test if ssh-keygen is not available
-        let check = Command::new("ssh-keygen")
-            .arg("-V")
-            .output()
-            .await;
-        
+        let check = Command::new("ssh-keygen").arg("-V").output().await;
+
         if check.is_err() {
             println!("Skipping test: ssh-keygen not available");
             return;
         }
-        
+
         let temp_dir = TempDir::new().unwrap();
         let key_path = temp_dir.path().join("test_key");
-        
+
         // Generate a real Ed25519 key with ssh-keygen
         let output = Command::new("ssh-keygen")
             .args(&[
-                "-t", "ed25519",
-                "-N", "", // No passphrase
-                "-f", key_path.to_str().unwrap(),
-                "-C", "test@clipsync.local",
+                "-t",
+                "ed25519",
+                "-N",
+                "", // No passphrase
+                "-f",
+                key_path.to_str().unwrap(),
+                "-C",
+                "test@clipsync.local",
             ])
             .output()
             .await
             .expect("Failed to generate key");
-        
+
         if !output.status.success() {
-            eprintln!("ssh-keygen failed: {}", String::from_utf8_lossy(&output.stderr));
+            eprintln!(
+                "ssh-keygen failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             panic!("Failed to generate test key");
         }
-        
+
         // Try to load the generated key
         let key_result = KeyPair::load_from_file(&key_path).await;
-        
+
         match key_result {
             Ok(key_pair) => {
                 assert_eq!(key_pair.key_type, KeyType::Ed25519);
-                
+
                 // Verify we can sign and verify with it
                 let message = b"test message";
                 let signature = key_pair.sign(message).unwrap();
                 assert!(key_pair.public_key().verify(message, &signature).unwrap());
-                
+
                 println!("Successfully loaded and used ssh-keygen generated Ed25519 key!");
             }
             Err(e) => {
                 // For now, we expect this might fail due to incomplete OpenSSH support
                 eprintln!("Note: Loading ssh-keygen key failed with: {:?}", e);
-                eprintln!("This is a known limitation - full OpenSSH format support is in progress");
+                eprintln!(
+                    "This is a known limitation - full OpenSSH format support is in progress"
+                );
             }
         }
     }

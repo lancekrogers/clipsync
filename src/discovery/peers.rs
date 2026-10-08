@@ -23,7 +23,7 @@ struct PeerManagerInner {
     /// Event broadcaster
     event_tx: Mutex<mpsc::Sender<DiscoveryEvent>>,
     /// Event receivers
-    event_listeners: Mutex<Vec<mpsc::Sender<DiscoveryEvent>>>,
+    event_listeners: std::sync::Mutex<Vec<mpsc::Sender<DiscoveryEvent>>>,
 }
 
 /// Internal peer entry with additional tracking
@@ -42,28 +42,34 @@ impl PeerManager {
         let inner = Arc::new(PeerManagerInner {
             peers: RwLock::new(HashMap::new()),
             event_tx: Mutex::new(event_tx),
-            event_listeners: Mutex::new(Vec::new()),
+            event_listeners: std::sync::Mutex::new(Vec::new()),
         });
 
-        // Spawn event broadcaster
-        let inner_clone = inner.clone();
+        // Weak references allow all background work to stop with the final owner.
+        let weak = Arc::downgrade(&inner);
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                let listeners = inner_clone.event_listeners.lock().await;
-                for listener in listeners.iter() {
-                    let _ = listener.send(event.clone()).await;
-                }
+                let Some(inner) = weak.upgrade() else {
+                    break;
+                };
+                inner.event_listeners.lock().unwrap().retain(|listener| {
+                    match listener.try_send(event.clone()) {
+                        Ok(()) | Err(mpsc::error::TrySendError::Full(_)) => true,
+                        Err(mpsc::error::TrySendError::Closed(_)) => false,
+                    }
+                });
             }
         });
-
-        // Spawn cleanup task
-        let inner_clone = inner.clone();
+        let weak = Arc::downgrade(&inner);
         tokio::spawn(async move {
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(CLEANUP_INTERVAL_SECS));
             loop {
                 interval.tick().await;
-                let _ = Self::cleanup_stale_peers(&inner_clone).await;
+                let Some(inner) = weak.upgrade() else {
+                    break;
+                };
+                let _ = Self::cleanup_stale_peers(&inner).await;
             }
         });
 
@@ -153,11 +159,7 @@ impl PeerManager {
     pub fn subscribe(&self) -> mpsc::Receiver<DiscoveryEvent> {
         let (tx, rx) = mpsc::channel(100);
 
-        // Clone the inner reference for the spawned task
-        let inner = self.inner.clone();
-        tokio::spawn(async move {
-            inner.event_listeners.lock().await.push(tx);
-        });
+        self.inner.event_listeners.lock().unwrap().push(tx);
 
         rx
     }

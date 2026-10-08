@@ -1,14 +1,14 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::io::{BufRead, BufReader};
 use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use tracing::{error, info};
 use chrono::{DateTime, Local};
+use clap::{Parser, Subcommand};
 use serde_json;
+use tracing::{error, info};
 
 use crate::adapters::{
     get_clipboard_provider, ClipboardProviderWrapper, HistoryManager, PeerDiscovery,
@@ -162,7 +162,6 @@ pub struct CliHandler {
     clipboard: Option<Arc<ClipboardProviderWrapper>>,
     history: Option<Arc<HistoryManager>>,
     discovery: Option<Arc<PeerDiscovery>>,
-    transport: Option<Arc<TransportManager>>,
     sync_engine: Option<Arc<TrustAwareSyncEngine>>,
 }
 
@@ -176,7 +175,6 @@ impl CliHandler {
             clipboard: None,
             history: None,
             discovery: None,
-            transport: None,
             sync_engine: None,
         })
     }
@@ -207,7 +205,12 @@ impl CliHandler {
     async fn ensure_history(&mut self) -> Result<Arc<HistoryManager>> {
         if self.history.is_none() {
             info!("Initializing history manager");
-            let history = Arc::new(HistoryManager::new(&self.config.database_path()).await?);
+            let history = Arc::new(match &self.config.clipboard.history_key {
+                Some(key) => {
+                    HistoryManager::new_with_key_path(&self.config.database_path(), key).await?
+                }
+                None => HistoryManager::new(&self.config.database_path()).await?,
+            });
             self.history = Some(history);
         }
         Ok(self.history.as_ref().unwrap().clone())
@@ -233,22 +236,16 @@ impl CliHandler {
         Ok(self.discovery.as_ref().unwrap().clone())
     }
 
-    /// Lazily initialize the transport manager when needed
-    async fn ensure_transport(&mut self) -> Result<Arc<TransportManager>> {
-        if self.transport.is_none() {
-            info!("Initializing transport manager");
-            let transport = Arc::new(TransportManager::new(TransportConfig::default()));
-            self.transport = Some(transport);
-        }
-        Ok(self.transport.as_ref().unwrap().clone())
-    }
-
     pub async fn handle_command(&mut self, command: Commands) -> Result<()> {
         match command {
             Commands::Start { foreground } => self.start_daemon(foreground).await,
             Commands::Stop => self.stop_daemon().await,
             Commands::Status => self.show_status().await,
-            Commands::History { limit, interactive, search } => {
+            Commands::History {
+                limit,
+                interactive,
+                search,
+            } => {
                 if interactive {
                     self.show_interactive_history().await
                 } else if let Some(search_term) = search {
@@ -287,20 +284,50 @@ impl CliHandler {
         info!("Starting ClipSync daemon");
 
         #[cfg(target_os = "linux")]
-        {
-            // Check if daemon is already running
-            if daemon::is_daemon_running()? {
-                println!("ClipSync daemon is already running");
-                return Ok(());
+        if !foreground {
+            let path = crate::control::socket_path(&self.config);
+            if crate::control::request(&path, crate::control::Command::Status)
+                .await
+                .is_ok()
+            {
+                anyhow::bail!("Daemon already running");
             }
-
-            if !foreground {
-                info!("Running in daemon mode");
-                daemon::daemonize()?;
-            } else {
-                info!("Running in foreground mode");
-                daemon::run_foreground()?;
+            let mut command = Command::new(std::env::current_exe()?);
+            if let Some(config) = &self.config_path {
+                command.arg("--config").arg(config);
             }
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() == -1 {
+                        Err(std::io::Error::last_os_error())
+                    } else {
+                        Ok(())
+                    }
+                });
+            }
+            let mut child = command
+                .args(["start", "--foreground"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()?;
+            for _ in 0..50 {
+                if crate::control::request(&path, crate::control::Command::Status)
+                    .await
+                    .is_ok()
+                {
+                    println!("ClipSync daemon ready");
+                    return Ok(());
+                }
+                if let Some(status) = child.try_wait()? {
+                    anyhow::bail!("Daemon exited during startup: {status}; run start --foreground for details");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("Daemon did not become ready; run start --foreground for details");
         }
 
         #[cfg(target_os = "macos")]
@@ -347,15 +374,23 @@ impl CliHandler {
         #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
         {
             if !foreground {
-                println!("Warning: Daemon mode not supported on this platform, running in foreground");
+                println!(
+                    "Warning: Daemon mode not supported on this platform, running in foreground"
+                );
             }
         }
+
+        // Identity-derived node IDs survive restarts and bind discovery to TLS identity.
+        let identity = crate::auth::KeyPair::load_from_file(&self.config.auth.ssh_key).await?;
+        let mut config = (*self.config).clone();
+        config.node_id = crate::transport::tls::node_id(&identity.public_key());
+        self.config = Arc::new(config);
+        let control = crate::control::Server::bind(crate::control::socket_path(&self.config))?;
 
         // Ensure all components are initialized for daemon mode
         let clipboard = self.ensure_clipboard().await?;
         let history = self.ensure_history().await?;
         let discovery = self.ensure_discovery().await?;
-        let transport = self.ensure_transport().await?;
 
         // Initialize trust-aware sync engine
         let sync_engine = Arc::new(
@@ -364,7 +399,6 @@ impl CliHandler {
                 Arc::clone(&clipboard),
                 Arc::clone(&history),
                 Arc::clone(&discovery),
-                Arc::clone(&transport),
             )
             .await?,
         );
@@ -381,59 +415,43 @@ impl CliHandler {
 
         self.sync_engine = Some(Arc::clone(&sync_engine));
 
-        // Start trust processing
-        sync_engine
-            .start_trust_processing(Arc::clone(&discovery))
-            .await?;
-
-        // Start services
+        // Pair explicitly with `auth add`; a background daemon must never prompt on stdin.
+        let listener = sync_engine.bind_listener().await?;
         let sync_engine_task = Arc::clone(&sync_engine);
+        info!("ClipSync listener bound; starting service");
 
-        info!("ClipSync daemon started successfully");
-
-        // Setup signal handler for graceful shutdown
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-        #[cfg(target_os = "linux")]
-        daemon::setup_signal_handlers(shutdown_tx)?;
-        
-        #[cfg(not(target_os = "linux"))]
-        {
-            // For non-Linux platforms, we'll handle Ctrl+C manually
-            let shutdown_tx = Arc::new(tokio::sync::Mutex::new(Some(shutdown_tx)));
-            tokio::spawn(async move {
-                tokio::signal::ctrl_c().await.ok();
-                if let Some(tx) = shutdown_tx.lock().await.take() {
-                    let _ = tx.send(());
-                }
-            });
-        }
-
-        // Run services until shutdown signal
-        tokio::select! {
-            result = sync_engine_task.start() => {
-                if let Err(e) = result {
-                    error!("Service error: {}", e);
-                }
-            }
-            _ = shutdown_rx => {
-                info!("Received shutdown signal");
-            }
-        }
-
-        // Cleanup
-        #[cfg(target_os = "linux")]
-        daemon::remove_pidfile()?;
-        info!("ClipSync daemon stopped");
-
-        Ok(())
+        let shutdown = async {
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+            tokio::select! { result = tokio::signal::ctrl_c() => result?, _ = term.recv() => {} }
+            Ok::<(), std::io::Error>(())
+        };
+        let result = tokio::select! {
+            result = sync_engine_task.run(listener) => result,
+            result = control.run(sync_engine.as_ref()) => result,
+            result = shutdown => result.map_err(anyhow::Error::from),
+        };
+        sync_engine.shutdown().await;
+        result
     }
 
     async fn stop_daemon(&self) -> Result<()> {
         info!("Stopping ClipSync daemon");
         #[cfg(target_os = "linux")]
         {
-            daemon::stop_daemon()?;
-            println!("ClipSync daemon stopped");
+            let path = crate::control::socket_path(&self.config);
+            let response = crate::control::request(&path, crate::control::Command::Status).await?;
+            if unsafe { libc::kill(response.pid as i32, libc::SIGTERM) } != 0 {
+                return Err(std::io::Error::last_os_error().into());
+            }
+            for _ in 0..50 {
+                if !path.exists() {
+                    println!("ClipSync daemon stopped");
+                    return Ok(());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            anyhow::bail!("Daemon has not finished shutting down");
         }
         #[cfg(target_os = "macos")]
         {
@@ -471,58 +489,16 @@ impl CliHandler {
     }
 
     async fn show_status(&self) -> Result<()> {
-        println!("ClipSync Status:");
-        println!("  Version: {}", env!("CARGO_PKG_VERSION"));
-        println!("  Config: Default");
-        println!("  Node ID: {}", self.config.node_id());
-
-        // Check if daemon is running
-        #[cfg(target_os = "linux")]
-        {
-            if daemon::is_daemon_running()? {
-                if let Some(pid) = daemon::read_pidfile()? {
-                    println!("  Daemon: Running (PID: {})", pid);
-                } else {
-                    println!("  Daemon: Running");
-                }
-            } else {
-                println!("  Daemon: Not running");
-            }
-        }
-        #[cfg(target_os = "macos")]
-        {
-            // Check launchctl status
-            let status_output = Command::new("launchctl")
-                .args(&["list", "com.clipsync"])
-                .output()?;
-
-            if status_output.status.success() {
-                // Parse PID from output
-                let output_str = String::from_utf8_lossy(&status_output.stdout);
-                let parts: Vec<&str> = output_str.trim().split_whitespace().collect();
-                if parts.len() >= 1 && parts[0] != "-" {
-                    if let Ok(pid) = parts[0].parse::<i32>() {
-                        println!("  Daemon: Running (PID: {})", pid);
-                    } else {
-                        println!("  Daemon: Running");
-                    }
-                } else {
-                    println!("  Daemon: Loaded but not running");
-                }
-            } else {
-                println!("  Daemon: Not running");
-            }
-        }
-        #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
-        {
-            println!("  Daemon: Not supported on this platform");
-        }
-
-        if let Some(sync_engine) = &self.sync_engine {
-            let peers = sync_engine.get_connected_peers().await;
-            println!("  Connected Peers: {}", peers.len());
-        }
-
+        let response = crate::control::request(
+            &crate::control::socket_path(&self.config),
+            crate::control::Command::Status,
+        )
+        .await?;
+        println!(
+            "ClipSync daemon running (PID {})\nConnected peers: {}",
+            response.pid,
+            response.peers.len()
+        );
         Ok(())
     }
 
@@ -563,32 +539,27 @@ impl CliHandler {
     }
 
     async fn force_sync(&self) -> Result<()> {
-        if let Some(sync_engine) = &self.sync_engine {
-            sync_engine.force_sync().await?;
-            println!("Clipboard sync completed");
-        } else {
-            println!("ClipSync daemon is not running");
-        }
+        let response = crate::control::request(
+            &crate::control::socket_path(&self.config),
+            crate::control::Command::Sync,
+        )
+        .await?;
+        println!(
+            "Clipboard update queued for {} authenticated peers",
+            response.queued.unwrap_or(0)
+        );
         Ok(())
     }
-
     async fn show_peers(&self) -> Result<()> {
-        if let Some(sync_engine) = &self.sync_engine {
-            let peers = sync_engine.get_connected_peers().await;
-
-            if peers.is_empty() {
-                println!("No connected peers");
-                return Ok(());
-            }
-
-            println!("Connected Peers ({}):", peers.len());
-            for peer in peers {
-                println!("  {} - {} ({})", peer.id, peer.hostname, peer.address);
-            }
-        } else {
-            println!("ClipSync daemon is not running");
+        let response = crate::control::request(
+            &crate::control::socket_path(&self.config),
+            crate::control::Command::Peers,
+        )
+        .await?;
+        println!("Connected peers: {}", response.peers.len());
+        for peer in response.peers {
+            println!("{} - {} ({})", peer.id, peer.hostname, peer.address);
         }
-
         Ok(())
     }
 
@@ -614,44 +585,40 @@ impl CliHandler {
 
     async fn restart_daemon(&mut self) -> Result<()> {
         info!("Restarting ClipSync daemon");
-        
+
         #[cfg(target_os = "linux")]
         {
-            // Stop daemon if running
-            if daemon::is_daemon_running()? {
-                println!("Stopping ClipSync daemon...");
-                daemon::stop_daemon()?;
-                
-                // Wait briefly for clean shutdown
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            if crate::control::request(
+                &crate::control::socket_path(&self.config),
+                crate::control::Command::Status,
+            )
+            .await
+            .is_ok()
+            {
+                self.stop_daemon().await?;
             }
-            
-            // Start daemon again
-            println!("Starting ClipSync daemon...");
             self.start_daemon(false).await?;
-            println!("ClipSync daemon restarted successfully");
         }
-        
         #[cfg(target_os = "macos")]
         {
             println!("Restarting ClipSync daemon...");
-            
+
             // Stop if running
             let _ = self.stop_daemon().await;
-            
+
             // Wait briefly
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            
+
             // Start again
             self.start_daemon(false).await?;
             println!("ClipSync daemon restarted successfully");
         }
-        
+
         #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
         {
             println!("Daemon restart not supported on this platform");
         }
-        
+
         Ok(())
     }
 
@@ -670,13 +637,13 @@ impl CliHandler {
         println!("  Profile: {}", env!("PROFILE"));
         println!("  Rust Version: {}", env!("RUSTC_VERSION"));
         println!("  Build Date: {}", env!("BUILD_DATE"));
-        
+
         // Show additional runtime information
         println!("Runtime Information:");
         println!("  Platform: {}", std::env::consts::OS);
         println!("  Architecture: {}", std::env::consts::ARCH);
         println!("  Node ID: {}", self.config.node_id());
-        
+
         Ok(())
     }
 
@@ -685,11 +652,18 @@ impl CliHandler {
         let entries = history.search_entries(search_term, limit).await?;
 
         if entries.is_empty() {
-            println!("No clipboard history entries found matching '{}'", search_term);
+            println!(
+                "No clipboard history entries found matching '{}'",
+                search_term
+            );
             return Ok(());
         }
 
-        println!("Clipboard History (showing {} entries matching '{}'):", entries.len(), search_term);
+        println!(
+            "Clipboard History (showing {} entries matching '{}'):",
+            entries.len(),
+            search_term
+        );
         for (i, entry) in entries.iter().enumerate() {
             println!(
                 "{}. [{}] {}",
@@ -712,14 +686,16 @@ impl CliHandler {
 
     async fn discover_peers(&mut self) -> Result<()> {
         println!("Discovering peers on the network...");
-        
+
         let discovery = self.ensure_discovery().await?;
-        
+
         // Start discovery and wait for results
         println!("Scanning for 10 seconds...");
-        
-        let peer_infos = discovery.discover_peers_timeout(std::time::Duration::from_secs(10)).await?;
-        
+
+        let peer_infos = discovery
+            .discover_peers_timeout(std::time::Duration::from_secs(10))
+            .await?;
+
         if peer_infos.is_empty() {
             println!("No peers discovered on the network");
             return Ok(());
@@ -732,10 +708,11 @@ impl CliHandler {
                 println!("    Address: {}", addr);
             }
             println!("    Port: {}", peer_info.port);
-            if !peer_info.metadata.capabilities.is_empty() 
+            if !peer_info.metadata.capabilities.is_empty()
                 || peer_info.metadata.ssh_fingerprint.is_some()
-                || peer_info.metadata.ssh_public_key.is_some() 
-                || peer_info.metadata.device_name.is_some() {
+                || peer_info.metadata.ssh_public_key.is_some()
+                || peer_info.metadata.device_name.is_some()
+            {
                 println!("    Metadata: {:?}", peer_info.metadata);
             }
             println!();
@@ -775,7 +752,7 @@ impl CliHandler {
                         issues_found += 1;
                     }
                 }
-                
+
                 match clipboard.set_text("ClipSync diagnostic test").await {
                     Ok(_) => {
                         println!("  ✅ Clipboard write access working");
@@ -797,15 +774,13 @@ impl CliHandler {
         // Check database access
         println!("\n🗄️  Database Access:");
         match self.ensure_history().await {
-            Ok(history) => {
-                match history.get_recent_entries(1).await {
-                    Ok(_) => println!("  ✅ Database read access working"),
-                    Err(e) => {
-                        println!("  ❌ Database read failed: {}", e);
-                        issues_found += 1;
-                    }
+            Ok(history) => match history.get_recent_entries(1).await {
+                Ok(_) => println!("  ✅ Database read access working"),
+                Err(e) => {
+                    println!("  ❌ Database read failed: {}", e);
+                    issues_found += 1;
                 }
-            }
+            },
             Err(e) => {
                 println!("  ❌ Database initialization failed: {}", e);
                 issues_found += 1;
@@ -849,14 +824,17 @@ impl CliHandler {
         println!("\n💻 System Requirements:");
         println!("  ✅ Platform: {}", std::env::consts::OS);
         println!("  ✅ Architecture: {}", std::env::consts::ARCH);
-        
+
         // Check available ports
         println!("\n🔌 Port Availability:");
         let test_port = self.config.websocket_port();
         match std::net::TcpListener::bind(format!("127.0.0.1:{}", test_port)) {
             Ok(_) => println!("  ✅ Port {} is available", test_port),
             Err(_) => {
-                println!("  ⚠️  Port {} is in use (this is normal if daemon is running)", test_port);
+                println!(
+                    "  ⚠️  Port {} is in use (this is normal if daemon is running)",
+                    test_port
+                );
             }
         }
 
@@ -865,7 +843,10 @@ impl CliHandler {
         if issues_found == 0 {
             println!("  🎉 All diagnostics passed! ClipSync should work correctly.");
         } else {
-            println!("  ⚠️  {} issue(s) found. Please address them before using ClipSync.", issues_found);
+            println!(
+                "  ⚠️  {} issue(s) found. Please address them before using ClipSync.",
+                issues_found
+            );
         }
 
         Ok(())
@@ -889,17 +870,18 @@ impl CliHandler {
                 if path.exists() {
                     log_file_found = true;
                     println!("Following logs from: {}", path.display());
-                    
+
                     // For now, implement a simple polling-based tail
                     // In a production system, you'd want to use inotify or similar
                     let mut last_size = std::fs::metadata(&path)?.len();
-                    
+
                     loop {
                         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-                        
+
                         let current_size = std::fs::metadata(&path)?.len();
                         if current_size > last_size {
-                            if let Ok(new_lines) = self.read_log_file_from_offset(&path, last_size) {
+                            if let Ok(new_lines) = self.read_log_file_from_offset(&path, last_size)
+                            {
                                 for line in new_lines {
                                     println!("{}", line);
                                 }
@@ -938,7 +920,7 @@ impl CliHandler {
                 if path.exists() {
                     log_file_found = true;
                     println!("Reading logs from: {}", path.display());
-                    
+
                     match self.read_log_file(&path, limit) {
                         Ok(lines) => {
                             if lines.is_empty() {
@@ -961,12 +943,19 @@ impl CliHandler {
         if !log_file_found {
             println!("No log files found in standard locations.");
             println!("Checking systemd/journald logs...\n");
-            
+
             // Try user systemd first
             let user_cmd = Command::new("journalctl")
-                .args(&["--user", "-u", "clipsync", "-n", &limit.to_string(), "--no-pager"])
+                .args(&[
+                    "--user",
+                    "-u",
+                    "clipsync",
+                    "-n",
+                    &limit.to_string(),
+                    "--no-pager",
+                ])
                 .output();
-                
+
             if let Ok(output) = user_cmd {
                 if output.status.success() && !output.stdout.is_empty() {
                     println!("User systemd logs:");
@@ -974,12 +963,12 @@ impl CliHandler {
                     return Ok(());
                 }
             }
-            
+
             // Try system systemd
             let system_cmd = Command::new("journalctl")
                 .args(&["-u", "clipsync", "-n", &limit.to_string(), "--no-pager"])
                 .output();
-                
+
             if let Ok(output) = system_cmd {
                 if output.status.success() && !output.stdout.is_empty() {
                     println!("System systemd logs:");
@@ -987,7 +976,7 @@ impl CliHandler {
                     return Ok(());
                 }
             }
-            
+
             println!("No logs found. Try running:");
             println!("  journalctl --user -u clipsync -n {}", limit);
             println!("  journalctl -u clipsync -n {}", limit);
@@ -1000,29 +989,33 @@ impl CliHandler {
     fn read_log_file(&self, path: &std::path::Path, limit: usize) -> Result<Vec<String>> {
         let file = File::open(path)?;
         let reader = BufReader::new(file);
-        
+
         let lines: Result<Vec<String>, std::io::Error> = reader.lines().collect();
         let lines = lines?;
-        
+
         // Take the last 'limit' lines
         let start_idx = if lines.len() > limit {
             lines.len() - limit
         } else {
             0
         };
-        
+
         Ok(lines[start_idx..].to_vec())
     }
 
-    fn read_log_file_from_offset(&self, path: &std::path::Path, offset: u64) -> Result<Vec<String>> {
+    fn read_log_file_from_offset(
+        &self,
+        path: &std::path::Path,
+        offset: u64,
+    ) -> Result<Vec<String>> {
         use std::io::{Seek, SeekFrom};
-        
+
         let mut file = File::open(path)?;
         file.seek(SeekFrom::Start(offset))?;
-        
+
         let reader = BufReader::new(file);
         let lines: Result<Vec<String>, std::io::Error> = reader.lines().collect();
-        
+
         Ok(lines?)
     }
 
@@ -1076,7 +1069,7 @@ impl CliHandler {
             let config_dir = dirs::config_dir()
                 .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
                 .join("clipsync");
-            
+
             std::fs::create_dir_all(&config_dir)?;
             config_dir.join("config.toml")
         };
@@ -1092,19 +1085,22 @@ impl CliHandler {
                 }
             });
 
-        println!("Opening configuration file with {}: {}", editor, config_path.display());
+        println!(
+            "Opening configuration file with {}: {}",
+            editor,
+            config_path.display()
+        );
 
         // Check if config file exists, if not create a template
         if !config_path.exists() {
             println!("Configuration file doesn't exist, creating template...");
-            Config::generate_example_config(false).await
+            Config::generate_example_config(false)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to create config template: {}", e))?;
         }
 
         // Launch editor
-        let status = Command::new(&editor)
-            .arg(&config_path)
-            .status()?;
+        let status = Command::new(&editor).arg(&config_path).status()?;
 
         if !status.success() {
             return Err(anyhow::anyhow!("Editor exited with non-zero status"));
@@ -1131,25 +1127,31 @@ impl CliHandler {
         }
     }
 
-    async fn add_authorized_key(&self, public_key_input: String, name: Option<String>) -> Result<()> {
+    async fn add_authorized_key(
+        &self,
+        public_key_input: String,
+        name: Option<String>,
+    ) -> Result<()> {
         let auth_keys_path = &self.config.auth.authorized_keys;
-        
+
         // Parse the public key
         let public_key = if std::path::Path::new(&public_key_input).exists() {
             // It's a file path - read the public key from file
-            let content = tokio::fs::read_to_string(&public_key_input).await
+            let content = tokio::fs::read_to_string(&public_key_input)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to read key file: {}", e))?;
-            
+
             // Extract just the key part (without comment)
-            let key_line = content.lines()
+            let key_line = content
+                .lines()
                 .find(|line| line.trim().starts_with("ssh-"))
                 .ok_or_else(|| anyhow::anyhow!("No SSH public key found in file"))?;
-            
+
             let parts: Vec<&str> = key_line.trim().split_whitespace().collect();
             if parts.len() < 2 {
                 return Err(anyhow::anyhow!("Invalid public key format in file"));
             }
-            
+
             let openssh_key = format!("{} {}", parts[0], parts[1]);
             PublicKey::from_openssh(&openssh_key)
                 .map_err(|e| anyhow::anyhow!("Failed to parse public key from file: {}", e))?
@@ -1161,7 +1163,8 @@ impl CliHandler {
 
         // Load existing authorized keys or create new
         let mut auth_keys = if auth_keys_path.exists() {
-            AuthorizedKeys::load_from_file(auth_keys_path).await
+            AuthorizedKeys::load_from_file(auth_keys_path)
+                .await
                 .map_err(|e| anyhow::anyhow!("Failed to load authorized keys: {}", e))?
         } else {
             AuthorizedKeys::new()
@@ -1169,7 +1172,10 @@ impl CliHandler {
 
         // Check if key already exists
         if auth_keys.is_authorized(&public_key) {
-            println!("Key is already authorized (fingerprint: {})", public_key.fingerprint());
+            println!(
+                "Key is already authorized (fingerprint: {})",
+                public_key.fingerprint()
+            );
             return Ok(());
         }
 
@@ -1179,11 +1185,13 @@ impl CliHandler {
             comment: name.clone(),
             options: vec![],
         };
-        
+
         auth_keys.add_key(authorized_key);
 
         // Save updated keys
-        auth_keys.save_to_file(auth_keys_path).await
+        auth_keys
+            .save_to_file(auth_keys_path)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to save authorized keys: {}", e))?;
 
         println!("✓ Added authorized key");
@@ -1198,14 +1206,18 @@ impl CliHandler {
 
     async fn list_authorized_keys(&self) -> Result<()> {
         let auth_keys_path = &self.config.auth.authorized_keys;
-        
+
         if !auth_keys_path.exists() {
-            println!("No authorized keys file found at: {}", auth_keys_path.display());
+            println!(
+                "No authorized keys file found at: {}",
+                auth_keys_path.display()
+            );
             println!("Use 'clipsync auth add <public_key>' to add the first authorized key.");
             return Ok(());
         }
 
-        let auth_keys = AuthorizedKeys::load_from_file(auth_keys_path).await
+        let auth_keys = AuthorizedKeys::load_from_file(auth_keys_path)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to load authorized keys: {}", e))?;
 
         if auth_keys.is_empty() {
@@ -1215,19 +1227,23 @@ impl CliHandler {
 
         println!("Authorized Keys ({} total):", auth_keys.len());
         println!();
-        
+
         for (i, key) in auth_keys.list_keys().iter().enumerate() {
-            println!("{}. Key Type: {}", i + 1, key.public_key.key_type.ssh_name());
+            println!(
+                "{}. Key Type: {}",
+                i + 1,
+                key.public_key.key_type.ssh_name()
+            );
             println!("   Fingerprint: {}", key.public_key.fingerprint());
-            
+
             if let Some(ref comment) = key.comment {
                 println!("   Name/Comment: {}", comment);
             }
-            
+
             if !key.options.is_empty() {
                 println!("   Options: {}", key.options.join(", "));
             }
-            
+
             println!();
         }
 
@@ -1237,13 +1253,17 @@ impl CliHandler {
 
     async fn remove_authorized_key(&self, key_id: String) -> Result<()> {
         let auth_keys_path = &self.config.auth.authorized_keys;
-        
+
         if !auth_keys_path.exists() {
-            println!("No authorized keys file found at: {}", auth_keys_path.display());
+            println!(
+                "No authorized keys file found at: {}",
+                auth_keys_path.display()
+            );
             return Ok(());
         }
 
-        let mut auth_keys = AuthorizedKeys::load_from_file(auth_keys_path).await
+        let mut auth_keys = AuthorizedKeys::load_from_file(auth_keys_path)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to load authorized keys: {}", e))?;
 
         if auth_keys.is_empty() {
@@ -1257,11 +1277,12 @@ impl CliHandler {
         } else {
             // Try to find by comment/name
             let keys_list = auth_keys.list_keys().to_vec();
-            
+
             // Find key with matching comment
-            if let Some(key_to_remove) = keys_list.iter().find(|k| {
-                k.comment.as_ref().map_or(false, |c| c.contains(&key_id))
-            }) {
+            if let Some(key_to_remove) = keys_list
+                .iter()
+                .find(|k| k.comment.as_ref().map_or(false, |c| c.contains(&key_id)))
+            {
                 let fingerprint = key_to_remove.public_key.fingerprint();
                 auth_keys.remove_key_by_fingerprint(&fingerprint)
             } else {
@@ -1277,13 +1298,14 @@ impl CliHandler {
         }
 
         // Save updated keys
-        auth_keys.save_to_file(auth_keys_path).await
+        auth_keys
+            .save_to_file(auth_keys_path)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to save authorized keys: {}", e))?;
 
         println!("✓ Removed authorized key matching '{}'", key_id);
         println!("  Remaining keys: {}", auth_keys.len());
-        
+
         Ok(())
     }
-
 }

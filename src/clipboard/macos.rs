@@ -42,7 +42,13 @@ impl MacOSClipboard {
 
     /// Get NSString for pasteboard type
     unsafe fn get_type_string(type_str: &str) -> id {
-        NSString::alloc(nil).init_str(type_str)
+        match type_str {
+            NS_PASTEBOARD_TYPE_STRING => cocoa::appkit::NSPasteboardTypeString,
+            NS_PASTEBOARD_TYPE_RTF => cocoa::appkit::NSPasteboardTypeRTF,
+            NS_PASTEBOARD_TYPE_PNG => cocoa::appkit::NSPasteboardTypePNG,
+            NS_PASTEBOARD_TYPE_TIFF => cocoa::appkit::NSPasteboardTypeTIFF,
+            _ => unreachable!("unsupported pasteboard type"),
+        }
     }
 
     /// Read string from pasteboard
@@ -331,23 +337,52 @@ unsafe impl Sync for MacOSClipboard {}
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    #[ignore = "Requires macOS clipboard access - run with --ignored flag"]
-    async fn test_macos_clipboard_text() {
-        let clipboard = MacOSClipboard::new().unwrap();
-
-        // Set text
-        let content = ClipboardContent::text("Hello from macOS!");
-        clipboard.set_content(&content).await.unwrap();
-
-        // Get text
-        let retrieved = clipboard.get_content().await.unwrap();
-        assert_eq!(retrieved.as_text(), Some("Hello from macOS!".to_string()));
+    struct NamedPasteboard(MacOSClipboard);
+    impl NamedPasteboard {
+        fn new() -> Self {
+            unsafe {
+                let pool = NSAutoreleasePool::new(nil);
+                let name = NSString::alloc(nil)
+                    .init_str(&format!("clipsync-test-{}", uuid::Uuid::new_v4()));
+                let pasteboard: id = msg_send![class!(NSPasteboard), pasteboardWithName: name];
+                assert_ne!(pasteboard, nil);
+                let _: id = msg_send![pasteboard, retain];
+                let _: () = msg_send![name, release];
+                let _: () = msg_send![pool, drain];
+                Self(MacOSClipboard { pasteboard })
+            }
+        }
     }
-
-    #[test]
-    fn test_macos_clipboard_name() {
-        let clipboard = MacOSClipboard::new().unwrap();
-        assert_eq!(clipboard.name(), "macOS (NSPasteboard)");
+    impl Drop for NamedPasteboard {
+        fn drop(&mut self) {
+            unsafe {
+                let _: () = msg_send![self.0.pasteboard, releaseGlobally];
+                let _: () = msg_send![self.0.pasteboard, release];
+            }
+        }
+    }
+    #[tokio::test]
+    async fn named_pasteboards_roundtrip_without_touching_general_clipboard() {
+        let first = NamedPasteboard::new();
+        let second = NamedPasteboard::new();
+        let text = "isolated native clipboard café\nsecond line";
+        first
+            .0
+            .set_content(&ClipboardContent::text(text))
+            .await
+            .unwrap();
+        let content = first.0.get_content().await.unwrap();
+        assert_eq!(content.as_text().as_deref(), Some(text));
+        second.0.set_content(&content).await.unwrap();
+        assert_eq!(
+            second.0.get_content().await.unwrap().as_text().as_deref(),
+            Some(text)
+        );
+        second.0.clear().await.unwrap();
+        assert!(second.0.get_content().await.is_err());
+        assert_eq!(
+            first.0.get_content().await.unwrap().as_text().as_deref(),
+            Some(text)
+        );
     }
 }

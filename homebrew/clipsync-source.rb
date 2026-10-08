@@ -101,7 +101,7 @@ class ClipsyncSource < Formula
   end
 
   service do
-    run [opt_bin/"clipsync", "start", "--daemon", "--config", etc/"clipsync/config.toml"]
+    run [opt_bin/"clipsync", "--config", etc/"clipsync/config.toml", "start", "--foreground"]
     keep_alive true
     log_path var/"log/clipsync.log"
     error_log_path var/"log/clipsync.error.log"

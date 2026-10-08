@@ -75,7 +75,7 @@ pub struct ReconnectionManager {
     peer_info: PeerInfo,
 
     /// Authenticator for connections
-    authenticator: Box<dyn Authenticator>,
+    authenticator: std::sync::Arc<dyn Authenticator>,
 
     /// Current connection (if any)
     connection: Option<Box<dyn Connection>>,
@@ -132,7 +132,7 @@ impl ReconnectionManager {
 
         let manager = Self {
             peer_info,
-            authenticator,
+            authenticator: std::sync::Arc::from(authenticator),
             connection: None,
             config,
             attempt_count: 0,
@@ -398,13 +398,22 @@ impl ReconnectionManager {
         self.health_stats.avg_response_time = Duration::from_secs_f64(updated_avg);
     }
 
-    /// Connect to the peer (placeholder - would use actual transport)
+    /// Reconnect using the same authenticated transport as initial connections.
     async fn connect_to_peer(&self) -> Result<Box<dyn Connection>> {
-        // This would be implemented by the WebSocket transport
-        // For now, return an error as placeholder
-        Err(TransportError::Connection {
-            message: "WebSocket transport not yet implemented".to_string(),
-        })
+        let local = super::tls::node_id(&self.authenticator.get_public_key().await?);
+        let config = super::websocket::WebSocketConfig {
+            connect_timeout: self.config.connection_timeout,
+            ..Default::default()
+        };
+        Ok(Box::new(
+            super::WebSocketTransport::connect_to_peer(
+                &self.peer_info,
+                self.authenticator.clone(),
+                config,
+                local,
+            )
+            .await?,
+        ))
     }
 
     /// Get connection statistics
@@ -515,7 +524,7 @@ mod tests {
     #[test]
     fn test_backoff_calculation() {
         let config = ReconnectionConfig::default();
-        let mut manager = ReconnectionManager {
+        let manager = ReconnectionManager {
             peer_info: PeerInfo {
                 id: Uuid::new_v4(),
                 name: "test".to_string(),
@@ -526,7 +535,7 @@ mod tests {
                 metadata: Default::default(),
                 last_seen: 0,
             },
-            authenticator: Box::new(DummyAuth),
+            authenticator: std::sync::Arc::new(DummyAuth),
             connection: None,
             config,
             attempt_count: 3,

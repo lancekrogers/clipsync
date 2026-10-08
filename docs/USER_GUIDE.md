@@ -1,3 +1,5 @@
+> Protocol 2 repair: use the [current README](../README.md) and [security model](SECURITY.md) for pairing, transport, supported features and daemon control. This older guide has not been fully reconciled.
+
 # 📖 ClipSync User Guide
 
 Complete guide to using ClipSync for seamless clipboard synchronization across your devices.

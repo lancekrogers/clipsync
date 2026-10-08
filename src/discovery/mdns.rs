@@ -64,18 +64,9 @@ impl MdnsDiscovery {
         peer_manager: PeerManager,
         our_id: Arc<RwLock<Option<Uuid>>>,
     ) {
-        loop {
-            match receiver.recv_timeout(std::time::Duration::from_millis(BROWSE_TIMEOUT_MS)) {
-                Ok(event) => {
-                    if let Err(e) = Self::handle_service_event(event, &peer_manager, &our_id).await
-                    {
-                        tracing::error!("Error handling mDNS event: {}", e);
-                    }
-                }
-                Err(_) => {
-                    // Timeout or other error, continue browsing
-                    // The timeout is expected during normal operation
-                }
+        while let Ok(event) = receiver.recv_async().await {
+            if let Err(e) = Self::handle_service_event(event, &peer_manager, &our_id).await {
+                tracing::error!("Error handling mDNS event: {e}");
             }
         }
     }

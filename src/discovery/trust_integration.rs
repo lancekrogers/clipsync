@@ -167,7 +167,10 @@ mod tests {
         let discovery = TrustAwareDiscovery::new(trust_manager, ssh_auth);
 
         // Create test peer with public key
-        let test_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey test@example.com";
+        let test_key = crate::auth::KeyPair::generate(crate::auth::KeyType::Ed25519)
+            .unwrap()
+            .public_key()
+            .to_openssh();
         let peer_info = PeerInfo {
             id: Uuid::new_v4(),
             name: "test-peer".to_string(),
@@ -186,7 +189,7 @@ mod tests {
         discovery.process_new_peer(&peer_info).await.unwrap();
 
         // Verify it was added to authorized_keys
-        let public_key = PublicKey::from_openssh(test_key).unwrap();
+        let public_key = PublicKey::from_openssh(&test_key).unwrap();
         assert!(discovery.ssh_auth.is_authorized(&public_key).await.unwrap());
     }
 }

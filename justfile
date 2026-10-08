@@ -95,3 +95,8 @@ dev-setup:
   rustup component add rustfmt clippy
   cargo install cargo-watch cargo-audit cargo-deny
   pre-commit install
+# Run Linux tests and real desktop sync in disposable X11 and Wayland sessions
+# The source mount is read-only; personal config and host clipboard are not mounted.
+test-desktop:
+  docker build -f scripts/test/Dockerfile.repair -t clipsync-repair-test:local .
+  docker run --rm --mount type=bind,source="{{justfile_directory()}}",target=/source,readonly --mount type=volume,source=clipsync-repair-cargo,target=/usr/local/cargo/registry --mount type=volume,source=clipsync-repair-target,target=/work/target clipsync-repair-test:local bash /source/scripts/test/repair-container.sh

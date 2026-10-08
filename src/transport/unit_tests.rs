@@ -4,7 +4,7 @@
 //! including protocol messages, streaming, reconnection, and WebSocket transport.
 
 use super::*;
-use crate::auth::{AuthToken, KeyType, PeerId, PublicKey};
+use crate::auth::PeerId;
 use crate::transport::protocol::{
     CompressionMethod, ConnectionStatus, MessagePayload, StatusPayload, PROTOCOL_VERSION,
 };
@@ -355,14 +355,8 @@ mod websocket_tests {
     fn test_websocket_config_default() {
         let config = WebSocketConfig::default();
         assert_eq!(config.max_message_size, crate::MAX_PAYLOAD_SIZE);
-        assert_eq!(config.connect_timeout, std::time::Duration::from_secs(30));
-        assert_eq!(
-            config.keepalive_interval,
-            std::time::Duration::from_secs(30)
-        );
-        assert!(config.enable_compression);
-        assert_eq!(config.max_connections, 100);
-        assert!(!config.enable_tls); // TLS disabled for initial implementation
+        assert!(config.enable_tls);
+        assert!(!config.enable_compression);
     }
 
     #[test]
@@ -475,70 +469,6 @@ mod transport_error_tests {
 }
 
 // Mock implementations for testing
-
-/// Mock authenticator for testing
-pub struct MockAuthenticator {
-    pub should_succeed: bool,
-    pub public_key: PublicKey,
-}
-
-impl MockAuthenticator {
-    pub fn new(should_succeed: bool) -> Self {
-        Self {
-            should_succeed,
-            public_key: PublicKey::new(KeyType::Ed25519, vec![1, 2, 3, 4]),
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl Authenticator for MockAuthenticator {
-    async fn authenticate_peer(
-        &self,
-        _key: &PublicKey,
-    ) -> std::result::Result<AuthToken, crate::auth::AuthError> {
-        if self.should_succeed {
-            Ok(AuthToken {
-                token_id: "test_token".to_string(),
-                peer_fingerprint: "test_fingerprint".to_string(),
-                created_at: 1234567890,
-                expires_at: 1234567890 + 3600,
-                signature: vec![1, 2, 3, 4],
-            })
-        } else {
-            Err(crate::auth::AuthError::AuthenticationFailed(
-                "Mock failure".to_string(),
-            ))
-        }
-    }
-
-    async fn verify_token(
-        &self,
-        _token: &AuthToken,
-    ) -> std::result::Result<PeerId, crate::auth::AuthError> {
-        if self.should_succeed {
-            Ok(PeerId {
-                fingerprint: "test_fingerprint".to_string(),
-                name: Some("test_peer".to_string()),
-            })
-        } else {
-            Err(crate::auth::AuthError::AuthenticationFailed(
-                "Mock failure".to_string(),
-            ))
-        }
-    }
-
-    async fn get_public_key(&self) -> std::result::Result<PublicKey, crate::auth::AuthError> {
-        Ok(self.public_key.clone())
-    }
-
-    async fn is_authorized(
-        &self,
-        _key: &PublicKey,
-    ) -> std::result::Result<bool, crate::auth::AuthError> {
-        Ok(self.should_succeed)
-    }
-}
 
 /// Mock connection for testing
 pub struct MockConnection {

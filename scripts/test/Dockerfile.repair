@@ -1,0 +1,3 @@
+FROM rust:1-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends libssl-dev pkg-config libx11-dev libxcb1-dev xvfb xclip openssh-client python3 sway wl-clipboard dbus && rm -rf /var/lib/apt/lists/*
+WORKDIR /work

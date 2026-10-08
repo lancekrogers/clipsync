@@ -1,3 +1,4 @@
+#![deny(warnings, clippy::all)]
 //! Network transport layer for secure clipboard synchronization
 //!
 //! This module provides WebSocket-based transport with authentication,
@@ -10,7 +11,10 @@ use uuid::Uuid;
 
 pub mod protocol;
 pub mod reconnect;
+// Legacy large-payload API is outside the text-sync path.
+#[allow(dead_code)]
 pub mod stream;
+pub mod tls;
 pub mod websocket;
 
 #[cfg(test)]
@@ -28,54 +32,181 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
-pub struct TransportManager {
-    connections: Arc<RwLock<HashMap<Uuid, Box<dyn Connection>>>>,
-    message_sender: broadcast::Sender<Message>,
-    config: TransportConfig,
+struct ManagedConnection {
+    session: Uuid,
+    peer: PeerInfo,
+    sender: tokio::sync::mpsc::Sender<Message>,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for ManagedConnection {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
+pub struct TransportManager {
+    connections: RwLock<HashMap<Uuid, ManagedConnection>>,
+    message_sender: broadcast::Sender<Message>,
+    config: TransportConfig,
+    auth: Option<Arc<dyn Authenticator>>,
+    node_id: Uuid,
+}
 impl TransportManager {
     pub fn new(config: TransportConfig) -> Self {
-        let (message_sender, _) = broadcast::channel(1000);
-
+        let (message_sender, _) = broadcast::channel(64);
         Self {
-            connections: Arc::new(RwLock::new(HashMap::new())),
+            connections: RwLock::new(HashMap::new()),
             message_sender,
             config,
+            auth: None,
+            node_id: Uuid::nil(),
         }
     }
-
-    pub async fn connect(&self, address: &str) -> Result<Box<dyn Connection>> {
-        // This would be implemented with actual WebSocket connection logic
-        todo!("Implement actual WebSocket connection")
+    pub fn with_auth(config: TransportConfig, auth: Arc<dyn Authenticator>, node_id: Uuid) -> Self {
+        let mut manager = Self::new(config);
+        manager.auth = Some(auth);
+        manager.node_id = node_id;
+        manager
     }
-
-    pub async fn send_to_peer(&self, peer_id: Uuid, message: &Message) -> Result<()> {
-        let connections = self.connections.read().await;
-        if let Some(connection) = connections.get(&peer_id) {
-            // This would send the message through the connection
-            todo!("Implement message sending")
-        } else {
-            Err(TransportError::PeerNotFound {
-                peer_id,
-                peer_name: None, // Could be enhanced to look up peer name
+    fn auth(&self) -> Result<Arc<dyn Authenticator>> {
+        self.auth
+            .clone()
+            .ok_or_else(|| TransportError::Configuration {
+                message: "Transport identity is not configured".into(),
             })
+    }
+    fn websocket_config(&self) -> websocket::WebSocketConfig {
+        websocket::WebSocketConfig {
+            max_message_size: self.config.max_message_size,
+            connect_timeout: self.config.connect_timeout,
+            keepalive_interval: self.config.keepalive_interval,
+            max_connections: self.config.max_connections,
+            ..Default::default()
         }
     }
-
+    pub async fn listener(&self, address: SocketAddr) -> Result<WebSocketListener> {
+        WebSocketTransport::new(address, self.auth()?, self.websocket_config(), self.node_id)
+            .listen()
+            .await
+    }
+    pub async fn serve(&self, mut listener: WebSocketListener) -> Result<()> {
+        loop {
+            match listener.accept().await {
+                Ok(connection) => {
+                    let id = connection.peer_info().id;
+                    if let Err(e) = self.register_peer_connection(id, connection).await {
+                        tracing::warn!("Incoming peer rejected: {e}");
+                    }
+                }
+                Err(e) => tracing::debug!("Incoming handshake rejected: {e}"),
+            }
+        }
+    }
+    /// Connect only when discovery provides an identity derived from the peer's key.
+    pub async fn connect_peer(&self, peer: &PeerInfo) -> Result<()> {
+        if peer.id == self.node_id || self.is_connected(peer.id).await {
+            return Ok(());
+        }
+        let connection = WebSocketTransport::connect_to_peer(
+            peer,
+            self.auth()?,
+            self.websocket_config(),
+            self.node_id,
+        )
+        .await?;
+        self.register_peer_connection(peer.id, Box::new(connection))
+            .await
+    }
+    pub async fn connect(&self, _address: &str) -> Result<Box<dyn Connection>> {
+        Err(TransportError::Configuration {
+            message: "A pinned peer identity is required; use connect_peer".into(),
+        })
+    }
+    pub async fn is_connected(&self, id: Uuid) -> bool {
+        self.connections
+            .read()
+            .await
+            .get(&id)
+            .is_some_and(|c| !c.task.is_finished() && !c.sender.is_closed())
+    }
+    pub async fn sessions(&self) -> Vec<(Uuid, Uuid)> {
+        self.connections
+            .read()
+            .await
+            .iter()
+            .filter(|(_, c)| !c.task.is_finished() && !c.sender.is_closed())
+            .map(|(id, c)| (*id, c.session))
+            .collect()
+    }
+    pub async fn connected_peers(&self) -> Vec<PeerInfo> {
+        self.connections
+            .read()
+            .await
+            .values()
+            .filter(|c| !c.task.is_finished() && !c.sender.is_closed())
+            .map(|c| c.peer.clone())
+            .collect()
+    }
+    pub async fn send_to_peer(&self, peer_id: Uuid, message: &Message) -> Result<()> {
+        let sender = self
+            .connections
+            .read()
+            .await
+            .get(&peer_id)
+            .map(|c| c.sender.clone())
+            .ok_or(TransportError::PeerNotFound {
+                peer_id,
+                peer_name: None,
+            })?;
+        sender
+            .try_send(message.clone())
+            .map_err(|e| TransportError::Connection {
+                message: e.to_string(),
+            })
+    }
     pub async fn subscribe(&self) -> Result<broadcast::Receiver<Message>> {
         Ok(self.message_sender.subscribe())
     }
-
-    /// Register an authenticated peer connection
     pub async fn register_peer_connection(
         &self,
         peer_id: Uuid,
-        connection: Box<dyn Connection>,
+        mut connection: Box<dyn Connection>,
     ) -> Result<()> {
         let mut connections = self.connections.write().await;
-        connections.insert(peer_id, connection);
+        connections.retain(|_, c| !c.task.is_finished() && !c.sender.is_closed());
+        if connections.contains_key(&peer_id) {
+            return Ok(());
+        }
+        if connections.len() >= self.config.max_connections {
+            return Err(TransportError::Connection {
+                message: "Connection limit reached".into(),
+            });
+        }
+        let peer = connection.peer_info().clone();
+        let (sender, mut commands) = tokio::sync::mpsc::channel(16);
+        let messages = self.message_sender.clone();
+        let task = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    message = commands.recv() => match message { Some(m) => if connection.send(m).await.is_err() { break; }, None => break },
+                    message = connection.receive() => match message { Ok(m) => { let _ = messages.send(m); }, Err(_) => break },
+                }
+            }
+            let _ = connection.close().await;
+        });
+        connections.insert(
+            peer_id,
+            ManagedConnection {
+                session: Uuid::new_v4(),
+                peer,
+                sender,
+                task,
+            },
+        );
         Ok(())
+    }
+    pub async fn shutdown(&self) {
+        self.connections.write().await.clear();
     }
 }
 

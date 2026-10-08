@@ -7,7 +7,6 @@ use crate::discovery::TrustAwareDiscovery;
 use crate::sync::SyncEngine;
 use crate::transport::TransportManager;
 use anyhow::Result;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
@@ -30,7 +29,6 @@ impl TrustAwareSyncEngine {
         clipboard: Arc<ClipboardProviderWrapper>,
         history: Arc<HistoryManager>,
         discovery: Arc<PeerDiscovery>,
-        transport: Arc<TransportManager>,
     ) -> Result<Self> {
         // Create trust manager
         let config_dir = dirs::config_dir()
@@ -58,6 +56,15 @@ impl TrustAwareSyncEngine {
         ));
 
         // Create base sync engine
+        let transport = Arc::new(TransportManager::with_auth(
+            crate::transport::TransportConfig {
+                max_message_size: config.clipboard.max_size,
+                connect_timeout: std::time::Duration::from_secs(5),
+                ..Default::default()
+            },
+            ssh_auth.clone(),
+            config.node_id(),
+        ));
         let sync_engine = Arc::new(SyncEngine::new(
             config, clipboard, history, discovery, transport,
         ));
@@ -74,16 +81,16 @@ impl TrustAwareSyncEngine {
     pub async fn start(&self) -> Result<()> {
         info!("Starting trust-aware sync engine");
 
-        // Start base sync engine
-        let sync_task = {
-            let sync_engine = Arc::clone(&self.sync_engine);
-            tokio::spawn(async move { sync_engine.start().await })
-        };
-
-        // Wait for tasks
-        sync_task.await??;
-
-        Ok(())
+        self.sync_engine.start().await
+    }
+    pub async fn bind_listener(&self) -> Result<crate::transport::WebSocketListener> {
+        self.sync_engine.bind_listener().await
+    }
+    pub async fn run(&self, listener: crate::transport::WebSocketListener) -> Result<()> {
+        self.sync_engine.run(listener).await
+    }
+    pub async fn shutdown(&self) {
+        self.sync_engine.shutdown().await;
     }
 
     /// Start trust processing in a separate task
@@ -93,7 +100,7 @@ impl TrustAwareSyncEngine {
 
         tokio::spawn(async move {
             // Convert broadcast receiver to mpsc for trust processing
-            let (tx, mut rx) = tokio::sync::mpsc::channel(100);
+            let (tx, rx) = tokio::sync::mpsc::channel(100);
 
             // Forward events from broadcast to mpsc
             tokio::spawn(async move {
@@ -144,7 +151,7 @@ impl TrustAwareSyncEngine {
     }
 
     /// Force sync
-    pub async fn force_sync(&self) -> Result<()> {
+    pub async fn force_sync(&self) -> Result<usize> {
         self.sync_engine.force_sync().await
     }
 }
@@ -155,7 +162,6 @@ pub async fn setup_trust_sync(
     clipboard: Arc<ClipboardProviderWrapper>,
     history: Arc<HistoryManager>,
     discovery: Arc<PeerDiscovery>,
-    transport: Arc<TransportManager>,
 ) -> Result<TrustAwareSyncEngine> {
-    TrustAwareSyncEngine::new(config, clipboard, history, discovery, transport).await
+    TrustAwareSyncEngine::new(config, clipboard, history, discovery).await
 }

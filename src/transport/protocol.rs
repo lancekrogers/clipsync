@@ -9,7 +9,7 @@ use std::fmt;
 use uuid::Uuid;
 
 /// Protocol version for compatibility checking
-pub const PROTOCOL_VERSION: &str = "1.0.0";
+pub const PROTOCOL_VERSION: &str = "2.0.0";
 
 /// Connection identifier type
 pub type ConnectionId = Uuid;
@@ -211,12 +211,13 @@ pub enum ClipboardFormat {
 }
 
 /// Compression method for large payloads
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CompressionMethod {
     /// No compression
     None,
 
     /// Zstandard compression
+    #[default]
     Zstd,
 
     /// Gzip compression
@@ -506,12 +507,6 @@ impl fmt::Display for MessageType {
             MessageType::Capabilities => write!(f, "CAPABILITIES"),
             MessageType::Status => write!(f, "STATUS"),
         }
-    }
-}
-
-impl Default for CompressionMethod {
-    fn default() -> Self {
-        CompressionMethod::Zstd
     }
 }
 
