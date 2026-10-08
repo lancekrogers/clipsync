@@ -2,6 +2,10 @@
 
 > **Experimental — not recommended for use yet.** ClipSync is under active repair and validation. Use it only for isolated testing until the remaining release checks are complete.
 
+<p align="center">
+  <img src="docs/assets/hero.jpg" width="880" alt="Laptop and desktop showing the same clipboard history over a LAN cable">
+</p>
+
 ClipSync synchronizes plain-text clipboards between explicitly trusted macOS and Linux devices. It uses direct connections, local discovery, Ed25519 device identities, and mutually authenticated TLS 1.3. No cloud service is involved.
 
 The repaired transport uses protocol **2.0.0**: update both devices together. It intentionally refuses the old plaintext protocol.
