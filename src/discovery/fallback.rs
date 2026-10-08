@@ -244,7 +244,8 @@ impl FallbackDiscovery {
 
         // Convert to PeerInfo
         let addresses = vec![SocketAddr::new(from.ip(), service_info.port)];
-        let txt_data: Vec<(String, String)> = service_info.txt_data;
+        let mut txt_data: Vec<(String, String)> = service_info.txt_data;
+        txt_data.push(("id".into(), service_info.id.to_string()));
 
         Ok(PeerInfo::from_mdns(
             service_info.name,

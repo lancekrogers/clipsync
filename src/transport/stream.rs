@@ -201,7 +201,7 @@ impl StreamingTransport {
         info!("Starting clipboard stream of {} bytes", data.data.len());
 
         let stream_id = Uuid::new_v4();
-        let total_chunks = (data.data.len() + self.config.chunk_size - 1) / self.config.chunk_size;
+        let total_chunks = data.data.len().div_ceil(self.config.chunk_size);
 
         // Compress data if enabled
         let compressed_data = if self.config.enable_compression {
@@ -428,7 +428,7 @@ impl StreamingTransport {
         let assembled_len = stream.assembled_data.len();
         let metadata = stream.metadata.clone();
         let start_time = stream.start_time;
-        drop(stream); // Release mutable borrow
+        let _ = stream; // Release mutable borrow
 
         // Send acknowledgment
         self.send_stream_ack(stream_id, sequence).await?;
@@ -518,7 +518,7 @@ impl StreamingTransport {
                 let total_chunks = stream.metadata.total_chunks;
                 let next_sequence = stream.next_sequence;
                 let start_time = stream.start_time;
-                drop(stream); // Release mutable borrow
+                let _ = stream; // Release mutable borrow
 
                 self.send_outbound_progress_update_with_data(
                     stream_id,

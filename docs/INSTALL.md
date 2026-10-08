@@ -1,3 +1,5 @@
+> Protocol 2 repair: use the [current README](../README.md) and [security model](SECURITY.md) for pairing, transport, supported features and daemon control. This older guide has not been fully reconciled.
+
 # 📥 ClipSync Installation Guide
 
 This guide covers installation methods for all supported platforms, from package managers to building from source.

@@ -22,6 +22,7 @@ pub mod auth;
 pub mod cli;
 pub mod clipboard;
 pub mod config;
+pub mod control;
 #[cfg(target_os = "linux")]
 pub mod daemon;
 pub mod discovery;

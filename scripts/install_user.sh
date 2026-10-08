@@ -44,7 +44,7 @@ cat > ~/Library/LaunchAgents/com.clipsync.plist << EOF
     <array>
         <string>$HOME/.local/bin/clipsync</string>
         <string>start</string>
-        <string>--daemon</string>
+        <string>--foreground</string>
     </array>
     <key>RunAtLoad</key>
     <true/>

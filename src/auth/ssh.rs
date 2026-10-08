@@ -222,6 +222,25 @@ impl SshAuthenticator {
 
 #[async_trait]
 impl Authenticator for SshAuthenticator {
+    async fn identity_pkcs8(&self) -> Result<Vec<u8>, AuthError> {
+        let key = self.key_pair.read().await;
+        Ok(key
+            .as_ref()
+            .ok_or_else(|| AuthError::KeyError("No local identity".into()))?
+            .pkcs8())
+    }
+    async fn trusted_keys(&self) -> Result<Vec<PublicKey>, AuthError> {
+        match crate::auth::AuthorizedKeys::load_from_file(&self.config.authorized_keys_path).await {
+            Ok(keys) => Ok(keys
+                .list_keys()
+                .iter()
+                .map(|k| k.public_key.clone())
+                .collect()),
+            Err(AuthError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
+    }
+
     async fn authenticate_peer(&self, peer_key: &PublicKey) -> Result<AuthToken, AuthError> {
         // Clean up expired tokens
         self.cleanup_expired_tokens().await;
@@ -285,8 +304,7 @@ impl Authenticator for SshAuthenticator {
     }
 
     async fn is_authorized(&self, peer_key: &PublicKey) -> Result<bool, AuthError> {
-        let authorized_keys = self.authorized_keys.read().await;
-        Ok(authorized_keys.is_authorized(peer_key))
+        Ok(self.trusted_keys().await?.iter().any(|key| key == peer_key))
     }
 }
 
@@ -320,14 +338,9 @@ mod tests {
 
         // Add self to authorized keys for testing
         let public_key = auth.get_public_key().await.unwrap();
-        {
-            let mut authorized_keys = auth.authorized_keys.write().await;
-            authorized_keys.add_key(crate::auth::AuthorizedKey {
-                public_key: public_key.clone(),
-                comment: Some("test".to_string()),
-                options: vec![],
-            });
-        }
+        auth.add_trusted_peer(&public_key.to_openssh(), Some("test".into()))
+            .await
+            .unwrap();
 
         // Generate token
         let token = auth.authenticate_peer(&public_key).await.unwrap();

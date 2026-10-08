@@ -295,10 +295,9 @@ mod tests {
             last_seen: 0,
         };
 
-        let public_key = PublicKey::from_openssh(
-            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey test@example.com",
-        )
-        .unwrap();
+        let public_key = crate::auth::KeyPair::generate(crate::auth::KeyType::Ed25519)
+            .unwrap()
+            .public_key();
 
         // Process peer (should be trusted due to callback)
         let trusted = manager.process_peer(&peer, &public_key).await.unwrap();

@@ -118,7 +118,7 @@ pub fn is_daemon_running() -> Result<bool> {
 }
 
 /// Fork the process to run as a daemon
-/// 
+///
 /// IMPORTANT: This function now uses a safer approach that doesn't
 /// interfere with system authentication or terminal I/O
 pub fn daemonize() -> Result<()> {
@@ -162,27 +162,26 @@ pub fn daemonize() -> Result<()> {
 
     // SAFER APPROACH: Instead of manipulating file descriptors directly,
     // we'll use proper file handles and let Rust manage them safely
-    
+
     // Open /dev/null for reading and writing
-    let dev_null_read = File::open("/dev/null")
-        .context("Failed to open /dev/null for reading")?;
-    let dev_null_write = File::create("/dev/null")
-        .context("Failed to open /dev/null for writing")?;
+    let dev_null_read = File::open("/dev/null").context("Failed to open /dev/null for reading")?;
+    let dev_null_write =
+        File::create("/dev/null").context("Failed to open /dev/null for writing")?;
 
     // Use std::os::unix::io::AsRawFd to get raw file descriptors
     use std::os::unix::io::AsRawFd;
-    
+
     // Close stdin and reopen as /dev/null
     // IMPORTANT: We close first, then dup to avoid affecting parent's descriptors
     unsafe {
-        libc::close(0);  // Close stdin
-        libc::dup2(dev_null_read.as_raw_fd(), 0);  // Reopen stdin as /dev/null
-        
-        libc::close(1);  // Close stdout
-        libc::dup2(dev_null_write.as_raw_fd(), 1);  // Reopen stdout as /dev/null
-        
-        libc::close(2);  // Close stderr
-        libc::dup2(dev_null_write.as_raw_fd(), 2);  // Reopen stderr as /dev/null
+        libc::close(0); // Close stdin
+        libc::dup2(dev_null_read.as_raw_fd(), 0); // Reopen stdin as /dev/null
+
+        libc::close(1); // Close stdout
+        libc::dup2(dev_null_write.as_raw_fd(), 1); // Reopen stdout as /dev/null
+
+        libc::close(2); // Close stderr
+        libc::dup2(dev_null_write.as_raw_fd(), 2); // Reopen stderr as /dev/null
     }
 
     // Write pidfile with our PID

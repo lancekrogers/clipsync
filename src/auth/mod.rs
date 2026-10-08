@@ -52,6 +52,18 @@ pub enum AuthError {
 /// Authentication trait for peer authentication
 #[async_trait::async_trait]
 pub trait Authenticator: Send + Sync {
+    /// TLS identity material. Test authenticators without a private key cannot open transport.
+    async fn identity_pkcs8(&self) -> Result<Vec<u8>, AuthError> {
+        Err(AuthError::KeyError(
+            "Transport requires a private identity key".into(),
+        ))
+    }
+    async fn trusted_keys(&self) -> Result<Vec<PublicKey>, AuthError> {
+        Err(AuthError::KeyError(
+            "Transport requires an explicit trust store".into(),
+        ))
+    }
+
     /// Authenticate a peer using their public key
     async fn authenticate_peer(&self, peer_key: &PublicKey) -> Result<AuthToken, AuthError>;
 

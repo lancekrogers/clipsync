@@ -1,26 +1,23 @@
+#![deny(warnings, clippy::all)]
 pub mod trust_sync;
-
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-use anyhow::Result;
+use crate::{
+    adapters::{
+        ClipboardData, ClipboardEntry, ClipboardProviderWrapper, HistoryManager, Peer,
+        PeerDiscovery,
+    },
+    config::Config,
+    history::encryption::Encryptor,
+    transport::{
+        protocol::{ClipboardFormat, MessagePayload, MessageType},
+        ClipboardData as WireData, Message, TransportManager, WebSocketListener,
+    },
+};
+use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
-use tokio::sync::{broadcast, RwLock};
-use tokio::time::{interval, sleep};
-use tracing::{debug, error, info, warn};
-use uuid::Uuid;
-
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::sync::{broadcast, Mutex};
 pub use trust_sync::{setup_trust_sync, TrustAwareSyncEngine};
-
-use crate::adapters::{
-    ClipboardData, ClipboardEntry, ClipboardProviderWrapper, HistoryManager, Peer, PeerDiscovery,
-};
-use crate::config::Config;
-use crate::transport::protocol::ClipboardFormat;
-use crate::transport::{
-    ClipboardData as TransportClipboardData, Message, MessagePayload, MessageType, TransportManager,
-};
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct SyncEvent {
@@ -28,19 +25,23 @@ pub struct SyncEvent {
     pub source_peer: Uuid,
     pub entry: ClipboardEntry,
 }
-
+#[derive(Default)]
+struct SyncState {
+    clock: u64,
+    last_order: Option<(u64, Uuid, Uuid)>,
+    observed: Option<String>,
+    pending: Option<Message>,
+    queued_sessions: HashMap<Uuid, Uuid>,
+}
 pub struct SyncEngine {
     config: Arc<Config>,
     clipboard: Arc<ClipboardProviderWrapper>,
     history: Arc<HistoryManager>,
-    discovery: Arc<PeerDiscovery>,
+    discovery: Option<Arc<PeerDiscovery>>,
     transport: Arc<TransportManager>,
-    peers: Arc<RwLock<HashMap<Uuid, Peer>>>,
-    event_sender: broadcast::Sender<SyncEvent>,
-    last_local_update: Arc<RwLock<SystemTime>>,
-    sync_interval: Duration,
+    state: Mutex<SyncState>,
+    events: broadcast::Sender<SyncEvent>,
 }
-
 impl SyncEngine {
     pub fn new(
         config: Arc<Config>,
@@ -49,348 +50,283 @@ impl SyncEngine {
         discovery: Arc<PeerDiscovery>,
         transport: Arc<TransportManager>,
     ) -> Self {
-        let (event_sender, _) = broadcast::channel(100);
-
+        let mut engine = Self::without_discovery(config, clipboard, history, transport);
+        engine.discovery = Some(discovery);
+        engine
+    }
+    /// Use explicit peer connections, e.g. an isolated loopback test harness.
+    pub fn without_discovery(
+        config: Arc<Config>,
+        clipboard: Arc<ClipboardProviderWrapper>,
+        history: Arc<HistoryManager>,
+        transport: Arc<TransportManager>,
+    ) -> Self {
+        let (events, _) = broadcast::channel(64);
         Self {
-            config: Arc::clone(&config),
+            config,
             clipboard,
             history,
-            discovery,
+            discovery: None,
             transport,
-            peers: Arc::new(RwLock::new(HashMap::new())),
-            event_sender,
-            last_local_update: Arc::new(RwLock::new(UNIX_EPOCH)),
-            sync_interval: Duration::from_millis(config.sync_interval_ms()),
+            state: Mutex::new(SyncState::default()),
+            events,
         }
     }
-
-    pub async fn start(&self) -> Result<()> {
-        info!("Starting sync engine");
-
-        let discovery_task = self.start_discovery();
-        let clipboard_monitor_task = self.start_clipboard_monitor();
-        let sync_task = self.start_sync_loop();
-        let transport_handler_task = self.start_transport_handler();
-
-        tokio::try_join!(
-            discovery_task,
-            clipboard_monitor_task,
-            sync_task,
-            transport_handler_task
-        )?;
-
-        Ok(())
+    pub async fn bind_listener(&self) -> Result<WebSocketListener> {
+        Ok(self.transport.listener(self.config.socket_addr()?).await?)
     }
-
-    async fn start_discovery(&self) -> Result<()> {
-        let discovery = Arc::clone(&self.discovery);
-        let peers = Arc::clone(&self.peers);
-        let transport = Arc::clone(&self.transport);
-
-        discovery.start().await?;
-
-        let mut peer_updates = discovery.subscribe().await?;
-
-        loop {
-            match peer_updates.recv().await {
-                Ok(peer) => {
-                    info!("Discovered peer: {} at {}", peer.id, peer.address);
-
-                    if let Err(e) = self.connect_to_peer(&peer).await {
-                        warn!("Failed to connect to peer {}: {}", peer.id, e);
-                        continue;
-                    }
-
-                    peers.write().await.insert(peer.id, peer);
-                }
-                Err(e) => {
-                    error!("Error receiving peer update: {}", e);
-                    sleep(Duration::from_secs(1)).await;
-                }
+    pub async fn start(&self) -> Result<()> {
+        self.run(self.bind_listener().await?).await
+    }
+    pub async fn run(&self, listener: WebSocketListener) -> Result<()> {
+        let incoming = self.transport.subscribe().await?;
+        // Baseline the pre-existing clipboard. Starting a daemon is not a copy action.
+        self.state.lock().await.observed = self
+            .clipboard
+            .get_text()
+            .await
+            .ok()
+            .map(|s| Encryptor::compute_checksum(s.as_bytes()));
+        let result = tokio::try_join!(
+            async {
+                self.transport
+                    .serve(listener)
+                    .await
+                    .map_err(anyhow::Error::from)
+            },
+            self.sync_loop(incoming),
+            self.discovery_loop(),
+        );
+        self.shutdown().await;
+        result.map(|_| ())
+    }
+    pub async fn shutdown(&self) {
+        self.transport.shutdown().await;
+        if let Some(discovery) = &self.discovery {
+            if let Err(e) = discovery.stop().await {
+                tracing::warn!("Discovery shutdown: {e}");
             }
         }
     }
-
-    async fn connect_to_peer(&self, peer: &Peer) -> Result<()> {
-        // Store the connection with proper authentication
-        let connection = self.transport.connect(&peer.address).await?;
-
-        // The transport layer now handles authentication automatically
-        // through the WebSocket handshake and SSH key verification
-        info!(
-            "Connected and authenticated with peer {} at {}",
-            peer.id, peer.address
-        );
-
-        // Store the authenticated connection for message routing
-        self.transport
-            .register_peer_connection(peer.id, connection)
-            .await?;
-
-        Ok(())
-    }
-
-    async fn start_clipboard_monitor(&self) -> Result<()> {
-        let clipboard = Arc::clone(&self.clipboard);
-        let history = Arc::clone(&self.history);
-        let event_sender = self.event_sender.clone();
-        let last_update = Arc::clone(&self.last_local_update);
-        let config = Arc::clone(&self.config);
-
-        // Use a reasonable interval of 1 second instead of 200ms
-        // This prevents excessive CPU usage and potential interference with password managers
-        let mut interval = interval(Duration::from_secs(1));
-        let mut last_content_hash = None;
-
+    async fn discovery_loop(&self) -> Result<()> {
+        let Some(discovery) = &self.discovery else {
+            return std::future::pending().await;
+        };
+        discovery.start().await?;
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        let mut retry: HashMap<Uuid, (tokio::time::Instant, u32)> = HashMap::new();
         loop {
             interval.tick().await;
-
-            match clipboard.get_text().await {
-                Ok(content) => {
-                    // Safety check: Skip potentially sensitive content
-                    if crate::clipboard::safety::is_potentially_sensitive(&content) {
-                        debug!("Skipping potentially sensitive clipboard content");
-                        continue;
-                    }
-                    
-                    // Safety check: Skip if in sensitive context
-                    if crate::clipboard::safety::is_sensitive_context() {
-                        debug!("Skipping clipboard sync in sensitive context");
-                        continue;
-                    }
-                    
-                    let content_hash = format!("{:x}", md5::compute(&content));
-
-                    if Some(&content_hash) != last_content_hash.as_ref() {
-                        debug!("Clipboard content changed locally");
-
-                        let entry = ClipboardEntry {
-                            id: Uuid::new_v4(),
-                            content: ClipboardData::Text(content),
-                            timestamp: Utc::now(),
-                            source: config.node_id(),
-                            checksum: content_hash.clone(),
-                        };
-
-                        if let Err(e) = history.add_entry(&entry).await {
-                            error!("Failed to save clipboard entry: {}", e);
-                        }
-
-                        let sync_event = SyncEvent {
-                            timestamp: entry.timestamp,
-                            source_peer: config.node_id(),
-                            entry,
-                        };
-
-                        if let Err(e) = event_sender.send(sync_event) {
-                            warn!("Failed to broadcast sync event: {}", e);
-                        }
-
-                        *last_update.write().await = SystemTime::now();
-                        last_content_hash = Some(content_hash);
-                    }
+            let peers = discovery.snapshot().await?;
+            retry.retain(|id, _| peers.iter().any(|p| p.id == *id));
+            for peer in peers {
+                // One initiator per pair prevents simultaneous duplicate connections.
+                if peer.id <= self.config.node_id() || self.transport.is_connected(peer.id).await {
+                    continue;
                 }
-                Err(e) => {
-                    warn!("Failed to read clipboard: {}", e);
+                if retry
+                    .get(&peer.id)
+                    .is_some_and(|(when, _)| *when > tokio::time::Instant::now())
+                {
+                    continue;
+                }
+                match self.transport.connect_peer(&peer).await {
+                    Ok(()) => {
+                        retry.remove(&peer.id);
+                    }
+                    Err(e) => {
+                        tracing::debug!("Peer {} is unavailable: {e}", peer.id);
+                        let attempt = retry
+                            .get(&peer.id)
+                            .map_or(0, |(_, n)| *n)
+                            .saturating_add(1)
+                            .min(5);
+                        retry.insert(
+                            peer.id,
+                            (
+                                tokio::time::Instant::now() + Duration::from_secs(1 << attempt),
+                                attempt,
+                            ),
+                        );
+                    }
                 }
             }
         }
     }
-
-    async fn start_sync_loop(&self) -> Result<()> {
-        let _transport = Arc::clone(&self.transport);
-        let _peers = Arc::clone(&self.peers);
-        let mut event_receiver = self.event_sender.subscribe();
-
+    async fn sync_loop(&self, mut incoming: broadcast::Receiver<Message>) -> Result<()> {
+        let mut interval = tokio::time::interval(Duration::from_millis(250));
         loop {
-            match event_receiver.recv().await {
-                Ok(sync_event) => {
-                    if sync_event.source_peer == self.config.node_id() {
-                        self.broadcast_to_peers(&sync_event).await;
-                    } else {
-                        self.handle_remote_sync_event(&sync_event).await;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(count)) => {
-                    warn!("Sync loop lagged by {} events", count);
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    info!("Sync event channel closed");
-                    break;
+            tokio::select! {
+                _ = interval.tick() => { if let Err(e) = self.capture(false).await { tracing::debug!("Clipboard capture: {e}"); } }
+                message = incoming.recv() => match message {
+                    Ok(m) => if let Err(e) = self.apply_remote(m).await { tracing::warn!("Remote clipboard rejected: {e}"); },
+                    Err(broadcast::error::RecvError::Lagged(n)) => tracing::warn!("Dropped {n} clipboard messages"),
+                    Err(e) => return Err(e.into()),
                 }
             }
         }
-
+    }
+    fn admit(&self, text: &str) -> Result<()> {
+        if text.len() > self.config.clipboard.max_size {
+            bail!("Clipboard exceeds configured size limit");
+        }
+        if crate::clipboard::safety::is_potentially_sensitive(text)
+            || crate::clipboard::safety::is_sensitive_context()
+        {
+            bail!("Clipboard suppressed by sensitive-content policy");
+        }
         Ok(())
     }
-
-    async fn broadcast_to_peers(&self, event: &SyncEvent) {
-        let peers = self.peers.read().await;
-
-        let clipboard_data = match &event.entry.content {
-            ClipboardData::Text(text) => TransportClipboardData {
-                format: ClipboardFormat::Text,
-                data: text.as_bytes().to_vec(),
-                compression: None,
-                checksum: event.entry.checksum.clone(),
-                metadata: std::collections::HashMap::new(),
-            },
+    async fn capture(&self, force: bool) -> Result<usize> {
+        let mut state = self.state.lock().await;
+        let text = self.clipboard.get_text().await?;
+        self.admit(&text)?;
+        let checksum = Encryptor::compute_checksum(text.as_bytes());
+        if !force && state.observed.as_ref() == Some(&checksum) {
+            return self.queue_pending(&mut state).await;
+        }
+        let peers = self.transport.connected_peers().await;
+        if force && peers.is_empty() {
+            bail!("No authenticated peers connected");
+        }
+        let id = Uuid::new_v4();
+        let clock = state
+            .clock
+            .max(now_millis())
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Event clock exhausted"))?;
+        let entry = ClipboardEntry {
+            id,
+            content: ClipboardData::Text(text.clone()),
+            timestamp: Utc::now(),
+            source: self.config.node_id(),
+            checksum: checksum.clone(),
         };
-
-        let message = Message::new(
+        self.history.add_entry(&entry).await?;
+        state.clock = clock;
+        state.last_order = Some((clock, self.config.node_id(), id));
+        state.observed = Some(checksum.clone());
+        let mut message = Message::new(
             MessageType::ClipboardData,
-            MessagePayload::Clipboard(clipboard_data),
+            MessagePayload::Clipboard(WireData {
+                format: ClipboardFormat::Text,
+                data: text.into_bytes(),
+                compression: None,
+                checksum,
+                metadata: HashMap::new(),
+            }),
         );
-
-        for peer in peers.values() {
-            if let Err(e) = self.transport.send_to_peer(peer.id, &message).await {
-                warn!("Failed to send sync event to peer {}: {}", peer.id, e);
+        message.sequence = state.clock;
+        message.correlation_id = Some(id);
+        message.timestamp = entry.timestamp;
+        state.pending = Some(message);
+        state.queued_sessions.clear();
+        let queued = self.queue_pending(&mut state).await?;
+        let _ = self.events.send(SyncEvent {
+            timestamp: entry.timestamp,
+            source_peer: entry.source,
+            entry,
+        });
+        if force && queued == 0 {
+            bail!("Could not queue update to any connected peer");
+        }
+        Ok(queued)
+    }
+    async fn queue_pending(&self, state: &mut SyncState) -> Result<usize> {
+        let Some(message) = &state.pending else {
+            return Ok(0);
+        };
+        let sessions = self.transport.sessions().await;
+        state
+            .queued_sessions
+            .retain(|peer, session| sessions.contains(&(*peer, *session)));
+        let mut queued = 0;
+        for (peer, session) in sessions {
+            if state.queued_sessions.get(&peer) == Some(&session) {
+                continue;
+            }
+            if self.transport.send_to_peer(peer, message).await.is_ok() {
+                state.queued_sessions.insert(peer, session);
+                queued += 1;
             }
         }
+        Ok(queued)
     }
-
-    async fn handle_remote_sync_event(&self, event: &SyncEvent) {
-        debug!("Handling remote sync event from peer {}", event.source_peer);
-
-        if let Err(e) = self.resolve_conflict(event).await {
-            error!("Failed to resolve sync conflict: {}", e);
-            return;
-        }
-
-        match &event.entry.content {
-            ClipboardData::Text(text) => {
-                if let Err(e) = self.clipboard.set_text(text).await {
-                    error!("Failed to update local clipboard: {}", e);
-                }
-            }
-        }
-
-        if let Err(e) = self.history.add_entry(&event.entry).await {
-            error!("Failed to save remote clipboard entry: {}", e);
-        }
-    }
-
-    async fn resolve_conflict(&self, remote_event: &SyncEvent) -> Result<()> {
-        let last_local = *self.last_local_update.read().await;
-        let remote_timestamp = remote_event.timestamp.timestamp() as u64;
-        let local_timestamp = last_local.duration_since(UNIX_EPOCH)?.as_secs();
-
-        if remote_timestamp <= local_timestamp {
-            debug!("Remote event is older than local, ignoring");
+    pub async fn apply_remote(&self, message: Message) -> Result<()> {
+        if message.message_type != MessageType::ClipboardData {
             return Ok(());
         }
-
-        if let Some(existing) = self
-            .history
-            .get_by_checksum(&remote_event.entry.checksum)
-            .await?
-        {
-            if existing.timestamp >= remote_event.entry.timestamp {
-                debug!("Already have newer version of this content");
-                return Ok(());
-            }
+        let MessagePayload::Clipboard(data) = message.payload else {
+            bail!("Invalid clipboard message");
+        };
+        if data.format != ClipboardFormat::Text || data.compression.is_some() {
+            bail!("Unsupported clipboard format");
         }
-
+        let origin = message
+            .source_peer_id
+            .ok_or_else(|| anyhow::anyhow!("Missing authenticated origin"))?;
+        let id = message
+            .correlation_id
+            .ok_or_else(|| anyhow::anyhow!("Missing event identity"))?;
+        if origin == self.config.node_id() {
+            bail!("Reflected local event");
+        }
+        if message.sequence > now_millis().saturating_add(300_000) {
+            bail!("Peer clock is more than five minutes ahead");
+        }
+        let text = String::from_utf8(data.data)?;
+        self.admit(&text)?;
+        let checksum = Encryptor::compute_checksum(text.as_bytes());
+        if checksum != data.checksum {
+            bail!("Clipboard checksum mismatch");
+        }
+        // Capture a local change that happened between monitor ticks before admitting remote data.
+        let _ = self.capture(false).await;
+        let mut state = self.state.lock().await;
+        let order = (message.sequence, origin, id);
+        if state.last_order.is_some_and(|last| order <= last) {
+            return Ok(());
+        }
+        self.clipboard.set_text(&text).await?;
+        state.clock = state.clock.max(message.sequence);
+        state.last_order = Some(order);
+        state.pending = None;
+        state.queued_sessions.clear();
+        state.observed = Some(checksum.clone());
+        let entry = ClipboardEntry {
+            id,
+            content: ClipboardData::Text(text),
+            timestamp: message.timestamp,
+            source: origin,
+            checksum,
+        };
+        self.history.add_entry(&entry).await?;
+        let _ = self.events.send(SyncEvent {
+            timestamp: entry.timestamp,
+            source_peer: origin,
+            entry,
+        });
         Ok(())
     }
-
-    async fn start_transport_handler(&self) -> Result<()> {
-        let transport = Arc::clone(&self.transport);
-        let event_sender = self.event_sender.clone();
-
-        let mut message_receiver = transport.subscribe().await?;
-
-        loop {
-            match message_receiver.recv().await {
-                Ok(message) => {
-                    match message.payload {
-                        MessagePayload::Clipboard(clipboard_data) => {
-                            let content = match clipboard_data.format {
-                                ClipboardFormat::Text => {
-                                    match String::from_utf8(clipboard_data.data) {
-                                        Ok(text) => ClipboardData::Text(text),
-                                        Err(e) => {
-                                            warn!("Failed to decode text clipboard data: {}", e);
-                                            continue;
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    debug!(
-                                        "Unsupported clipboard format: {:?}",
-                                        clipboard_data.format
-                                    );
-                                    continue;
-                                }
-                            };
-
-                            // Extract the source peer ID from the message
-                            let source_peer_id = message.source_peer_id.unwrap_or_else(|| {
-                                warn!("Message missing source_peer_id, using random UUID");
-                                Uuid::new_v4()
-                            });
-
-                            let entry = ClipboardEntry {
-                                id: Uuid::new_v4(),
-                                content,
-                                timestamp: message.timestamp,
-                                source: source_peer_id,
-                                checksum: clipboard_data.checksum,
-                            };
-
-                            let sync_event = SyncEvent {
-                                timestamp: message.timestamp,
-                                source_peer: entry.source,
-                                entry,
-                            };
-
-                            if let Err(e) = event_sender.send(sync_event) {
-                                warn!("Failed to broadcast received sync event: {}", e);
-                            }
-                        }
-                        _ => {
-                            debug!("Received non-sync message: {:?}", message.message_type);
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("Error receiving transport message: {}", e);
-                    sleep(Duration::from_secs(1)).await;
-                }
-            }
-        }
-    }
-
     pub fn subscribe(&self) -> broadcast::Receiver<SyncEvent> {
-        self.event_sender.subscribe()
+        self.events.subscribe()
     }
-
     pub async fn get_connected_peers(&self) -> Vec<Peer> {
-        self.peers.read().await.values().cloned().collect()
+        self.transport
+            .connected_peers()
+            .await
+            .into_iter()
+            .map(|p| Peer {
+                id: p.id,
+                hostname: p.name.clone(),
+                address: p.best_address().map(|a| a.to_string()).unwrap_or_default(),
+            })
+            .collect()
     }
-
-    pub async fn force_sync(&self) -> Result<()> {
-        info!("Forcing clipboard sync");
-
-        if let Ok(content) = self.clipboard.get_text().await {
-            let checksum = format!("{:x}", md5::compute(&content));
-            let entry = ClipboardEntry {
-                id: Uuid::new_v4(),
-                content: ClipboardData::Text(content),
-                timestamp: Utc::now(),
-                source: self.config.node_id(),
-                checksum,
-            };
-
-            let sync_event = SyncEvent {
-                timestamp: entry.timestamp,
-                source_peer: self.config.node_id(),
-                entry,
-            };
-
-            self.event_sender.send(sync_event)?;
-        }
-
-        Ok(())
+    pub async fn force_sync(&self) -> Result<usize> {
+        self.capture(true).await
     }
+}
+fn now_millis() -> u64 {
+    Utc::now().timestamp_millis().max(0) as u64
 }

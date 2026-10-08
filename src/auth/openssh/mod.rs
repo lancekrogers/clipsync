@@ -3,4 +3,4 @@
 pub mod ed25519;
 pub mod parser;
 
-pub use parser::{parse_openssh_private_key, OpenSshKey, PrivateKeyData, KeyTypeData};
+pub use parser::{parse_openssh_private_key, KeyTypeData, OpenSshKey, PrivateKeyData};

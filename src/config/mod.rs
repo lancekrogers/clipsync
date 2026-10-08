@@ -104,6 +104,9 @@ impl AuthConfig {
 /// Clipboard configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClipboardConfig {
+    /// Optional isolated key path; absent preserves the existing platform key location.
+    #[serde(default)]
+    pub history_key: Option<PathBuf>,
     /// Maximum payload size in bytes
     #[serde(default = "default_max_size")]
     pub max_size: usize,
@@ -240,6 +243,7 @@ impl Default for AuthConfig {
 impl Default for ClipboardConfig {
     fn default() -> Self {
         Self {
+            history_key: None,
             max_size: default_max_size(),
             sync_primary: default_sync_primary(),
             history_size: default_history_size(),
@@ -348,6 +352,7 @@ impl Config {
         self.auth.ssh_key = expand_path(&self.auth.ssh_key);
         self.auth.authorized_keys = expand_path(&self.auth.authorized_keys);
         self.clipboard.history_db = expand_path(&self.clipboard.history_db);
+        self.clipboard.history_key = self.clipboard.history_key.as_ref().map(|p| expand_path(p));
     }
 
     /// Validate SSH key exists and is readable
@@ -372,8 +377,24 @@ impl Config {
         }
     }
 
+    pub fn socket_addr(&self) -> Result<std::net::SocketAddr, ConfigError> {
+        let address = if self.listen_addr.starts_with(':') {
+            format!("0.0.0.0{}", self.listen_addr)
+        } else {
+            self.listen_addr.clone()
+        };
+        address
+            .parse()
+            .map_err(|e| ConfigError::Validation(format!("Invalid listen address: {e}")))
+    }
+
     /// Validate configuration values
     fn validate_config(&self) -> Result<(), ConfigError> {
+        if self.socket_addr()?.port() == 0 {
+            return Err(ConfigError::Validation(
+                "Use a nonzero listener port in daemon configuration".into(),
+            ));
+        }
         // Validate max_size range (1KB to 50MB)
         if self.clipboard.max_size < 1024 {
             return Err(ConfigError::Validation(
@@ -604,12 +625,10 @@ mod tests {
     #[test]
     fn test_save_and_load() {
         let temp_dir = TempDir::new().unwrap();
-        std::env::set_var("HOME", temp_dir.path());
-
         let config = Config::default();
-        config.save().unwrap();
-
-        let loaded = Config::load().unwrap();
+        let path = temp_dir.path().join("config.toml");
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let loaded = Config::load_from_path(&path).unwrap();
         assert_eq!(config.listen_addr, loaded.listen_addr);
     }
 

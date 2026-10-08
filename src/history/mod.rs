@@ -51,9 +51,13 @@ pub struct ClipboardHistory {
 impl ClipboardHistory {
     /// Create a new clipboard history instance
     pub async fn new(db_path: &Path) -> Result<Self> {
-        let encryptor = encryption::Encryptor::new().await?;
-        let db = database::HistoryDatabase::new(db_path, encryptor.get_key()).await?;
+        Self::new_with_key_path(db_path, &encryption::Encryptor::get_key_file_path()?).await
+    }
 
+    pub async fn new_with_key_path(db_path: &Path, key_path: &Path) -> Result<Self> {
+        let existing = db_path.try_exists()?;
+        let encryptor = encryption::Encryptor::for_store(key_path, existing).await?;
+        let db = database::HistoryDatabase::new(db_path, encryptor.get_key()).await?;
         Ok(Self { db, encryptor })
     }
 

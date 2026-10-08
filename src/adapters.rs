@@ -24,7 +24,7 @@ pub struct ClipboardEntry {
     pub checksum: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Peer {
     pub id: Uuid,
     pub hostname: String,
@@ -62,6 +62,12 @@ impl HistoryManager {
     pub async fn new<P: AsRef<Path>>(path: P) -> Result<Self> {
         let inner = crate::history::ClipboardHistory::new(path.as_ref()).await?;
         Ok(Self { inner })
+    }
+
+    pub async fn new_with_key_path(path: &Path, key: &Path) -> Result<Self> {
+        Ok(Self {
+            inner: crate::history::ClipboardHistory::new_with_key_path(path, key).await?,
+        })
     }
 
     pub async fn add_entry(&self, entry: &ClipboardEntry) -> Result<()> {
@@ -109,9 +115,13 @@ impl HistoryManager {
         Ok(entries.into_iter().find(|e| e.checksum == checksum))
     }
 
-    pub async fn search_entries(&self, search_term: &str, limit: usize) -> Result<Vec<ClipboardEntry>> {
+    pub async fn search_entries(
+        &self,
+        search_term: &str,
+        limit: usize,
+    ) -> Result<Vec<ClipboardEntry>> {
         let inner_entries = self.inner.search(search_term).await?;
-        
+
         let entries = inner_entries
             .into_iter()
             .take(limit)
@@ -148,7 +158,10 @@ impl ClipboardProviderWrapper {
 
     pub async fn get_text(&self) -> Result<String> {
         let content = self.inner.get_content().await?;
-        Ok(String::from_utf8_lossy(&content.data).to_string())
+        if content.mime_type != "text/plain" {
+            anyhow::bail!("Only plain text clipboard content is supported");
+        }
+        Ok(String::from_utf8(content.data)?)
     }
 
     pub async fn set_text(&self, text: &str) -> Result<()> {
@@ -173,29 +186,9 @@ pub async fn get_clipboard_provider() -> Result<ClipboardProviderWrapper> {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        // Try X11 first, then Wayland with better error reporting
-        match crate::clipboard::x11::X11Clipboard::new() {
-            Ok(provider) => {
-                tracing::debug!("Using X11 clipboard provider");
-                Ok(ClipboardProviderWrapper::new(Box::new(provider)))
-            }
-            Err(x11_error) => {
-                tracing::debug!("X11 clipboard failed: {}, trying Wayland", x11_error);
-                match crate::clipboard::wayland::WaylandClipboard::new().await {
-                    Ok(provider) => {
-                        tracing::debug!("Using Wayland clipboard provider");
-                        Ok(ClipboardProviderWrapper::new(Box::new(provider)))
-                    }
-                    Err(wayland_error) => {
-                        Err(anyhow::anyhow!(
-                            "Both clipboard providers failed - X11: {}, Wayland: {}. \
-                            Try running in a terminal with proper DISPLAY and WAYLAND_DISPLAY variables.",
-                            x11_error, wayland_error
-                        ))
-                    }
-                }
-            }
-        }
+        Ok(ClipboardProviderWrapper::new(
+            crate::clipboard::create_provider().await?,
+        ))
     }
 
     #[cfg(windows)]
@@ -206,6 +199,7 @@ pub async fn get_clipboard_provider() -> Result<ClipboardProviderWrapper> {
 
 // PeerDiscovery adapter
 pub struct PeerDiscovery {
+    forwarding: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     inner: Arc<tokio::sync::Mutex<crate::discovery::DiscoveryService>>,
     event_tx: tokio::sync::broadcast::Sender<Peer>,
     discovery_event_tx: tokio::sync::broadcast::Sender<crate::discovery::DiscoveryEvent>,
@@ -218,6 +212,7 @@ impl PeerDiscovery {
         let (event_tx, _) = tokio::sync::broadcast::channel(100);
         let (discovery_event_tx, _) = tokio::sync::broadcast::channel(100);
         Ok(Self {
+            forwarding: tokio::sync::Mutex::new(None),
             inner: Arc::new(tokio::sync::Mutex::new(inner)),
             event_tx,
             discovery_event_tx,
@@ -227,17 +222,15 @@ impl PeerDiscovery {
 
     pub async fn start(&self) -> Result<()> {
         // Load public key for announcement
-        let public_key = self
-            .config
-            .auth
-            .load_public_key()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to load public key: {}", e))?;
+        let public_key = crate::auth::KeyPair::load_from_file(&self.config.auth.ssh_key)
+            .await?
+            .public_key()
+            .to_openssh();
 
         // Create service info with public key
         let mut service_info = crate::discovery::ServiceInfo::from_config(
             self.config.node_id(),
-            8484, // TODO: Get from config
+            self.config.websocket_port(),
         );
 
         // Add public key to TXT records
@@ -251,68 +244,42 @@ impl PeerDiscovery {
         inner.announce(service_info).await?;
         drop(inner); // Release lock
 
-        // Start event forwarding task
-        let inner_clone = Arc::clone(&self.inner);
+        let mut event_rx = self.inner.lock().await.subscribe_changes();
         let event_tx = self.event_tx.clone();
         let discovery_event_tx = self.discovery_event_tx.clone();
-        let config = Arc::clone(&self.config);
-
-        tokio::spawn(async move {
-            // Get a receiver once at the start
-            let mut event_rx = {
-                let mut inner = inner_clone.lock().await;
-                inner.subscribe_changes()
-            };
-
-            loop {
-                match event_rx.recv().await {
-                    Some(event) => {
-                        // Forward the raw discovery event
-                        let _ = discovery_event_tx.send(event.clone());
-
-                        match event {
-                            crate::discovery::DiscoveryEvent::PeerDiscovered(peer_info) => {
-                                let peer = Peer {
-                                    id: peer_info.id,
-                                    hostname: peer_info.name.clone(),
-                                    address: peer_info
-                                        .best_address()
-                                        .map(|a| a.to_string())
-                                        .unwrap_or_else(|| "unknown".to_string()),
-                                };
-                                let _ = event_tx.send(peer);
-                            }
-                            crate::discovery::DiscoveryEvent::PeerUpdated(peer_info) => {
-                                // Handle peer updates
-                                tracing::debug!("Peer updated: {}", peer_info.name);
-                            }
-                            crate::discovery::DiscoveryEvent::PeerLost(peer_id) => {
-                                tracing::debug!("Peer lost: {}", peer_id);
-                            }
-                            crate::discovery::DiscoveryEvent::Error(err) => {
-                                tracing::warn!("Discovery error: {}", err);
-                            }
-                        }
-                    }
-                    None => {
-                        // Channel closed, try to get a new receiver
-                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-                        match inner_clone.lock().await.subscribe_changes().recv().await {
-                            Some(_) => {
-                                // Got new receiver, continue
-                                event_rx = inner_clone.lock().await.subscribe_changes();
-                            }
-                            None => {
-                                // Discovery service stopped
-                                break;
-                            }
-                        }
-                    }
+        let task = tokio::spawn(async move {
+            while let Some(event) = event_rx.recv().await {
+                let _ = discovery_event_tx.send(event.clone());
+                if let crate::discovery::DiscoveryEvent::PeerDiscovered(peer_info)
+                | crate::discovery::DiscoveryEvent::PeerUpdated(peer_info) = event
+                {
+                    let address = peer_info
+                        .best_address()
+                        .map(|a| a.to_string())
+                        .unwrap_or_default();
+                    let _ = event_tx.send(Peer {
+                        id: peer_info.id,
+                        hostname: peer_info.name,
+                        address,
+                    });
                 }
             }
         });
+        if let Some(previous) = self.forwarding.lock().await.replace(task) {
+            previous.abort();
+        }
 
         Ok(())
+    }
+
+    pub async fn snapshot(&self) -> Result<Vec<crate::discovery::PeerInfo>> {
+        self.inner.lock().await.discover_peers().await
+    }
+    pub async fn stop(&self) -> Result<()> {
+        if let Some(task) = self.forwarding.lock().await.take() {
+            task.abort();
+        }
+        self.inner.lock().await.stop().await
     }
 
     pub async fn subscribe(&self) -> Result<tokio::sync::broadcast::Receiver<Peer>> {
@@ -326,18 +293,21 @@ impl PeerDiscovery {
         self.discovery_event_tx.subscribe()
     }
 
-    pub async fn discover_peers_timeout(&self, timeout: std::time::Duration) -> Result<Vec<crate::discovery::PeerInfo>> {
+    pub async fn discover_peers_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<crate::discovery::PeerInfo>> {
         let mut inner = self.inner.lock().await;
-        
+
         // Start the discovery process
         inner.start().await?;
-        
+
         // Wait for the timeout period
         tokio::time::sleep(timeout).await;
-        
+
         // Get discovered peers
         let peers = inner.discover_peers().await?;
-        
+        inner.stop().await?;
         Ok(peers)
     }
 }
