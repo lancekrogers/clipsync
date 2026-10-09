@@ -71,8 +71,16 @@ clipsync --config /path/to/config.toml status
 clipsync --config /path/to/config.toml peers
 clipsync --config /path/to/config.toml sync
 clipsync --config /path/to/config.toml history
+clipsync --config /path/to/config.toml copy "example text"
 clipsync --config /path/to/config.toml auth remove 'SHA256:fingerprint-from-auth-list'
 ```
+
+On Linux, `copy` requires a running daemon with the same configuration. The daemon
+keeps ownership after the CLI exits; success confirms the local clipboard write.
+Sensitive-content filtering still controls whether that text enters history or
+is forwarded to another device. If the daemon is unavailable, `copy` fails
+without replacing the clipboard.
+
 
 Authorization is reloaded for new handshakes and checked during active traffic/heartbeats. Removing a key closes its session. Local `auth list` now uses standard OpenSSH fingerprints; pre-repair trust-cache fingerprints are not used to authorize the daemon.
 

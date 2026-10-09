@@ -286,9 +286,13 @@ impl CliHandler {
         #[cfg(target_os = "linux")]
         if !foreground {
             let path = crate::control::socket_path(&self.config);
-            if crate::control::request(&path, crate::control::Command::Status)
-                .await
-                .is_ok()
+            if crate::control::request(
+                &path,
+                crate::control::Command::Status,
+                crate::control::max_frame_bytes(&self.config),
+            )
+            .await
+            .is_ok()
             {
                 anyhow::bail!("Daemon already running");
             }
@@ -313,9 +317,13 @@ impl CliHandler {
                 .stderr(std::process::Stdio::null())
                 .spawn()?;
             for _ in 0..50 {
-                if crate::control::request(&path, crate::control::Command::Status)
-                    .await
-                    .is_ok()
+                if crate::control::request(
+                    &path,
+                    crate::control::Command::Status,
+                    crate::control::max_frame_bytes(&self.config),
+                )
+                .await
+                .is_ok()
                 {
                     println!("ClipSync daemon ready");
                     return Ok(());
@@ -385,7 +393,8 @@ impl CliHandler {
         let mut config = (*self.config).clone();
         config.node_id = crate::transport::tls::node_id(&identity.public_key());
         self.config = Arc::new(config);
-        let control = crate::control::Server::bind(crate::control::socket_path(&self.config))?;
+        let control =
+            crate::control::Server::bind(crate::control::socket_path(&self.config), &self.config)?;
 
         // Ensure all components are initialized for daemon mode
         let clipboard = self.ensure_clipboard().await?;
@@ -440,7 +449,12 @@ impl CliHandler {
         #[cfg(target_os = "linux")]
         {
             let path = crate::control::socket_path(&self.config);
-            let response = crate::control::request(&path, crate::control::Command::Status).await?;
+            let response = crate::control::request(
+                &path,
+                crate::control::Command::Status,
+                crate::control::max_frame_bytes(&self.config),
+            )
+            .await?;
             if unsafe { libc::kill(response.pid as i32, libc::SIGTERM) } != 0 {
                 return Err(std::io::Error::last_os_error().into());
             }
@@ -492,6 +506,7 @@ impl CliHandler {
         let response = crate::control::request(
             &crate::control::socket_path(&self.config),
             crate::control::Command::Status,
+            crate::control::max_frame_bytes(&self.config),
         )
         .await?;
         println!(
@@ -542,6 +557,7 @@ impl CliHandler {
         let response = crate::control::request(
             &crate::control::socket_path(&self.config),
             crate::control::Command::Sync,
+            crate::control::max_frame_bytes(&self.config),
         )
         .await?;
         println!(
@@ -554,6 +570,7 @@ impl CliHandler {
         let response = crate::control::request(
             &crate::control::socket_path(&self.config),
             crate::control::Command::Peers,
+            crate::control::max_frame_bytes(&self.config),
         )
         .await?;
         println!("Connected peers: {}", response.peers.len());
@@ -564,10 +581,24 @@ impl CliHandler {
     }
 
     async fn copy_text(&mut self, text: String) -> Result<()> {
-        let clipboard = self.ensure_clipboard().await?;
-        clipboard.set_text(&text).await?;
-        println!("Text copied to clipboard");
-        Ok(())
+        #[cfg(target_os = "linux")]
+        {
+            crate::control::request(
+                &crate::control::socket_path(&self.config),
+                crate::control::Command::Copy { text },
+                crate::control::max_frame_bytes(&self.config),
+            )
+            .await?;
+            println!("Text copied to clipboard");
+            return Ok(());
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let clipboard = self.ensure_clipboard().await?;
+            clipboard.set_text(&text).await?;
+            println!("Text copied to clipboard");
+            Ok(())
+        }
     }
 
     async fn paste_text(&mut self) -> Result<()> {
@@ -591,6 +622,7 @@ impl CliHandler {
             if crate::control::request(
                 &crate::control::socket_path(&self.config),
                 crate::control::Command::Status,
+                crate::control::max_frame_bytes(&self.config),
             )
             .await
             .is_ok()

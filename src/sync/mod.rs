@@ -326,6 +326,62 @@ impl SyncEngine {
     pub async fn force_sync(&self) -> Result<usize> {
         self.capture(true).await
     }
+    /// Apply an explicit local copy through the daemon-owned clipboard provider.
+    pub async fn copy_local(&self, text: String) -> Result<usize> {
+        if text.len() > self.config.clipboard.max_size {
+            bail!("Clipboard exceeds configured size limit");
+        }
+        let forward = !crate::clipboard::safety::is_potentially_sensitive(&text)
+            && !crate::clipboard::safety::is_sensitive_context();
+        let checksum = Encryptor::compute_checksum(text.as_bytes());
+        let mut state = self.state.lock().await;
+        self.clipboard.set_text(&text).await?;
+        if !forward {
+            state.observed = Some(checksum.clone());
+            state.pending = None;
+            state.queued_sessions.clear();
+            return Ok(0);
+        }
+        let id = Uuid::new_v4();
+        let clock = state
+            .clock
+            .max(now_millis())
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("Event clock exhausted"))?;
+        let entry = ClipboardEntry {
+            id,
+            content: ClipboardData::Text(text.clone()),
+            timestamp: Utc::now(),
+            source: self.config.node_id(),
+            checksum: checksum.clone(),
+        };
+        self.history.add_entry(&entry).await?;
+        state.observed = Some(checksum.clone());
+        state.clock = clock;
+        state.last_order = Some((clock, self.config.node_id(), id));
+        let mut message = Message::new(
+            MessageType::ClipboardData,
+            MessagePayload::Clipboard(WireData {
+                format: ClipboardFormat::Text,
+                data: text.into_bytes(),
+                compression: None,
+                checksum: entry.checksum.clone(),
+                metadata: HashMap::new(),
+            }),
+        );
+        message.sequence = state.clock;
+        message.correlation_id = Some(id);
+        message.timestamp = entry.timestamp;
+        state.pending = Some(message);
+        state.queued_sessions.clear();
+        let queued = self.queue_pending(&mut state).await?;
+        let _ = self.events.send(SyncEvent {
+            timestamp: entry.timestamp,
+            source_peer: entry.source,
+            entry,
+        });
+        Ok(queued)
+    }
 }
 fn now_millis() -> u64 {
     Utc::now().timestamp_millis().max(0) as u64
