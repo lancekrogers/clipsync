@@ -208,6 +208,9 @@ impl KeyPair {
         // Write PKCS8 PEM format
         let pem_content = self.to_pkcs8_pem()?;
         file.write_all(pem_content.as_bytes()).await?;
+        // Tokio file writes can finish in the blocking pool after write_all returns.
+        // Startup immediately reloads this identity, so wait for the write to finish.
+        file.flush().await?;
 
         // Also write public key
         let pub_path = path.with_extension("pub");
