@@ -1,13 +1,14 @@
 //! mDNS/DNS-SD service discovery implementation
 
 use crate::discovery::{
-    types::DiscoveryMethod, Discovery, DiscoveryEvent, PeerInfo, PeerManager, ServiceInfo,
+    addresses::advertise_for_listener, types::DiscoveryMethod, Discovery, DiscoveryEvent, PeerInfo,
+    PeerManager, ServiceInfo,
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo as MdnsServiceInfo, TxtProperties};
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use uuid::Uuid;
@@ -180,17 +181,20 @@ impl MdnsDiscovery {
             properties.insert(key.clone(), value.clone());
         }
 
-        // Get local IPs
-        let addresses = Self::get_local_addresses()?;
+        let bind = service_info.listen_bind.unwrap_or_else(|| {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), service_info.port)
+        });
+        let interface_ips = Self::get_local_addresses()?;
+        let addresses = advertise_for_listener(bind, &interface_ips);
         if addresses.is_empty() {
-            return Err(anyhow!("No local IP addresses found"));
+            return Err(anyhow!("No listener-compatible IP addresses found"));
         }
 
         Ok(MdnsServiceInfo::new(
             SERVICE_TYPE,
             &service_name,
             &hostname,
-            addresses[0],
+            addresses.as_slice(),
             service_info.port,
             Some(properties),
         )?)
