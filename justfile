@@ -100,3 +100,8 @@ dev-setup:
 test-desktop:
   docker build -f scripts/test/Dockerfile.repair -t clipsync-repair-test:local .
   docker run --rm --mount type=bind,source="{{justfile_directory()}}",target=/source,readonly --mount type=volume,source=clipsync-repair-cargo,target=/usr/local/cargo/registry --mount type=volume,source=clipsync-repair-target,target=/work/target clipsync-repair-test:local bash /source/scripts/test/repair-container.sh
+
+# Exercise actual Linux installers in a disposable container with mocked systemctl
+test-install:
+  docker build -f scripts/test/Dockerfile.repair -t clipsync-repair-test:local .
+  docker run --rm --mount type=bind,source="{{justfile_directory()}}",target=/source,readonly --mount type=volume,source=clipsync-repair-cargo,target=/usr/local/cargo/registry --mount type=volume,source=clipsync-repair-target,target=/work/target clipsync-repair-test:local bash /source/scripts/test/install-container.sh

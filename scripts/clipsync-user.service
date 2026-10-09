@@ -6,7 +6,8 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/clipsync start --foreground
+# Replaced by `clipsync print-user-unit` during installation.
+ExecStart=CLIPSYNC_EXEC_START
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
