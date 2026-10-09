@@ -69,6 +69,16 @@ fn failure(e: impl std::fmt::Display) -> TransportError {
         message: e.to_string(),
     }
 }
+fn endpoint_failure(addr: SocketAddr, e: impl std::fmt::Display) -> TransportError {
+    TransportError::Connection {
+        message: format!("Could not connect to {addr}: {e}"),
+    }
+}
+fn endpoint_io_failure(addr: SocketAddr, e: std::io::Error) -> TransportError {
+    TransportError::Connection {
+        message: format!("Could not connect to {addr}: {e} ({})", e.kind()),
+    }
+}
 fn frame_config(config: &WebSocketConfig) -> FrameConfig {
     // JSON byte arrays can occupy four bytes per payload byte, plus metadata.
     let max = config
@@ -126,41 +136,84 @@ impl WebSocketTransport {
         if !config.enable_tls {
             return Err(failure("Plaintext transport is disabled"));
         }
-        timeout(config.connect_timeout, async {
-            let addr = peer
-                .best_address()
-                .ok_or_else(|| failure("Peer has no address"))?;
-            let (client, _) = tls::configs(auth.as_ref()).await.map_err(failure)?;
-            let tcp = TcpStream::connect(addr).await?;
-            let local = tcp.local_addr()?;
-            let stream = TlsConnector::from(client)
-                .connect("clipsync.local".try_into().map_err(failure)?, tcp)
-                .await?;
-            let stream = TlsStream::Client(stream);
-            let key = session_key(&stream)?;
-            if tls::node_id(&key) != peer.id {
-                return Err(failure(
-                    "Discovered identity does not match authenticated peer",
-                ));
+        let candidates = peer.connect_candidates();
+        if candidates.is_empty() {
+            return Err(failure("Peer has no reachable address"));
+        }
+        let deadline = tokio::time::Instant::now() + config.connect_timeout;
+        let (client, _) = tokio::time::timeout_at(deadline, tls::configs(auth.as_ref()))
+            .await
+            .map_err(|_| TransportError::Timeout)?
+            .map_err(failure)?;
+        let connector = TlsConnector::from(client);
+        let mut errors = Vec::new();
+        let count = candidates.len();
+        for (index, addr) in candidates.into_iter().enumerate() {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
             }
-            let (ws, _) = tokio_tungstenite::client_async_with_config(
-                format!("wss://{addr}/clipsync"),
-                stream,
-                Some(frame_config(&config)),
+            // Reserve time for every remaining endpoint, including when the caller
+            // supplies a short total timeout. The last candidate gets the balance.
+            let slice = remaining / (count - index) as u32;
+            match timeout(
+                slice,
+                Self::connect_endpoint(peer, &connector, addr, &config, auth.clone()),
             )
             .await
-            .map_err(failure)?;
-            Ok(WebSocketConnection::new(
-                ws,
-                key,
-                addr,
-                local,
-                config.clone(),
-                auth,
-            ))
-        })
+            {
+                Ok(Ok(connection)) => return Ok(connection),
+                Ok(Err(e)) => errors.push(format!("{addr}: {e}")),
+                Err(_) => errors.push(format!("{addr}: timed out after {slice:?}")),
+            }
+        }
+        if errors.is_empty() {
+            Err(TransportError::Timeout)
+        } else {
+            Err(failure(format!(
+                "All connection attempts failed ({})",
+                errors.join("; ")
+            )))
+        }
+    }
+
+    async fn connect_endpoint(
+        peer: &PeerInfo,
+        connector: &TlsConnector,
+        addr: SocketAddr,
+        config: &WebSocketConfig,
+        auth: Arc<dyn Authenticator>,
+    ) -> Result<WebSocketConnection> {
+        let tcp = TcpStream::connect(addr)
+            .await
+            .map_err(|e| endpoint_io_failure(addr, e))?;
+        let local = tcp.local_addr().map_err(|e| endpoint_io_failure(addr, e))?;
+        let stream = connector
+            .connect("clipsync.local".try_into().map_err(failure)?, tcp)
+            .await
+            .map_err(|e| endpoint_failure(addr, e))?;
+        let stream = TlsStream::Client(stream);
+        let key = session_key(&stream)?;
+        if tls::node_id(&key) != peer.id {
+            return Err(failure(
+                "Discovered identity does not match authenticated peer",
+            ));
+        }
+        let (ws, _) = tokio_tungstenite::client_async_with_config(
+            format!("wss://{addr}/clipsync"),
+            stream,
+            Some(frame_config(config)),
+        )
         .await
-        .map_err(|_| TransportError::Timeout)?
+        .map_err(|e| endpoint_failure(addr, e))?;
+        Ok(WebSocketConnection::new(
+            ws,
+            key,
+            addr,
+            local,
+            config.clone(),
+            auth,
+        ))
     }
 }
 fn session_key(stream: &TlsStream<TcpStream>) -> Result<PublicKey> {

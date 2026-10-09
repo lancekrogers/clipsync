@@ -28,6 +28,20 @@ pub struct MacOSClipboard {
 impl MacOSClipboard {
     /// Create a new macOS clipboard provider
     pub fn new() -> Result<Self, ClipboardError> {
+        // Fail closed if an isolation request reaches a normal production build.
+        if let Some(name) = std::env::var_os("CLIPSYNC_TEST_PASTEBOARD") {
+            #[cfg(any(test, feature = "integration-tests"))]
+            return Self::named_for_testing(name.to_str().ok_or_else(|| {
+                ClipboardError::Platform("Test pasteboard name must be UTF-8".into())
+            })?);
+            #[cfg(not(any(test, feature = "integration-tests")))]
+            {
+                let _ = name;
+                return Err(ClipboardError::Platform(
+                    "CLIPSYNC_TEST_PASTEBOARD requires the integration-tests feature".into(),
+                ));
+            }
+        }
         unsafe {
             let pasteboard: id = msg_send![class!(NSPasteboard), generalPasteboard];
             if pasteboard == nil {
@@ -36,6 +50,40 @@ impl MacOSClipboard {
                 ));
             }
 
+            let _: id = msg_send![pasteboard, retain];
+            Ok(Self { pasteboard })
+        }
+    }
+
+    /// Use a separate native pasteboard for a deliberately isolated test build.
+    #[cfg(any(test, feature = "integration-tests"))]
+    fn named_for_testing(name: &str) -> Result<Self, ClipboardError> {
+        let suffix = name.strip_prefix("org.clipsync.test.").ok_or_else(|| {
+            ClipboardError::Platform("Test pasteboard must start with org.clipsync.test.".into())
+        })?;
+        if suffix.is_empty()
+            || !suffix
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-')
+        {
+            return Err(ClipboardError::Platform(
+                "Invalid test pasteboard name".into(),
+            ));
+        }
+        unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let native_name = NSString::alloc(nil).init_str(name);
+            let pasteboard: id = msg_send![class!(NSPasteboard), pasteboardWithName: native_name];
+            let _: () = msg_send![native_name, release];
+            if pasteboard != nil {
+                let _: id = msg_send![pasteboard, retain];
+            }
+            let _: () = msg_send![pool, drain];
+            if pasteboard == nil {
+                return Err(ClipboardError::Platform(
+                    "Cannot open test pasteboard".into(),
+                ));
+            }
             Ok(Self { pasteboard })
         }
     }
@@ -333,6 +381,14 @@ impl ClipboardProvider for MacOSClipboard {
 unsafe impl Send for MacOSClipboard {}
 unsafe impl Sync for MacOSClipboard {}
 
+impl Drop for MacOSClipboard {
+    fn drop(&mut self) {
+        unsafe {
+            let _: () = msg_send![self.pasteboard, release];
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,25 +396,31 @@ mod tests {
     struct NamedPasteboard(MacOSClipboard);
     impl NamedPasteboard {
         fn new() -> Self {
-            unsafe {
-                let pool = NSAutoreleasePool::new(nil);
-                let name = NSString::alloc(nil)
-                    .init_str(&format!("clipsync-test-{}", uuid::Uuid::new_v4()));
-                let pasteboard: id = msg_send![class!(NSPasteboard), pasteboardWithName: name];
-                assert_ne!(pasteboard, nil);
-                let _: id = msg_send![pasteboard, retain];
-                let _: () = msg_send![name, release];
-                let _: () = msg_send![pool, drain];
-                Self(MacOSClipboard { pasteboard })
-            }
+            Self(
+                MacOSClipboard::named_for_testing(&format!(
+                    "org.clipsync.test.{}",
+                    uuid::Uuid::new_v4()
+                ))
+                .unwrap(),
+            )
         }
     }
     impl Drop for NamedPasteboard {
         fn drop(&mut self) {
             unsafe {
                 let _: () = msg_send![self.0.pasteboard, releaseGlobally];
-                let _: () = msg_send![self.0.pasteboard, release];
             }
+        }
+    }
+    #[test]
+    fn rejects_non_test_pasteboard_names() {
+        for name in [
+            "NSGeneralPboard",
+            "",
+            "org.clipsync.test.",
+            "org.clipsync.test.bad/name",
+        ] {
+            assert!(MacOSClipboard::named_for_testing(name).is_err());
         }
     }
     #[tokio::test]

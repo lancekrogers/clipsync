@@ -232,6 +232,7 @@ impl PeerDiscovery {
             self.config.node_id(),
             self.config.websocket_port(),
         );
+        service_info.listen_bind = self.config.socket_addr().ok();
 
         // Add public key to TXT records
         service_info

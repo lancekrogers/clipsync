@@ -45,6 +45,13 @@ impl Identity {
     pub fn id(&self) -> uuid::Uuid {
         tls::node_id(&self.key.public_key())
     }
+    pub fn ordered_pair<'a>(a: &'a Self, b: &'a Self) -> (&'a Self, &'a Self) {
+        if a.id() < b.id() {
+            (a, b)
+        } else {
+            (b, a)
+        }
+    }
     pub fn peer(&self, addr: SocketAddr) -> PeerInfo {
         PeerInfo {
             id: self.id(),

@@ -1,4 +1,6 @@
 #![deny(warnings, clippy::all)]
+pub mod connection_policy;
+pub mod discovery_connect;
 pub mod trust_sync;
 use crate::{
     adapters::{
@@ -14,6 +16,7 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
+use discovery_connect::{discovery_connect_peers, PeerDialState};
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, Mutex};
 pub use trust_sync::{setup_trust_sync, TrustAwareSyncEngine};
@@ -114,43 +117,19 @@ impl SyncEngine {
         };
         discovery.start().await?;
         let mut interval = tokio::time::interval(Duration::from_secs(2));
-        let mut retry: HashMap<Uuid, (tokio::time::Instant, u32)> = HashMap::new();
+        let mut retry: HashMap<Uuid, PeerDialState> = HashMap::new();
         loop {
             interval.tick().await;
+            let now = std::time::Instant::now();
             let peers = discovery.snapshot().await?;
-            retry.retain(|id, _| peers.iter().any(|p| p.id == *id));
-            for peer in peers {
-                // One initiator per pair prevents simultaneous duplicate connections.
-                if peer.id <= self.config.node_id() || self.transport.is_connected(peer.id).await {
-                    continue;
-                }
-                if retry
-                    .get(&peer.id)
-                    .is_some_and(|(when, _)| *when > tokio::time::Instant::now())
-                {
-                    continue;
-                }
-                match self.transport.connect_peer(&peer).await {
-                    Ok(()) => {
-                        retry.remove(&peer.id);
-                    }
-                    Err(e) => {
-                        tracing::debug!("Peer {} is unavailable: {e}", peer.id);
-                        let attempt = retry
-                            .get(&peer.id)
-                            .map_or(0, |(_, n)| *n)
-                            .saturating_add(1)
-                            .min(5);
-                        retry.insert(
-                            peer.id,
-                            (
-                                tokio::time::Instant::now() + Duration::from_secs(1 << attempt),
-                                attempt,
-                            ),
-                        );
-                    }
-                }
-            }
+            discovery_connect_peers(
+                &self.transport,
+                self.config.node_id(),
+                &peers,
+                &mut retry,
+                now,
+            )
+            .await;
         }
     }
     async fn sync_loop(&self, mut incoming: broadcast::Receiver<Message>) -> Result<()> {
