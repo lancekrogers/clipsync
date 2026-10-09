@@ -33,6 +33,7 @@ pub enum Command {
     Status,
     Peers,
     Sync,
+    Copy { text: String },
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
@@ -46,6 +47,7 @@ pub struct Response {
 pub trait Target: Send + Sync {
     async fn peers(&self) -> Vec<Peer>;
     async fn sync(&self) -> Result<usize>;
+    async fn copy_text(&self, text: String) -> Result<usize>;
 }
 #[async_trait::async_trait]
 impl Target for SyncEngine {
@@ -54,6 +56,9 @@ impl Target for SyncEngine {
     }
     async fn sync(&self) -> Result<usize> {
         self.force_sync().await
+    }
+    async fn copy_text(&self, text: String) -> Result<usize> {
+        self.copy_local(text).await
     }
 }
 #[async_trait::async_trait]
@@ -64,6 +69,25 @@ impl Target for TrustAwareSyncEngine {
     async fn sync(&self) -> Result<usize> {
         self.force_sync().await
     }
+    async fn copy_text(&self, text: String) -> Result<usize> {
+        self.copy_local(text).await
+    }
+}
+/// Worst-case JSON string encoding per UTF-8 byte (`\u00XX`).
+const JSON_UTF8_BYTE_EXPANSION: usize = 6;
+/// Copy request fields outside the string payload (version, keys, braces).
+const COPY_REQUEST_FIXED_OVERHEAD: usize = 128;
+/// Status/peers/sync responses and non-copy requests.
+const RESPONSE_FRAME_HEADROOM: usize = 512;
+const MIN_CONTROL_FRAME: usize = 8192;
+
+pub fn max_frame_bytes(config: &Config) -> usize {
+    let max_clipboard = config.clipboard.max_size;
+    let copy_request = COPY_REQUEST_FIXED_OVERHEAD
+        .saturating_add(max_clipboard.saturating_mul(JSON_UTF8_BYTE_EXPANSION));
+    copy_request
+        .max(RESPONSE_FRAME_HEADROOM)
+        .max(MIN_CONTROL_FRAME)
 }
 pub fn socket_path(config: &Config) -> PathBuf {
     use sha2::{Digest, Sha256};
@@ -114,9 +138,13 @@ pub struct Server {
     listener: UnixListener,
     path: PathBuf,
     _lock: fs::File,
+    max_frame: usize,
+    max_clipboard: usize,
 }
 impl Server {
-    pub fn bind(path: PathBuf) -> Result<Self> {
+    pub fn bind(path: PathBuf, config: &Config) -> Result<Self> {
+        let max_frame = max_frame_bytes(config);
+        let max_clipboard = config.clipboard.max_size;
         private_directory(path.parent().context("Socket has no parent")?)?;
         let lock = fs::OpenOptions::new()
             .create(true)
@@ -139,6 +167,8 @@ impl Server {
             listener,
             path,
             _lock: lock,
+            max_frame,
+            max_clipboard,
         })
     }
     pub async fn run(&self, target: &dyn Target) -> Result<()> {
@@ -146,7 +176,7 @@ impl Server {
             let (mut stream, _) = self.listener.accept().await?;
             let result = timeout(Duration::from_secs(3), async {
                 check_peer(&stream)?;
-                let request: Request = read_json(&mut stream).await?;
+                let request: Request = read_json(&mut stream, self.max_frame).await?;
                 let mut response = Response {
                     version: 1,
                     pid: std::process::id(),
@@ -162,10 +192,21 @@ impl Server {
                             Ok(n) => response.queued = Some(n),
                             Err(e) => response.error = Some(e.to_string()),
                         },
+                        Command::Copy { text } => {
+                            if text.len() > self.max_clipboard {
+                                response.error =
+                                    Some("Clipboard exceeds configured size limit".into());
+                            } else {
+                                match target.copy_text(text).await {
+                                    Ok(n) => response.queued = Some(n),
+                                    Err(e) => response.error = Some(e.to_string()),
+                                }
+                            }
+                        }
                         Command::Status | Command::Peers => response.peers = target.peers().await,
                     }
                 }
-                write_json(&mut stream, &response).await
+                write_json(&mut stream, &response, self.max_frame).await
             })
             .await;
             if let Ok(Err(e)) = result {
@@ -179,29 +220,47 @@ impl Drop for Server {
         let _ = fs::remove_file(&self.path);
     }
 }
-async fn read_json<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
+async fn read_json<T: serde::de::DeserializeOwned>(
+    stream: &mut UnixStream,
+    max_frame: usize,
+) -> Result<T> {
     let length = stream.read_u32().await? as usize;
-    if length > 8192 {
-        bail!("Control frame exceeds 8192 bytes");
+    if length > max_frame {
+        bail!("Control frame exceeds {max_frame} bytes");
     }
     let mut data = vec![0; length];
     stream.read_exact(&mut data).await?;
     Ok(serde_json::from_slice(&data)?)
 }
-async fn write_json<T: Serialize>(stream: &mut UnixStream, value: &T) -> Result<()> {
+async fn write_json<T: Serialize>(
+    stream: &mut UnixStream,
+    value: &T,
+    max_frame: usize,
+) -> Result<()> {
     let data = serde_json::to_vec(value)?;
-    if data.len() > 8192 {
-        bail!("Control frame exceeds 8192 bytes");
+    if data.len() > max_frame {
+        bail!("Control frame exceeds {max_frame} bytes");
     }
     stream.write_u32(data.len() as u32).await?;
     stream.write_all(&data).await?;
     Ok(())
 }
-pub async fn request(path: &Path, command: Command) -> Result<Response> {
+fn daemon_unreachable_message() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        "ClipSync daemon is not reachable. Start it with `clipsync start --foreground` using the same `--config` path.".into()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        "ClipSync daemon is not reachable".into()
+    }
+}
+
+pub async fn request(path: &Path, command: Command, max_frame: usize) -> Result<Response> {
     timeout(Duration::from_secs(4), async {
         let mut stream = UnixStream::connect(path)
             .await
-            .context("ClipSync daemon is not reachable")?;
+            .context(daemon_unreachable_message())?;
         check_peer(&stream)?;
         write_json(
             &mut stream,
@@ -209,9 +268,10 @@ pub async fn request(path: &Path, command: Command) -> Result<Response> {
                 version: 1,
                 command,
             },
+            max_frame,
         )
         .await?;
-        let response: Response = read_json(&mut stream).await?;
+        let response: Response = read_json(&mut stream, max_frame).await?;
         if response.version != 1 {
             bail!("Unsupported daemon control protocol");
         }
@@ -222,4 +282,22 @@ pub async fn request(path: &Path, command: Command) -> Result<Response> {
     })
     .await
     .context("Daemon control request timed out")?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_frame_fits_worst_case_copy_request() {
+        let mut config = Config::default();
+        config.clipboard.max_size = 16 * 1024;
+        let text = "\u{1}".repeat(config.clipboard.max_size);
+        let frame = serde_json::to_vec(&Request {
+            version: 1,
+            command: Command::Copy { text },
+        })
+        .unwrap();
+        assert!(frame.len() <= max_frame_bytes(&config));
+    }
 }

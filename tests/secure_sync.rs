@@ -2,6 +2,7 @@ mod support;
 use clipsync::{
     adapters::{ClipboardProviderWrapper, HistoryManager},
     auth::{AuthError, AuthToken, Authenticator, PeerId, PublicKey},
+    clipboard::ClipboardProvider,
     config::Config,
     sync::SyncEngine,
     transport::{
@@ -22,7 +23,10 @@ fn websocket_config() -> WebSocketConfig {
         ..Default::default()
     }
 }
-async fn fixture(id: &Identity, clipboard: &Clipboard) -> (Arc<SyncEngine>, Arc<TransportManager>) {
+async fn fixture<C: ClipboardProvider + Clone + 'static>(
+    id: &Identity,
+    clipboard: &C,
+) -> (Arc<SyncEngine>, Arc<TransportManager>) {
     let mut config = Config::default();
     config.node_id = id.id();
     config.listen_addr = "127.0.0.1:0".into();
@@ -100,6 +104,97 @@ async fn bidirectional_sync_no_echo_revocation_and_reconnect() {
     assert!(ta.connect_peer(&b.peer(addr)).await.is_err() || !tb.is_connected(a.id()).await);
     ea.shutdown().await;
     eb.shutdown().await;
+}
+
+#[tokio::test]
+async fn copy_local_updates_clipboard_and_syncs_without_echo() {
+    let a = Identity::new().await;
+    let b = Identity::new().await;
+    a.trust(&b).await;
+    b.trust(&a).await;
+    let ca = Clipboard::default();
+    let cb = Clipboard::default();
+    let (ea, ta) = fixture(&a, &ca).await;
+    let (eb, tb) = fixture(&b, &cb).await;
+    let la = ea.bind_listener().await.unwrap();
+    let lb = eb.bind_listener().await.unwrap();
+    let addr = lb.local_addr();
+    let ra = ea.clone();
+    let rb = eb.clone();
+    let _a = Task(tokio::spawn(async move { ra.run(la).await }));
+    let _b = Task(tokio::spawn(async move { rb.run(lb).await }));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    ta.connect_peer(&b.peer(addr)).await.unwrap();
+    eventually(async || tb.is_connected(a.id()).await).await;
+    assert_eq!(
+        ea.copy_local("explicit daemon copy".into()).await.unwrap(),
+        1
+    );
+    eventually(async || *cb.text.lock().await == "explicit daemon copy").await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(ca.writes.load(Ordering::SeqCst), 1);
+    assert_eq!(cb.writes.load(Ordering::SeqCst), 1);
+    ea.shutdown().await;
+    eb.shutdown().await;
+}
+
+#[tokio::test]
+async fn copy_local_skips_network_for_sensitive_content() {
+    let a = Identity::new().await;
+    let b = Identity::new().await;
+    a.trust(&b).await;
+    b.trust(&a).await;
+    let ca = Clipboard::default();
+    let cb = Clipboard::default();
+    let (ea, ta) = fixture(&a, &ca).await;
+    let (eb, tb) = fixture(&b, &cb).await;
+    let la = ea.bind_listener().await.unwrap();
+    let lb = eb.bind_listener().await.unwrap();
+    let addr = lb.local_addr();
+    let ra = ea.clone();
+    let rb = eb.clone();
+    let _a = Task(tokio::spawn(async move { ra.run(la).await }));
+    let _b = Task(tokio::spawn(async move { rb.run(lb).await }));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    ta.connect_peer(&b.peer(addr)).await.unwrap();
+    eventually(async || tb.is_connected(a.id()).await).await;
+    let secret = "ghp_1234567890abcdef1234567890abcdef1234";
+    assert_eq!(ea.copy_local(secret.to_string()).await.unwrap(), 0);
+    assert_eq!(*ca.text.lock().await, secret);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_ne!(*cb.text.lock().await, secret);
+    ea.shutdown().await;
+    eb.shutdown().await;
+}
+
+#[tokio::test]
+async fn copy_local_holds_state_lock_while_clipboard_write_is_in_flight() {
+    let a = Identity::new().await;
+    let gated = GatedClipboard::new();
+    let (ea, _) = fixture(&a, &gated).await;
+    let engine = ea.clone();
+    let copy = tokio::spawn(async move { engine.copy_local("held during write".into()).await });
+    eventually(async || gated.set_started()).await;
+    let capture_engine = ea.clone();
+    let capture = tokio::spawn(async move { capture_engine.force_sync().await });
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(!capture.is_finished());
+    gated.release_set();
+    assert_eq!(copy.await.unwrap().unwrap(), 0);
+    let _ = capture.await;
+    assert_eq!(gated.writes(), 1);
+    ea.shutdown().await;
+}
+
+#[tokio::test]
+async fn copy_local_oversize_does_not_touch_clipboard() {
+    let a = Identity::new().await;
+    let ca = Clipboard::default();
+    let (ea, _) = fixture(&a, &ca).await;
+    let oversize = "x".repeat(5_242_881);
+    assert!(ea.copy_local(oversize).await.is_err());
+    assert_eq!(ca.writes.load(Ordering::SeqCst), 0);
+    ea.shutdown().await;
 }
 
 struct Impersonator {

@@ -12,7 +12,7 @@ use std::{
     },
 };
 use tempfile::TempDir;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 pub struct Identity {
     pub dir: TempDir,
     pub auth: Arc<SshAuthenticator>,
@@ -88,6 +88,52 @@ impl ClipboardProvider for Clipboard {
     }
     fn name(&self) -> &str {
         "isolated memory clipboard"
+    }
+    async fn watch(&self) -> Result<ClipboardWatcher, ClipboardError> {
+        Err(ClipboardError::WatchError("not used by poller".into()))
+    }
+}
+
+/// Clipboard whose `set_content` blocks until `proceed` is notified (for lock-order tests).
+#[derive(Clone)]
+pub struct GatedClipboard {
+    inner: Clipboard,
+    set_started: Arc<AtomicBool>,
+    proceed: Arc<Notify>,
+}
+impl GatedClipboard {
+    pub fn new() -> Self {
+        Self {
+            inner: Clipboard::default(),
+            set_started: Arc::new(AtomicBool::new(false)),
+            proceed: Arc::new(Notify::new()),
+        }
+    }
+    pub fn set_started(&self) -> bool {
+        self.set_started.load(Ordering::SeqCst)
+    }
+    pub fn release_set(&self) {
+        self.proceed.notify_one();
+    }
+    pub fn writes(&self) -> usize {
+        self.inner.writes.load(Ordering::SeqCst)
+    }
+}
+#[async_trait::async_trait]
+impl ClipboardProvider for GatedClipboard {
+    async fn get_content(&self) -> Result<ClipboardContent, ClipboardError> {
+        self.inner.get_content().await
+    }
+    async fn set_content(&self, data: &ClipboardContent) -> Result<(), ClipboardError> {
+        self.set_started.store(true, Ordering::SeqCst);
+        self.proceed.notified().await;
+        self.inner.set_content(data).await
+    }
+    async fn clear(&self) -> Result<(), ClipboardError> {
+        self.inner.clear().await
+    }
+    fn name(&self) -> &str {
+        "gated memory clipboard"
     }
     async fn watch(&self) -> Result<ClipboardWatcher, ClipboardError> {
         Err(ClipboardError::WatchError("not used by poller".into()))
