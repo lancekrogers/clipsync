@@ -80,41 +80,49 @@ create_tarball() {
     TARBALL_DIR="$BUILD_DIR/tarball/$APP_NAME-$VERSION"
     rm -rf "$BUILD_DIR/tarball"
     mkdir -p "$TARBALL_DIR/bin"
+    mkdir -p "$TARBALL_DIR/lib"
     mkdir -p "$TARBALL_DIR/share/systemd/user"
     mkdir -p "$TARBALL_DIR/share/doc/$APP_NAME"
     
     # Copy files
     cp "$TARGET_DIR/release/$APP_NAME" "$TARBALL_DIR/bin/"
-    cp "$PROJECT_ROOT/scripts/clipsync.service" "$TARBALL_DIR/share/systemd/user/"
+    cp "$PROJECT_ROOT/scripts/lib/linux_user_service.sh" "$TARBALL_DIR/lib/"
+    cp "$PROJECT_ROOT/scripts/clipsync-user.service" "$TARBALL_DIR/clipsync-user.service"
+    cp "$PROJECT_ROOT/scripts/clipsync-user.service" "$TARBALL_DIR/share/systemd/user/clipsync.service"
     cp "$PROJECT_ROOT/README.md" "$TARBALL_DIR/share/doc/$APP_NAME/" 2>/dev/null || true
     cp "$PROJECT_ROOT/LICENSE"* "$TARBALL_DIR/share/doc/$APP_NAME/" 2>/dev/null || true
     
     # Create install script
     cat > "$TARBALL_DIR/install.sh" <<'EOF'
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-INSTALL_PREFIX="${PREFIX:-/usr/local}"
-SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INSTALL_PREFIX="${PREFIX:-${HOME}/.local}"
+BINARY_DEST="$INSTALL_PREFIX/bin/clipsync"
+
+# shellcheck source=lib/linux_user_service.sh
+source "$SCRIPT_DIR/lib/linux_user_service.sh"
 
 echo "Installing ClipSync to $INSTALL_PREFIX..."
 
-# Install binary
-install -Dm755 bin/clipsync "$INSTALL_PREFIX/bin/clipsync"
+mkdir -p "$(dirname "$BINARY_DEST")"
+clipsync_install_binary "$SCRIPT_DIR/bin/clipsync" "$BINARY_DEST"
 
-# Install systemd service
-mkdir -p "$SYSTEMD_USER_DIR"
-install -Dm644 share/systemd/user/clipsync.service "$SYSTEMD_USER_DIR/clipsync.service"
+if ! clipsync_install_linux_user_service "$BINARY_DEST" 0; then
+    echo "Service installation failed" >&2
+    exit 1
+fi
 
-# Install documentation
-install -Dm644 share/doc/clipsync/* "$INSTALL_PREFIX/share/doc/clipsync/" 2>/dev/null || true
-
-# Reload systemd
-systemctl --user daemon-reload
+DOC_DEST="$INSTALL_PREFIX/share/doc/clipsync"
+mkdir -p "$DOC_DEST"
+if compgen -G "$SCRIPT_DIR/share/doc/clipsync/*" >/dev/null; then
+    install -Dm644 "$SCRIPT_DIR"/share/doc/clipsync/* "$DOC_DEST/" 2>/dev/null || true
+fi
 
 echo "Installation complete!"
-echo "To start ClipSync: systemctl --user start clipsync"
-echo "To enable at boot: systemctl --user enable clipsync"
+echo "Start after graphical login: systemctl --user start clipsync"
+echo "If a legacy system-wide unit exists, review before disabling: sudo systemctl status clipsync"
 EOF
     chmod 755 "$TARBALL_DIR/install.sh"
     
@@ -138,14 +146,14 @@ build_deb() {
     mkdir -p "$DEB_DIR/DEBIAN"
     mkdir -p "$DEB_DIR/usr/bin"
     mkdir -p "$DEB_DIR/usr/share/doc/$APP_NAME"
-    mkdir -p "$DEB_DIR/usr/share/$APP_NAME"
+    mkdir -p "$DEB_DIR/usr/lib/systemd/user"
     
     # Copy binary
     cp "$TARGET_DIR/release/$APP_NAME" "$DEB_DIR/usr/bin/"
     chmod 755 "$DEB_DIR/usr/bin/$APP_NAME"
     
-    # Copy service file
-    cp "$PKG_DIR/debian/clipsync.service" "$DEB_DIR/usr/share/$APP_NAME/"
+    # Copy systemd user unit (enabled per desktop user; not root's user manager)
+    cp "$PKG_DIR/debian/clipsync.service" "$DEB_DIR/usr/lib/systemd/user/clipsync.service"
     
     # Copy documentation
     cp "$PROJECT_ROOT/README.md" "$DEB_DIR/usr/share/doc/$APP_NAME/" 2>/dev/null || true

@@ -463,22 +463,41 @@ impl Config {
         }
     }
 
+    fn default_config_path() -> Result<std::path::PathBuf, ConfigError> {
+        if let Ok(path) = std::env::var("CLIPSYNC_CONFIG") {
+            return Ok(std::path::PathBuf::from(path));
+        }
+
+        let config_dir = if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+            std::path::PathBuf::from(xdg).join("clipsync")
+        } else {
+            dirs::config_dir()
+                .ok_or_else(|| {
+                    ConfigError::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "Could not find config directory",
+                    ))
+                })?
+                .join("clipsync")
+        };
+
+        Ok(config_dir.join("config.toml"))
+    }
+
     /// Generate example configuration file
     pub async fn generate_example_config(force: bool) -> Result<(), ConfigError> {
-        let config = Self::default();
+        Self::generate_example_config_at(&Self::default_config_path()?, force).await
+    }
+
+    /// Initialize a specific config without parsing the old file or requiring an identity.
+    pub async fn generate_example_config_at(
+        config_path: &Path,
+        force: bool,
+    ) -> Result<(), ConfigError> {
         let example_content = Self::generate_example();
-
-        let config_dir = dirs::config_dir()
-            .ok_or_else(|| {
-                ConfigError::Io(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "Could not find config directory",
-                ))
-            })?
-            .join("clipsync");
-
-        std::fs::create_dir_all(&config_dir)?;
-        let config_path = config_dir.join("config.toml");
+        if let Some(parent) = config_path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            std::fs::create_dir_all(parent)?;
+        }
 
         if !force && config_path.exists() {
             return Err(ConfigError::Validation(

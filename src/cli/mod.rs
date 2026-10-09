@@ -115,6 +115,13 @@ pub enum Commands {
         #[arg(long)]
         follow: bool,
     },
+
+    /// Print a per-user systemd unit file for the installed binary (install scripts).
+    #[command(about = "Print systemd user unit for an installed binary path")]
+    PrintUserUnit {
+        #[arg(long)]
+        binary: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -277,7 +284,17 @@ impl CliHandler {
                     self.show_logs(limit).await
                 }
             }
+            Commands::PrintUserUnit { binary } => self.print_user_unit(binary),
         }
+    }
+
+    fn print_user_unit(&self, binary: PathBuf) -> Result<()> {
+        let path = binary.to_string_lossy();
+        crate::service_install::validate_executable_path(&path).map_err(|e| anyhow::anyhow!(e))?;
+        let unit = crate::service_install::render_systemd_user_unit(&path)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        print!("{}", unit);
+        Ok(())
     }
 
     async fn start_daemon(&mut self, foreground: bool) -> Result<()> {
@@ -812,6 +829,83 @@ impl CliHandler {
                 Err(e) => {
                     println!("  ❌ Failed to check daemon status: {}", e);
                     issues_found += 1;
+                }
+            }
+
+            println!("\n🧰 Linux service installation:");
+            if let Some(config_dir) = dirs::config_dir() {
+                let local_unit = config_dir.join("systemd/user/clipsync.service");
+                let user_unit = [
+                    local_unit.clone(),
+                    PathBuf::from("/etc/systemd/user/clipsync.service"),
+                    PathBuf::from("/usr/local/lib/systemd/user/clipsync.service"),
+                    PathBuf::from("/usr/lib/systemd/user/clipsync.service"),
+                    PathBuf::from("/lib/systemd/user/clipsync.service"),
+                ]
+                .into_iter()
+                .find(|path| path.exists())
+                .unwrap_or(local_unit);
+                if user_unit.exists() {
+                    match std::fs::read_to_string(&user_unit) {
+                        Ok(content) => {
+                            let inspection = crate::service_install::inspect_systemd_unit(&content);
+                            if let Some(binary) = inspection.exec_binary {
+                                if std::path::Path::new(&binary).is_file() {
+                                    println!("  ✅ User unit ExecStart binary exists: {}", binary);
+                                } else {
+                                    println!("  ❌ User unit points to missing binary: {}", binary);
+                                    issues_found += 1;
+                                }
+                            } else {
+                                println!(
+                                    "  ❌ Could not parse ExecStart in {}",
+                                    user_unit.display()
+                                );
+                                issues_found += 1;
+                            }
+                            if !inspection.uses_foreground {
+                                println!(
+                                    "  ❌ User unit should run `start --foreground` (Type=simple)"
+                                );
+                                issues_found += 1;
+                            }
+                            if !inspection.orders_after_graphical_session_pre {
+                                println!(
+                                    "  ⚠️  User unit should order After=graphical-session-pre.target"
+                                );
+                            }
+                            if !inspection.wanted_by_graphical_session {
+                                println!(
+                                    "  ⚠️  User unit should use WantedBy=graphical-session.target"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            println!("  ❌ Failed to read {}: {}", user_unit.display(), e);
+                            issues_found += 1;
+                        }
+                    }
+                } else {
+                    println!("  ℹ️  No per-user unit at {}", user_unit.display());
+                }
+
+                for legacy in crate::service_install::legacy_system_unit_paths() {
+                    let path = std::path::Path::new(legacy);
+                    if path.exists() {
+                        println!(
+                            "  ⚠️  Legacy system unit detected at {} (not removed automatically)",
+                            legacy
+                        );
+                        println!(
+                            "      Review manually: sudo systemctl status clipsync; disable only after migrating to the user service"
+                        );
+                    }
+                }
+
+                if let Some(expected) = crate::service_install::default_user_binary_path() {
+                    if expected.exists() {
+                        println!("  ✅ User install binary present: {}", expected.display());
+                    }
                 }
             }
         }
