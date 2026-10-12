@@ -154,6 +154,11 @@ impl TrustAwareSyncEngine {
     pub async fn force_sync(&self) -> Result<usize> {
         self.sync_engine.force_sync().await
     }
+
+    /// Explicit local copy through the daemon clipboard provider.
+    pub async fn copy_local(&self, text: String) -> Result<usize> {
+        self.sync_engine.copy_local(text).await
+    }
 }
 
 /// Helper to set up trust-aware sync with minimal configuration

@@ -96,7 +96,25 @@ history_key = "{directory/'history.key'}"
         assert 'actual desktop' in cli(1, 'history').stdout
         run(['wl-copy', '--type', 'text/plain'] if wayland else ['xclip', '-selection', 'clipboard'], env=environments[0], input=b'after daemon restart')
         wait_for(lambda: paste(1) == 'after daemon restart', 'sync after restart failed')
-        print(f'PASS: two actual {"Wayland" if wayland else "X11"} daemons, OpenSSH identities, non-default ports, automatic discovery, bidirectional clipboard, separate CLI, history reopen, restart/reconnect', flush=True)
+        fixture = 'linux CLI lifetime fixture'
+        result = cli(0, 'copy', fixture)
+        assert result.returncode == 0 and 'Text copied to clipboard' in result.stdout, result.stdout + result.stderr
+        time.sleep(0.7)
+        assert paste(0) == fixture, 'native paste after CLI copy failed'
+        wait_for(lambda: paste(1) == fixture, 'remote sync after CLI copy failed')
+        sentinel = 'clipboard before no-daemon copy'
+        run(['wl-copy', '--type', 'text/plain'] if wayland else ['xclip', '-selection', 'clipboard'], env=environments[0], input=sentinel.encode())
+        daemon_processes[0].terminate()
+        daemon_processes[0].wait(timeout=10)
+        assert cli(0, 'status').returncode != 0
+        result = cli(0, 'copy', 'should not apply without daemon')
+        assert result.returncode != 0 and 'not reachable' in result.stderr, result.stdout + result.stderr
+        time.sleep(0.3)
+        assert paste(0) == sentinel, 'no-daemon copy must not change clipboard'
+        daemon_processes[0] = start(0)
+        wait_for(lambda: cli(0, 'status').returncode == 0, 'daemon 0 did not restart')
+        wait_for(lambda: all('Connected peers: 1' in cli(i, 'peers').stdout for i in range(2)), 'reconnect after daemon 0 restart failed')
+        print(f'PASS: two actual {"Wayland" if wayland else "X11"} daemons, OpenSSH identities, non-default ports, automatic discovery, bidirectional clipboard, separate CLI, history reopen, restart/reconnect, CLI copy lifetime', flush=True)
     except BaseException:
         for log in logs:
             log.flush()
