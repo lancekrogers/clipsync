@@ -29,6 +29,7 @@ pub mod discovery;
 pub mod history;
 // pub mod hotkey; // Removed - we work with system clipboard
 pub mod progress;
+pub mod service_install;
 pub mod setup;
 pub mod sync;
 pub mod transport;

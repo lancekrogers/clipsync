@@ -1,0 +1,17 @@
+[Unit]
+Description=ClipSync - Cross-platform clipboard synchronization
+Documentation=https://github.com/lancekrogers/clipsync
+After=graphical-session-pre.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Replaced by `clipsync print-user-unit` during installation.
+ExecStart=CLIPSYNC_EXEC_START
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target

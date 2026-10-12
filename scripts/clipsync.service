@@ -1,15 +1,16 @@
 [Unit]
 Description=ClipSync - Cross-platform clipboard synchronization
-After=network.target
+Documentation=https://github.com/lancekrogers/clipsync
+After=graphical-session-pre.target
+PartOf=graphical-session.target
 
 [Service]
-Type=forking
-ExecStart=/usr/local/bin/clipsync start
-Restart=always
+Type=simple
+ExecStart=/usr/bin/clipsync start --foreground
+Restart=on-failure
 RestartSec=10
-User=%USER%
-Group=%USER%
-Environment="XDG_RUNTIME_DIR=/run/user/1000"
+StandardOutput=journal
+StandardError=journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=graphical-session.target

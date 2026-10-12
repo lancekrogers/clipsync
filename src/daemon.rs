@@ -266,27 +266,26 @@ pub fn setup_signal_handlers(shutdown_tx: tokio::sync::oneshot::Sender<()>) -> R
     Ok(())
 }
 
-/// Create a systemd service file (for reference)
+pub use crate::service_install::{
+    default_user_binary_path, inspect_systemd_unit, legacy_system_unit_paths,
+    render_systemd_user_unit, systemd_quote_exec_path, systemd_user_exec_start,
+    SystemdUnitInspection,
+};
+
+/// Legacy helper retained for callers expecting a static example unit.
 pub fn generate_systemd_service() -> &'static str {
     r#"[Unit]
-Description=ClipSync - Secure Clipboard Synchronization
-After=network.target
+Description=ClipSync - Cross-platform clipboard synchronization
+After=graphical-session-pre.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/clipsync start --foreground
+ExecStart=/usr/bin/clipsync start --foreground
 Restart=on-failure
 RestartSec=10
-User=%i
-
-# Security hardening
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=%h/.config/clipsync %h/.local/share/clipsync
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 "#
 }

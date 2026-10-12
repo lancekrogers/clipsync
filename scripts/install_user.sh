@@ -1,39 +1,54 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # User-specific installation script (no sudo required)
 
-set -e
+set -euo pipefail
 
 echo "ClipSync User Installation (No sudo required)"
 echo "============================================"
 
-# Detect OS
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 if [[ "$OSTYPE" == "darwin"* ]]; then
     OS="macos"
+elif [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$(uname -s)" == "Linux" ]]; then
+    OS="linux"
 else
-    echo "This user installation script is currently only for macOS"
-    echo "Linux still requires sudo for systemd service installation"
+    echo "Unsupported OS for user installation: $OSTYPE"
     exit 1
 fi
 
-# Create user directories
-echo "Creating user directories..."
-mkdir -p ~/.local/bin
-mkdir -p ~/.config/clipsync
-mkdir -p ~/Library/LaunchAgents
+INSTALL_DIR="${CLIPSYNC_INSTALL_DIR:-${HOME}/.local/bin}"
+BINARY="${INSTALL_DIR}/clipsync"
 
-# Build if not already built
-if [ ! -f "target/release/clipsync" ]; then
-    echo "Building ClipSync..."
-    cargo build --release
+# shellcheck source=lib/linux_user_service.sh
+source "$SCRIPT_DIR/lib/linux_user_service.sh"
+CONFIG_DIR="$(clipsync_config_dir)"
+
+mkdir -p "$INSTALL_DIR"
+mkdir -p "$CONFIG_DIR"
+
+if [[ "$OS" == "macos" ]]; then
+    mkdir -p "${HOME}/Library/LaunchAgents"
 fi
 
-# Copy binary
-echo "Installing binary to ~/.local/bin/..."
-cp target/release/clipsync ~/.local/bin/
+# Build if not already built
+RELEASE_BIN="${CLIPSYNC_BINARY_SOURCE:-${CARGO_TARGET_DIR:-$PROJECT_ROOT/target}/release/clipsync}"
+if [[ ! -f "$RELEASE_BIN" ]]; then
+    if [[ -n "${CLIPSYNC_BINARY_SOURCE:-}" ]]; then
+        echo "Configured binary source is missing: $RELEASE_BIN" >&2
+        exit 1
+    fi
+    echo "Building ClipSync..."
+    (cd "$PROJECT_ROOT" && cargo build --release)
+fi
 
-# Create user-specific LaunchAgent
-echo "Creating LaunchAgent..."
-cat > ~/Library/LaunchAgents/com.clipsync.plist << EOF
+echo "Installing binary to ${INSTALL_DIR}/..."
+clipsync_install_binary "$RELEASE_BIN" "$BINARY"
+
+if [[ "$OS" == "macos" ]]; then
+    echo "Creating LaunchAgent..."
+    cat > "${HOME}/Library/LaunchAgents/com.clipsync.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -42,7 +57,9 @@ cat > ~/Library/LaunchAgents/com.clipsync.plist << EOF
     <string>com.clipsync</string>
     <key>ProgramArguments</key>
     <array>
-        <string>$HOME/.local/bin/clipsync</string>
+        <string>${BINARY}</string>
+        <string>--config</string>
+        <string>${CONFIG_DIR}/config.toml</string>
         <string>start</string>
         <string>--foreground</string>
     </array>
@@ -51,73 +68,62 @@ cat > ~/Library/LaunchAgents/com.clipsync.plist << EOF
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>$HOME/.config/clipsync/clipsync.out</string>
+    <string>${CONFIG_DIR}/clipsync.out</string>
     <key>StandardErrorPath</key>
-    <string>$HOME/.config/clipsync/clipsync.err</string>
+    <string>${CONFIG_DIR}/clipsync.err</string>
     <key>WorkingDirectory</key>
-    <string>$HOME</string>
+    <string>${HOME}</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <string>${INSTALL_DIR}:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
 </dict>
 </plist>
 EOF
 
-# Generate default config if it doesn't exist
-if [ ! -f ~/.config/clipsync/config.toml ]; then
-    echo "Generating default configuration..."
-    ~/.local/bin/clipsync config init > ~/.config/clipsync/config.toml
+    clipsync_ensure_default_config "$BINARY"
+
+    echo ""
+    echo "Loading LaunchAgent..."
+    if launchctl bootstrap "gui/$(id -u)" "${HOME}/Library/LaunchAgents/com.clipsync.plist" 2>/dev/null \
+        || launchctl load "${HOME}/Library/LaunchAgents/com.clipsync.plist" 2>/dev/null; then
+        echo "LaunchAgent loaded"
+    else
+        echo "LaunchAgent written but could not be loaded automatically; use launchctl load manually"
+        exit 2
+    fi
+else
+    clipsync_ensure_default_config "$BINARY"
+
+    echo "Installing per-user systemd unit..."
+    clipsync_install_linux_user_service "$BINARY" 0
+    echo "User service enabled. Start after graphical login with:"
+    echo "  systemctl --user start clipsync"
 fi
 
-# Update PATH in shell config
-echo ""
-echo "Updating PATH in shell configuration..."
-
-# Function to add path to shell config
-add_to_path() {
-    local shell_config=$1
-    local path_line='export PATH="$HOME/.local/bin:$PATH"'
-    
-    if [ -f "$shell_config" ] && [ -w "$shell_config" ]; then
-        if ! grep -q ".local/bin" "$shell_config"; then
-            echo "" >> "$shell_config"
-            echo "# Added by ClipSync installer" >> "$shell_config"
-            echo "$path_line" >> "$shell_config"
-            echo "✓ Updated $shell_config"
-        else
-            echo "✓ PATH already configured in $shell_config"
-        fi
-    elif [ -f "$shell_config" ]; then
-        echo "⚠ Cannot write to $shell_config (permission denied)"
-    fi
-}
-
-# Update various shell configs
-add_to_path ~/.zshrc
-add_to_path ~/.bashrc
-add_to_path ~/.bash_profile
-
-# Load LaunchAgent
-echo ""
-echo "Loading LaunchAgent..."
-launchctl load ~/Library/LaunchAgents/com.clipsync.plist
+if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+    printf 'Add this directory to your PATH: %s\n' "$INSTALL_DIR"
+fi
 
 echo ""
 echo "============================================"
 echo "Installation completed!"
 echo ""
-echo "ClipSync has been installed to: ~/.local/bin/clipsync"
-echo "Configuration file: ~/.config/clipsync/config.toml"
-echo "Logs: ~/.config/clipsync/clipsync.{out,err}"
-echo ""
-echo "To use clipsync command immediately, run:"
-echo "  source ~/.zshrc"
-echo "Or start a new terminal session"
+echo "ClipSync has been installed to: ${BINARY}"
+echo "Configuration file: ${CONFIG_DIR}/config.toml"
+if [[ "$OS" == "linux" ]]; then
+    echo "User systemd unit: $(clipsync_user_unit_path)"
+    echo ""
+    echo "Legacy system units are not removed automatically. Review before disabling:"
+    echo "  sudo systemctl status clipsync"
+else
+    echo "Logs: ${CONFIG_DIR}/clipsync.{out,err}"
+fi
 echo ""
 echo "To check status:"
 echo "  clipsync status"
+echo "  clipsync doctor"
 echo ""
 echo "To uninstall:"
-echo "  ./uninstall_user.sh"
+echo "  ./scripts/uninstall_user.sh"

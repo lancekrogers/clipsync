@@ -3,28 +3,13 @@ set -e
 
 case "$1" in
     configure)
-        # Create config directory if it doesn't exist
-        CONFIG_DIR="$HOME/.config/clipsync"
-        if [ ! -d "$CONFIG_DIR" ]; then
-            mkdir -p "$CONFIG_DIR"
-            chmod 700 "$CONFIG_DIR"
-        fi
-
-        # Copy systemd service file to user directory
-        SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
-        if [ ! -d "$SYSTEMD_USER_DIR" ]; then
-            mkdir -p "$SYSTEMD_USER_DIR"
-        fi
-        
-        cp /usr/share/clipsync/clipsync.service "$SYSTEMD_USER_DIR/"
-        
-        # Reload systemd and enable service
-        systemctl --user daemon-reload
-        systemctl --user enable clipsync.service
-        
-        echo "ClipSync has been installed successfully!"
-        echo "To start the service, run: systemctl --user start clipsync"
-        echo "To check status, run: systemctl --user status clipsync"
+        echo "ClipSync installed the user systemd unit at /usr/lib/systemd/user/clipsync.service."
+        echo "After graphical login, enable it for your user session:"
+        echo "  systemctl --user daemon-reload"
+        echo "  systemctl --user enable --now clipsync"
+        echo ""
+        echo "If a legacy system-wide clipsync.service is still enabled, review it before disabling:"
+        echo "  sudo systemctl status clipsync"
         ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)

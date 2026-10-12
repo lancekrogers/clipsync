@@ -48,9 +48,9 @@ help:
 	@echo "  make lint           Run clippy linter and audit"
 	@echo "  make bench          Run benchmarks"
 	@echo "  make clean          Remove build artifacts"
-	@echo "  make install        Install clipsync to ~/.local/bin (no sudo)"
+	@echo "  make install        Install clipsync to ~/.local/bin with user desktop service"
 	@echo "  make install-user   Same as install (no sudo required)"
-	@echo "  make uninstall      Remove clipsync from system"
+	@echo "  make uninstall      Remove user install (does not alter system-wide units)"
 	@echo "  make package        Create distribution package"
 	@echo "  make build-all      Build for all supported platforms"
 	@echo ""
@@ -107,40 +107,10 @@ bench:
 install-user: release
 	@./scripts/install_user.sh
 
-install: release
-ifeq ($(PLATFORM),macos)
-	mkdir -p ~/.local/bin
-	cp $(RELEASE_DIR)/clipsync ~/.local/bin/
-	cp scripts/com.clipsync.plist ~/Library/LaunchAgents/
-	# Update the plist to use the user-local binary
-	sed -i '' 's|/usr/local/bin/clipsync|$(HOME)/.local/bin/clipsync|g' ~/Library/LaunchAgents/com.clipsync.plist
-	launchctl load ~/Library/LaunchAgents/com.clipsync.plist
-else
-	sudo cp $(RELEASE_DIR)/clipsync /usr/local/bin/
-	# Copy service file and replace placeholders
-	sed "s/%USER%/$(USER)/g" scripts/clipsync.service | sudo tee /etc/systemd/system/clipsync.service > /dev/null
-	# Also update XDG_RUNTIME_DIR to use correct UID
-	sudo sed -i "s|/run/user/1000|/run/user/$$(id -u)|g" /etc/systemd/system/clipsync.service
-	sudo systemctl daemon-reload
-	sudo systemctl enable clipsync
-endif
+install: install-user
 
 uninstall:
-ifeq ($(PLATFORM),macos)
-	launchctl unload ~/Library/LaunchAgents/com.clipsync.plist
-	rm -f ~/Library/LaunchAgents/com.clipsync.plist
-	rm -f ~/.local/bin/clipsync
-else
-	# Stop and disable systemd service if it exists
-	-sudo systemctl stop clipsync 2>/dev/null
-	-sudo systemctl disable clipsync 2>/dev/null
-	-sudo rm -f /etc/systemd/system/clipsync.service
-	# Remove system installation if it exists
-	-sudo rm -f /usr/local/bin/clipsync
-	# Remove user installation if it exists
-	-rm -f ~/.local/bin/clipsync
-	@echo "ClipSync uninstalled from both system and user locations"
-endif
+	@./scripts/uninstall_user.sh
 
 package: release
 	mkdir -p dist/$(PLATFORM)
