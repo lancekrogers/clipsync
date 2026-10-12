@@ -1,5 +1,6 @@
 //! Peer management and tracking
 
+use crate::discovery::addresses::{apply_method_address_update, MethodAddressSnapshot};
 use crate::discovery::types::{DiscoveryEvent, DiscoveryMethod, PeerInfo};
 use anyhow::Result;
 use chrono::Utc;
@@ -30,6 +31,7 @@ struct PeerManagerInner {
 struct PeerEntry {
     info: PeerInfo,
     discovery_method: DiscoveryMethod,
+    method_addresses: HashMap<DiscoveryMethod, MethodAddressSnapshot>,
     first_seen: i64,
     consecutive_failures: u32,
 }
@@ -82,18 +84,39 @@ impl PeerManager {
         let now = Utc::now().timestamp();
 
         let event = if let Some(existing) = peers.get_mut(&peer.id) {
-            // Update existing peer
-            existing.info = peer.clone();
+            existing.info.name = peer.name.clone();
+            existing.info.port = peer.port;
+            existing.info.version = peer.version.clone();
+            existing.info.platform = peer.platform.clone();
+            existing.info.metadata = peer.metadata.clone();
             existing.info.last_seen = now;
+            existing.info.addresses = apply_method_address_update(
+                &mut existing.method_addresses,
+                method,
+                &peer.addresses,
+                peer.port,
+                now,
+            );
+            existing.discovery_method = method;
             existing.consecutive_failures = 0;
-            DiscoveryEvent::PeerUpdated(peer)
+            DiscoveryEvent::PeerUpdated(existing.info.clone())
         } else {
-            // New peer
+            let mut method_addresses = HashMap::new();
+            let addresses = apply_method_address_update(
+                &mut method_addresses,
+                method,
+                &peer.addresses,
+                peer.port,
+                now,
+            );
+            let mut info = peer.clone();
+            info.addresses = addresses;
             peers.insert(
                 peer.id,
                 PeerEntry {
-                    info: peer.clone(),
+                    info,
                     discovery_method: method,
+                    method_addresses,
                     first_seen: now,
                     consecutive_failures: 0,
                 },
@@ -357,5 +380,51 @@ mod tests {
             .unwrap();
 
         assert!(matches!(event, DiscoveryEvent::PeerUpdated(_)));
+    }
+
+    #[tokio::test]
+    async fn mdns_refresh_replaces_old_mdns_addresses_but_keeps_fresh_manual() {
+        let manager = PeerManager::new();
+        let peer_id = Uuid::new_v4();
+        let port = 19484;
+        let manual = create_test_peer(peer_id, "peer");
+        manager
+            .add_peer(manual, DiscoveryMethod::Manual)
+            .await
+            .unwrap();
+
+        let mut mdns_peer = create_test_peer(peer_id, "peer");
+        mdns_peer.addresses = vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 50)),
+            port,
+        )];
+        manager
+            .add_peer(mdns_peer, DiscoveryMethod::Mdns)
+            .await
+            .unwrap();
+
+        let mut stale_mdns = create_test_peer(peer_id, "peer");
+        stale_mdns.addresses = vec![SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 99)),
+            port,
+        )];
+        manager
+            .add_peer(stale_mdns, DiscoveryMethod::Mdns)
+            .await
+            .unwrap();
+
+        let peer = manager.get_peer(peer_id).await.unwrap();
+        assert!(peer.addresses.contains(&SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
+            9090
+        )));
+        assert!(peer.addresses.contains(&SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 99)),
+            port
+        )));
+        assert!(!peer.addresses.contains(&SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(192, 168, 0, 50)),
+            port
+        )));
     }
 }

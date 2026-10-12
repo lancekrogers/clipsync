@@ -1,5 +1,6 @@
 //! Service discovery for finding and connecting to ClipSync instances
 
+pub mod addresses;
 pub mod fallback;
 pub mod mdns;
 pub mod peers;

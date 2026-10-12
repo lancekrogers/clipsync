@@ -1,5 +1,6 @@
 //! Common types for service discovery
 
+use crate::discovery::addresses::{normalize_dial_address, sort_dial_candidates};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use uuid::Uuid;
@@ -51,6 +52,9 @@ pub struct ServiceInfo {
     pub service_type: String,
     /// TXT record data
     pub txt_data: Vec<(String, String)>,
+    /// Daemon listen socket used to filter advertised reachability addresses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_bind: Option<SocketAddr>,
 }
 
 /// Discovery events
@@ -67,7 +71,7 @@ pub enum DiscoveryEvent {
 }
 
 /// Discovery method used to find a peer
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiscoveryMethod {
     /// Found via mDNS/DNS-SD
     Mdns,
@@ -90,6 +94,7 @@ impl Default for ServiceInfo {
                 ("version".to_string(), env!("CARGO_PKG_VERSION").to_string()),
                 ("platform".to_string(), std::env::consts::OS.to_string()),
             ],
+            listen_bind: None,
         }
     }
 }
@@ -188,11 +193,20 @@ impl PeerInfo {
 
     /// Get the best address to connect to (prefer IPv4)
     pub fn best_address(&self) -> Option<SocketAddr> {
-        // First try IPv4
-        self.addresses
-            .iter()
-            .find(|addr| matches!(addr.ip(), IpAddr::V4(_)))
-            .or_else(|| self.addresses.first())
-            .copied()
+        self.connect_candidates().first().copied()
+    }
+
+    /// Ordered unique dial targets for this peer.
+    pub fn connect_candidates(&self) -> Vec<SocketAddr> {
+        let mut addrs = Vec::new();
+        for addr in &self.addresses {
+            if let Some(norm) = normalize_dial_address(*addr, self.port) {
+                if !addrs.contains(&norm) {
+                    addrs.push(norm);
+                }
+            }
+        }
+        sort_dial_candidates(&mut addrs);
+        addrs
     }
 }

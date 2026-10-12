@@ -28,15 +28,62 @@ pub use reconnect::{ReconnectionConfig, ReconnectionManager};
 pub use stream::{ProgressUpdate, StreamChunk, StreamingTransport};
 pub use websocket::{WebSocketConnection, WebSocketListener, WebSocketTransport};
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, RwLock};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnectionDirection {
+    Inbound,
+    Outbound,
+}
+
+fn connection_direction_rank(local_id: Uuid, peer_id: Uuid, direction: ConnectionDirection) -> u8 {
+    let lower_id = if local_id < peer_id {
+        local_id
+    } else {
+        peer_id
+    };
+    let we_are_lower = local_id == lower_id;
+    match (we_are_lower, direction) {
+        (true, ConnectionDirection::Outbound) => 2,
+        (true, ConnectionDirection::Inbound) => 1,
+        (false, ConnectionDirection::Inbound) => 2,
+        (false, ConnectionDirection::Outbound) => 1,
+    }
+}
 
 struct ManagedConnection {
     session: Uuid,
     peer: PeerInfo,
+    direction: ConnectionDirection,
     sender: tokio::sync::mpsc::Sender<Message>,
     task: tokio::task::JoinHandle<()>,
+}
+
+struct DialLease {
+    in_flight: Arc<Mutex<HashSet<Uuid>>>,
+    peer_id: Uuid,
+    released: bool,
+}
+
+impl DialLease {
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.peer_id);
+    }
+}
+
+impl Drop for DialLease {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 impl Drop for ManagedConnection {
     fn drop(&mut self) {
@@ -46,6 +93,7 @@ impl Drop for ManagedConnection {
 
 pub struct TransportManager {
     connections: RwLock<HashMap<Uuid, ManagedConnection>>,
+    dial_in_flight: Arc<Mutex<HashSet<Uuid>>>,
     message_sender: broadcast::Sender<Message>,
     config: TransportConfig,
     auth: Option<Arc<dyn Authenticator>>,
@@ -56,6 +104,7 @@ impl TransportManager {
         let (message_sender, _) = broadcast::channel(64);
         Self {
             connections: RwLock::new(HashMap::new()),
+            dial_in_flight: Arc::new(Mutex::new(HashSet::new())),
             message_sender,
             config,
             auth: None,
@@ -94,7 +143,10 @@ impl TransportManager {
             match listener.accept().await {
                 Ok(connection) => {
                     let id = connection.peer_info().id;
-                    if let Err(e) = self.register_peer_connection(id, connection).await {
+                    if let Err(e) = self
+                        .register_peer_connection(id, connection, ConnectionDirection::Inbound)
+                        .await
+                    {
                         tracing::warn!("Incoming peer rejected: {e}");
                     }
                 }
@@ -107,15 +159,43 @@ impl TransportManager {
         if peer.id == self.node_id || self.is_connected(peer.id).await {
             return Ok(());
         }
-        let connection = WebSocketTransport::connect_to_peer(
-            peer,
-            self.auth()?,
-            self.websocket_config(),
-            self.node_id,
-        )
-        .await?;
-        self.register_peer_connection(peer.id, Box::new(connection))
+        let mut lease = match self.try_acquire_dial_lease(peer.id) {
+            Some(lease) => lease,
+            None => return Ok(()),
+        };
+        let result = async {
+            let connection = WebSocketTransport::connect_to_peer(
+                peer,
+                self.auth()?,
+                self.websocket_config(),
+                self.node_id,
+            )
+            .await?;
+            self.register_peer_connection(
+                peer.id,
+                Box::new(connection),
+                ConnectionDirection::Outbound,
+            )
             .await
+        }
+        .await;
+        lease.release();
+        result
+    }
+    fn try_acquire_dial_lease(&self, peer_id: Uuid) -> Option<DialLease> {
+        let mut in_flight = self
+            .dial_in_flight
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if in_flight.contains(&peer_id) {
+            return None;
+        }
+        in_flight.insert(peer_id);
+        Some(DialLease {
+            in_flight: self.dial_in_flight.clone(),
+            peer_id,
+            released: false,
+        })
     }
     pub async fn connect(&self, _address: &str) -> Result<Box<dyn Connection>> {
         Err(TransportError::Configuration {
@@ -167,25 +247,49 @@ impl TransportManager {
     pub async fn subscribe(&self) -> Result<broadcast::Receiver<Message>> {
         Ok(self.message_sender.subscribe())
     }
-    pub async fn register_peer_connection(
+    pub(crate) async fn register_peer_connection(
         &self,
         peer_id: Uuid,
-        mut connection: Box<dyn Connection>,
+        connection: Box<dyn Connection>,
+        direction: ConnectionDirection,
     ) -> Result<()> {
+        let incoming_rank = connection_direction_rank(self.node_id, peer_id, direction);
         let mut connections = self.connections.write().await;
         connections.retain(|_, c| !c.task.is_finished() && !c.sender.is_closed());
-        if connections.contains_key(&peer_id) {
-            return Ok(());
-        }
-        if connections.len() >= self.config.max_connections {
+        if let Some(existing) = connections.get(&peer_id) {
+            let existing_rank =
+                connection_direction_rank(self.node_id, peer_id, existing.direction);
+            if existing_rank >= incoming_rank {
+                // Closing a socket may wait on I/O; release the registry first.
+                drop(connections);
+                let mut connection = connection;
+                let _ = connection.close().await;
+                return Ok(());
+            }
+        } else if connections.len() >= self.config.max_connections {
             return Err(TransportError::Connection {
                 message: "Connection limit reached".into(),
             });
         }
+        // Arbitration and insertion must share one lock so concurrent inbound/outbound
+        // registrations cannot overwrite the preferred connection after the decision.
+        let replacement = self.spawn_managed_connection(connection, direction);
+        let old = connections.insert(peer_id, replacement);
+        drop(connections);
+        drop(old);
+        Ok(())
+    }
+
+    fn spawn_managed_connection(
+        &self,
+        connection: Box<dyn Connection>,
+        direction: ConnectionDirection,
+    ) -> ManagedConnection {
         let peer = connection.peer_info().clone();
         let (sender, mut commands) = tokio::sync::mpsc::channel(16);
         let messages = self.message_sender.clone();
         let task = tokio::spawn(async move {
+            let mut connection = connection;
             loop {
                 tokio::select! {
                     message = commands.recv() => match message { Some(m) => if connection.send(m).await.is_err() { break; }, None => break },
@@ -194,16 +298,13 @@ impl TransportManager {
             }
             let _ = connection.close().await;
         });
-        connections.insert(
-            peer_id,
-            ManagedConnection {
-                session: Uuid::new_v4(),
-                peer,
-                sender,
-                task,
-            },
-        );
-        Ok(())
+        ManagedConnection {
+            session: Uuid::new_v4(),
+            peer,
+            direction,
+            sender,
+            task,
+        }
     }
     pub async fn shutdown(&self) {
         self.connections.write().await.clear();
@@ -232,7 +333,7 @@ pub enum TransportError {
     Serialization(#[from] serde_json::Error),
 
     /// IO error
-    #[error("CS005: System error: {0}. Check file permissions and available disk space.")]
+    #[error("CS005: System I/O error: {0}")]
     Io(#[from] std::io::Error),
 
     /// Streaming error
