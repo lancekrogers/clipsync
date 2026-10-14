@@ -1,12 +1,12 @@
 //! AES-256-GCM encryption for clipboard history
 
-use aes_gcm::aead::rand_core::RngCore;
 use aes_gcm::{
-    aead::{Aead, AeadCore, KeyInit, OsRng},
+    aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
-use anyhow::{anyhow, Result};
-use argon2::{Argon2, PasswordHasher};
+use anyhow::{anyhow, Context, Result};
+use argon2::Argon2;
+use rand::{rngs::OsRng, TryRngCore};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
@@ -62,7 +62,10 @@ impl Encryptor {
             data = encode_all(&data[..], COMPRESSION_LEVEL)?;
         }
 
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let mut nonce = Nonce::default();
+        OsRng
+            .try_fill_bytes(&mut nonce)
+            .context("Could not generate history encryption nonce")?;
         let ciphertext = self
             .cipher
             .encrypt(&nonce, data.as_ref())
@@ -148,7 +151,9 @@ impl Encryptor {
         fs::create_dir_all(parent)?;
         let temporary = parent.join(format!(".history-key-{}", uuid::Uuid::new_v4()));
         let mut key = [0u8; 32];
-        OsRng.fill_bytes(&mut key);
+        OsRng
+            .try_fill_bytes(&mut key)
+            .context("Could not generate history encryption key")?;
         let result = (|| -> Result<()> {
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
@@ -221,10 +226,12 @@ impl Encryptor {
 
     /// Derive encryption key from password using Argon2id
     pub async fn derive_from_password(password: &str) -> Result<[u8; 32]> {
-        use argon2::password_hash::SaltString;
         use argon2::{Algorithm, Params, Version};
 
-        let salt = SaltString::generate(&mut OsRng);
+        let mut salt = [0u8; 16];
+        OsRng
+            .try_fill_bytes(&mut salt)
+            .context("Could not generate password derivation salt")?;
         let argon2 = Argon2::new(
             Algorithm::Argon2id,
             Version::V0x13,
@@ -232,19 +239,10 @@ impl Encryptor {
                 .map_err(|e| anyhow!("Invalid argon2 params: {}", e))?,
         );
 
-        let hash = argon2
-            .hash_password(password.as_bytes(), &salt)
-            .map_err(|e| anyhow!("Key derivation failed: {}", e))?;
-
-        let hash_bytes = hash.hash.ok_or_else(|| anyhow!("No hash output"))?;
-        let bytes = hash_bytes.as_bytes();
-
-        if bytes.len() != 32 {
-            return Err(anyhow!("Invalid derived key length"));
-        }
-
         let mut key = [0u8; 32];
-        key.copy_from_slice(bytes);
+        argon2
+            .hash_password_into(password.as_bytes(), &salt, &mut key)
+            .map_err(|e| anyhow!("Key derivation failed: {}", e))?;
         Ok(key)
     }
 }
@@ -260,8 +258,9 @@ mod tests {
 
         // Generate a test key
         let mut key = [0u8; 32];
-        use rand::RngCore;
-        OsRng.fill_bytes(&mut key);
+        OsRng
+            .try_fill_bytes(&mut key)
+            .context("Could not generate history encryption key")?;
 
         // Save it to the temp file
         std::fs::write(&key_path, &key)?;
@@ -297,6 +296,62 @@ mod tests {
 
         let decrypted = encryptor.decrypt(&encrypted).unwrap();
         assert_eq!(large_data, decrypted);
+    }
+
+    #[test]
+    fn ciphertext_format_is_compatible_with_independent_aes_gcm() {
+        use ring::aead::{Aad, LessSafeKey, Nonce as RingNonce, UnboundKey, AES_256_GCM};
+        let key = [42; 32];
+        let nonce = [7; 12];
+        let plaintext = b"Previously stored clipboard text";
+        let ring_key = LessSafeKey::new(UnboundKey::new(&AES_256_GCM, &key).unwrap());
+        let mut ciphertext = plaintext.to_vec();
+        ring_key
+            .seal_in_place_append_tag(
+                RingNonce::assume_unique_for_key(nonce),
+                Aad::empty(),
+                &mut ciphertext,
+            )
+            .unwrap();
+        let encryptor = Encryptor::new_for_tests(key).unwrap();
+        let stored = EncryptedData {
+            ciphertext,
+            nonce: nonce.to_vec(),
+            compressed: false,
+        };
+        assert_eq!(encryptor.decrypt(&stored).unwrap(), plaintext);
+
+        let mut encrypted = encryptor.encrypt(plaintext).unwrap();
+        let nonce: [u8; 12] = encrypted.nonce.as_slice().try_into().unwrap();
+        let opened = ring_key
+            .open_in_place(
+                RingNonce::assume_unique_for_key(nonce),
+                Aad::empty(),
+                &mut encrypted.ciphertext,
+            )
+            .unwrap();
+        assert_eq!(opened, plaintext);
+    }
+
+    #[test]
+    fn fresh_nonces_and_authentication_are_preserved() {
+        let encryptor = Encryptor::new_for_tests([42; 32]).unwrap();
+        let mut encrypted = encryptor.encrypt(b"clipboard text").unwrap();
+        let second = encryptor.encrypt(b"clipboard text").unwrap();
+        assert_eq!(encrypted.nonce.len(), 12);
+        assert_ne!(encrypted.nonce, second.nonce);
+        assert_ne!(encrypted.ciphertext, second.ciphertext);
+        assert!(Encryptor::new_for_tests([43; 32])
+            .unwrap()
+            .decrypt(&encrypted)
+            .is_err());
+        encrypted.ciphertext[0] ^= 1;
+        assert!(encryptor.decrypt(&encrypted).is_err());
+        encrypted.ciphertext[0] ^= 1;
+        encrypted.nonce[0] ^= 1;
+        assert!(encryptor.decrypt(&encrypted).is_err());
+        encrypted.nonce.pop();
+        assert!(encryptor.decrypt(&encrypted).is_err());
     }
 
     #[test]

@@ -294,9 +294,9 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
 
         // Create a test encryptor with a fixed key
-        use aes_gcm::aead::{rand_core::RngCore, OsRng};
+        use rand::{rngs::OsRng, TryRngCore};
         let mut key = [0u8; 32];
-        OsRng.fill_bytes(&mut key);
+        OsRng.try_fill_bytes(&mut key)?;
 
         let encryptor = Encryptor::new_for_tests(key)?;
 
