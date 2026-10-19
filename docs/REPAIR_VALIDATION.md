@@ -27,8 +27,28 @@ variable, and the test feature rejects names outside that prefix. Never point
 acceptance runs at the general clipboard. Pair dedicated temporary SSH identities,
 use separate history/config paths, and release the named pasteboard at cleanup.
 
+## Installed Mac–Arch setup
+
+On 2026-10-15, the updated binaries ran as a macOS LaunchAgent and an Arch Linux
+systemd user service. The obsolete Arch root service was stopped and disabled.
+Each device used a dedicated Ed25519 identity and a separate ClipSync authorization
+file containing only the other device. Existing history stores opened successfully,
+and their original keys were preserved.
+
+Both services reported one authenticated peer, and socket inspection confirmed a
+direct IPv4 LAN connection. Restarting the Arch user service and gracefully
+terminating the Mac process each resulted in automatic service/connection recovery.
+Tailscale SSH was used for diagnostic access only; the ClipSync session used LAN
+addresses, and no firewall changes were made.
+
+The user reported the installed setup working on 2026-10-19. This is user-reported
+functional confirmation; the deployment checks above did not read personal clipboard
+contents or write test text. Earlier isolated physical tests covered bidirectional
+transfers and recovery. Initial installed discovery stalled until the Mac service
+was refreshed; the cause remains unproven.
+
 ## Limits
 
-The tested deployment path is foreground operation and graceful termination. Headless Sway establishes data-control behavior, not compatibility with every Wayland compositor. macOS clipboard integration was tested with named pasteboards; no user LaunchAgent was installed and no personal clipboard was changed. An isolated physical Mac/KWin LAN retest on 2026-10-09 passed in both node-ID orderings with Linux inbound connections blocked, including bidirectional transfers and graceful/crash recovery on both hosts. This used the connection and daemon-owned-copy fixes together, private clipboards and temporary identities; installed host services and firewall rules were unchanged. Sleep/wake, graphical login/logout and installed-service migration still need release acceptance. One pre-existing mock-channel test remains ignored; on Linux, the test that writes to the ambient X11 clipboard is also ignored in favor of the isolated desktop harness.
+Headless Sway establishes data-control behavior, not compatibility with every Wayland compositor. Automated macOS clipboard tests use named pasteboards. An isolated physical Mac/KWin LAN retest on 2026-10-09 passed in both node-ID orderings with Linux inbound connections blocked, including bidirectional transfers and graceful/crash recovery on both hosts. This used the connection and daemon-owned-copy fixes together, private clipboards and temporary identities. Installed-service migration and restart recovery are now verified as described above; sleep/wake and graphical login/logout still need release acceptance. One pre-existing mock-channel test remains ignored; on Linux, the test that writes to the ambient X11 clipboard is also ignored in favor of the isolated desktop harness.
 
 Clipboard synchronization is text-only. Delivery is queued rather than acknowledged as applied; history metadata is not encrypted. A dependency emits a future Rust compatibility warning (`proc-macro-error2`); this is not a test failure. No broad dependency upgrade or security-advisory audit was performed.
