@@ -104,7 +104,7 @@ impl Encryptor {
     pub fn compute_checksum(data: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(data);
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 
     #[cfg(test)]
@@ -356,6 +356,15 @@ mod tests {
 
     #[test]
     fn test_checksum() {
+        // Persisted history checksums must retain their lowercase SHA-256 encoding.
+        assert_eq!(
+            Encryptor::compute_checksum(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            Encryptor::compute_checksum(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
         let data = b"test data";
         let checksum1 = Encryptor::compute_checksum(data);
         let checksum2 = Encryptor::compute_checksum(data);
