@@ -159,6 +159,42 @@ impl TrustAwareSyncEngine {
     pub async fn copy_local(&self, text: String) -> Result<usize> {
         self.sync_engine.copy_local(text).await
     }
+
+    pub async fn set_pause(&self, paused: bool) -> Result<crate::sync::EngineRuntime> {
+        self.sync_engine.set_pause(paused).await
+    }
+
+    pub async fn runtime(&self) -> crate::sync::EngineRuntime {
+        self.sync_engine.runtime().await
+    }
+
+    pub async fn note_peer_set(&self, peer_ids: &[uuid::Uuid]) -> u64 {
+        self.sync_engine.note_peer_set(peer_ids).await
+    }
+
+    pub async fn history_copy(&self, id: uuid::Uuid) -> Result<usize> {
+        self.sync_engine.history_copy(id).await
+    }
+
+    pub async fn is_paused(&self) -> bool {
+        self.sync_engine.is_paused().await
+    }
+
+    pub fn instance_id(&self) -> uuid::Uuid {
+        self.sync_engine.instance_id()
+    }
+
+    pub fn history_manager(&self) -> Arc<HistoryManager> {
+        self.sync_engine.history_manager()
+    }
+
+    pub fn config_ref(&self) -> &Config {
+        self.sync_engine.config_ref()
+    }
+
+    pub fn sync_engine(&self) -> Arc<SyncEngine> {
+        Arc::clone(&self.sync_engine)
+    }
 }
 
 /// Helper to set up trust-aware sync with minimal configuration

@@ -3,6 +3,8 @@
 //! This module handles loading, validating, and managing configuration
 //! for the ClipSync service.
 
+pub mod resolution;
+
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -29,6 +31,18 @@ pub enum ConfigError {
     /// Invalid size value
     #[error("Invalid size value: {0}")]
     InvalidSize(String),
+
+    /// Explicit `--config` or `CLIPSYNC_CONFIG` path missing/unreadable (D02).
+    #[error("Missing explicit config at path: {path}")]
+    MissingExplicitConfig { path: PathBuf },
+
+    /// Multiple distinct config files require user choice (D02).
+    #[error("Config conflict across paths: {paths:?}")]
+    ConfigConflict { paths: Vec<PathBuf> },
+
+    /// Other resolution failure
+    #[error("Config resolution failed: {0}")]
+    Resolution(String),
 }
 
 /// Main configuration structure
@@ -288,67 +302,58 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Load configuration from default locations
+    /// Load configuration via the D02 canonical resolver.
     ///
-    /// Checks in order:
-    /// 1. Path from CLIPSYNC_CONFIG environment variable
-    /// 2. ~/.config/clipsync/config.toml
-    /// 3. Creates default config if none exists
+    /// - Missing `CLIPSYNC_CONFIG` / unreadable env path → hard fail
+    /// - Distinct XDG + legacy macOS configs → hard fail (`ConfigConflict`)
+    /// - No files → legacy in-memory defaults (CLI compatibility); companion
+    ///   must use [`resolution::ResolveOutcome::FreshEligible`] / bootstrap instead
     pub fn load() -> Result<Self, ConfigError> {
-        let config_path = Self::find_config_path();
-
-        if let Some(path) = config_path {
-            Self::load_from_path(&path)
-        } else {
-            // No config file found, use defaults and expand paths
-            let mut config = Self::default();
-            config.expand_paths();
-            Ok(config)
-        }
+        let paths = resolution::ResolvePaths::from_process_env()?;
+        resolution::resolve_config(&paths, None).into_config_for_cli()
     }
 
-    /// Load configuration from a specific path
+    /// Load configuration from a specific path.
+    ///
+    /// Missing/unreadable paths fail hard (preserves explicit `--config` behavior
+    /// with D02 correction: no silent fallback).
     pub fn load_from_path(path: &Path) -> Result<Self, ConfigError> {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_file() => {}
+            Ok(_) => {
+                return Err(ConfigError::MissingExplicitConfig {
+                    path: path.to_path_buf(),
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ConfigError::MissingExplicitConfig {
+                    path: path.to_path_buf(),
+                });
+            }
+            Err(e) => return Err(ConfigError::Io(e)),
+        }
         let contents = std::fs::read_to_string(path)?;
         Self::from_toml(&contents)
     }
 
     /// Parse configuration from TOML string
     pub fn from_toml(toml_str: &str) -> Result<Self, ConfigError> {
-        let mut config: Config = toml::from_str(toml_str)?;
-
-        // Expand paths
-        config.expand_paths();
-
-        // Manual validation instead of using validator crate
-        config.validate_config()?;
-
-        // Additional validation
+        let mut config = Self::parse_for_resolve(toml_str)?;
         config.validate_ssh_key()?;
-
         Ok(config)
     }
 
-    /// Find configuration file path
-    fn find_config_path() -> Option<PathBuf> {
-        // Check environment variable first
-        if let Ok(path) = std::env::var("CLIPSYNC_CONFIG") {
-            let path = PathBuf::from(path);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-
-        // Check default location
-        let default_path = dirs::config_dir()
-            .map(|p| p.join("clipsync").join("config.toml"))
-            .filter(|p| p.exists());
-
-        default_path
+    /// Parse + validate schema without requiring the SSH private key to exist.
+    /// Used by the resolver and bootstrap soft-inspect paths.
+    pub fn parse_for_resolve(toml_str: &str) -> Result<Self, ConfigError> {
+        let mut config: Config = toml::from_str(toml_str)?;
+        config.expand_paths();
+        config.validate_config()?;
+        Ok(config)
     }
 
     /// Expand tilde in paths
-    fn expand_paths(&mut self) {
+    pub(crate) fn expand_paths(&mut self) {
         self.auth.ssh_key = expand_path(&self.auth.ssh_key);
         self.auth.authorized_keys = expand_path(&self.auth.authorized_keys);
         self.clipboard.history_db = expand_path(&self.clipboard.history_db);
@@ -454,10 +459,14 @@ impl Config {
         }
     }
 
-    /// Load configuration with optional custom path (async wrapper)
+    /// Load configuration with optional custom path (async wrapper).
+    ///
+    /// `Some(path)` is an explicit override: missing path → [`ConfigError::MissingExplicitConfig`].
     pub async fn load_config(config_path: Option<std::path::PathBuf>) -> Result<Self, ConfigError> {
         if let Some(path) = config_path {
-            Self::load_from_path(&path)
+            let paths = resolution::ResolvePaths::from_process_env()?;
+            resolution::resolve_config(&paths, Some((path, resolution::ExplicitKind::Flag)))
+                .into_config_for_cli()
         } else {
             Self::load()
         }
@@ -509,74 +518,65 @@ impl Config {
         Ok(())
     }
 
-    /// Generate example configuration file
+    /// Dedicated-identity template for companion fresh setup and `config init`.
+    ///
+    /// Uses `id_ed25519_clipsync`, ClipSync-only `authorized_devices`, and an
+    /// explicit `clipboard.history_key` under the canonical config dir (root
+    /// amendment). Does not expand tildes; callers expand on load.
+    pub fn dedicated_identity_template() -> Self {
+        Self {
+            auth: AuthConfig {
+                ssh_key: PathBuf::from("~/.ssh/id_ed25519_clipsync"),
+                authorized_keys: PathBuf::from("~/.config/clipsync/authorized_devices"),
+            },
+            clipboard: ClipboardConfig {
+                history_key: Some(PathBuf::from("~/.config/clipsync/history.key")),
+                ..ClipboardConfig::default()
+            },
+            ..Self::default()
+        }
+    }
+
+    /// Fixture-rooted fresh companion config (explicit history key under config dir).
+    pub fn fresh_companion_template(
+        ssh_key: PathBuf,
+        authorized_devices: PathBuf,
+        history_db: PathBuf,
+        history_key: PathBuf,
+    ) -> Self {
+        Self {
+            auth: AuthConfig {
+                ssh_key,
+                authorized_keys: authorized_devices,
+            },
+            clipboard: ClipboardConfig {
+                history_db,
+                history_key: Some(history_key),
+                ..ClipboardConfig::default()
+            },
+            ..Self::default()
+        }
+    }
+
+    /// Serialize a config to TOML safely (quoted paths/names).
+    pub fn to_toml_string(&self) -> Result<String, ConfigError> {
+        toml::to_string_pretty(self)
+            .map_err(|e| ConfigError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+    }
+
+    /// Generate example configuration file (dedicated-identity template, D02).
     pub fn generate_example() -> String {
-        let config = Config::default();
-        let mut example = toml::to_string_pretty(&config).unwrap();
-
-        // Add comments
-        example = format!(
-            r#"# ClipSync Configuration File
-# Location: ~/.config/clipsync/config.toml
-
-# Network address to listen on
-{}
-
-# Authentication settings
-[auth]
-# SSH private key for peer authentication
-ssh_key = "{}"
-# File containing authorized public keys
-authorized_keys = "{}"
-
-# Clipboard settings
-[clipboard]
-# Maximum clipboard payload size in bytes (5MB default)
-max_size = {}
-# Sync middle-click selection on Linux
-sync_primary = {}
-# Number of clipboard items to keep in history
-history_size = {}
-# Path to history database
-history_db = "{}"
-
-# Hotkey configuration
-[hotkeys]
-# Toggle sync on/off
-toggle_sync = "{}"
-# Show clipboard history
-show_history = "{}"
-# Cycle through history
-cycle_prev = "{}"
-cycle_next = "{}"
-
-# Security settings
-[security]
-# Encryption algorithm
-encryption = "{}"
-# Compression for large payloads
-compression = "{}"
-
-# Logging level (trace, debug, info, warn, error)
-log_level = "{}"
-"#,
-            example.lines().next().unwrap_or(""),
-            config.auth.ssh_key.display(),
-            config.auth.authorized_keys.display(),
-            config.clipboard.max_size,
-            config.clipboard.sync_primary,
-            config.clipboard.history_size,
-            config.clipboard.history_db.display(),
-            config.hotkeys.toggle_sync,
-            config.hotkeys.show_history,
-            config.hotkeys.cycle_prev,
-            config.hotkeys.cycle_next,
-            config.security.encryption,
-            config.security.compression,
-            config.log_level
-        );
-
-        example
+        let config = Self::dedicated_identity_template();
+        let body = config
+            .to_toml_string()
+            .unwrap_or_else(|_| toml::to_string_pretty(&config).unwrap_or_default());
+        format!(
+            "# ClipSync Configuration File\n\
+             # Location: ~/.config/clipsync/config.toml\n\
+             # Dedicated identity + ClipSync-only authorization (D02)\n\
+             # history_key is explicit under the config directory for fresh installs.\n\n\
+             {body}"
+        )
     }
 }
 
@@ -656,5 +656,23 @@ mod tests {
         let example = Config::generate_example();
         assert!(example.contains("ClipSync Configuration"));
         assert!(example.contains("max_size = 5242880"));
+        assert!(example.contains("id_ed25519_clipsync"));
+        assert!(example.contains("authorized_devices"));
+        assert!(example.contains("history.key"));
+        assert!(!example.contains("~/.ssh/id_ed25519\""));
+    }
+
+    #[test]
+    fn dedicated_template_toml_quotes_special_chars() {
+        let mut config = Config::dedicated_identity_template();
+        config.advertise_name = r#"dev"with\slash"#.into();
+        let body = config.to_toml_string().unwrap();
+        let parsed: Config = toml::from_str(&body).unwrap();
+        assert_eq!(parsed.advertise_name, config.advertise_name);
+        assert!(parsed
+            .auth
+            .ssh_key
+            .to_string_lossy()
+            .contains("id_ed25519_clipsync"));
     }
 }

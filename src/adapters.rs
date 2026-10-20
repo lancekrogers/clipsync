@@ -24,7 +24,7 @@ pub struct ClipboardEntry {
     pub checksum: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Peer {
     pub id: Uuid,
     pub hostname: String,
@@ -88,24 +88,9 @@ impl HistoryManager {
 
     pub async fn get_recent_entries(&self, limit: usize) -> Result<Vec<ClipboardEntry>> {
         let entries = self.inner.get_recent(limit).await?;
-
         Ok(entries
             .into_iter()
-            .map(|entry| {
-                let content = match String::from_utf8(entry.content) {
-                    Ok(text) => ClipboardData::Text(text),
-                    Err(_) => ClipboardData::Text("[Binary Data]".to_string()),
-                };
-
-                ClipboardEntry {
-                    id: entry.id,
-                    content,
-                    timestamp: DateTime::from_timestamp(entry.timestamp, 0)
-                        .unwrap_or_else(Utc::now),
-                    source: entry.origin_node,
-                    checksum: entry.checksum,
-                }
-            })
+            .map(history_entry_to_clipboard)
             .collect())
     }
 
@@ -125,24 +110,37 @@ impl HistoryManager {
         let entries = inner_entries
             .into_iter()
             .take(limit)
-            .map(|entry| {
-                let content = match String::from_utf8(entry.content) {
-                    Ok(text) => ClipboardData::Text(text),
-                    Err(_) => ClipboardData::Text("[Binary Data]".to_string()),
-                };
-
-                ClipboardEntry {
-                    id: entry.id,
-                    content,
-                    timestamp: DateTime::from_timestamp(entry.timestamp, 0)
-                        .unwrap_or_else(Utc::now),
-                    source: entry.origin_node,
-                    checksum: entry.checksum,
-                }
-            })
+            .map(history_entry_to_clipboard)
             .collect();
 
         Ok(entries)
+    }
+
+    /// Load one retained entry by UUID. Missing id is `Ok(None)`.
+    pub async fn get_entry(&self, id: Uuid) -> Result<Option<ClipboardEntry>> {
+        Ok(self
+            .inner
+            .get_by_uuid(id)
+            .await?
+            .map(history_entry_to_clipboard))
+    }
+
+    pub fn retention_capacity() -> u32 {
+        crate::history::ClipboardHistory::capacity() as u32
+    }
+}
+
+fn history_entry_to_clipboard(entry: crate::history::HistoryEntry) -> ClipboardEntry {
+    let content = match String::from_utf8(entry.content) {
+        Ok(text) => ClipboardData::Text(text),
+        Err(_) => ClipboardData::Text("[Binary Data]".to_string()),
+    };
+    ClipboardEntry {
+        id: entry.id,
+        content,
+        timestamp: DateTime::from_timestamp(entry.timestamp, 0).unwrap_or_else(Utc::now),
+        source: entry.origin_node,
+        checksum: entry.checksum,
     }
 }
 

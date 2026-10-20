@@ -76,9 +76,19 @@ impl ClipboardHistory {
         self.db.get_by_index(index, &self.encryptor).await
     }
 
+    /// Get a retained entry by UUID. Missing id is `Ok(None)`.
+    pub async fn get_by_uuid(&self, id: Uuid) -> Result<Option<HistoryEntry>> {
+        self.db.get_by_uuid(id, &self.encryptor).await
+    }
+
     /// Search text entries for matching content
     pub async fn search(&self, query: &str) -> Result<Vec<HistoryEntry>> {
         self.db.search(query, &self.encryptor).await
+    }
+
+    /// Store retention capacity (matches DB trigger).
+    pub fn capacity() -> usize {
+        database::HISTORY_LIMIT
     }
 
     /// Clear all history entries

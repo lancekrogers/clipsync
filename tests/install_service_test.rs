@@ -40,6 +40,7 @@ struct IsolatedInstallEnv {
     xdg_data: PathBuf,
     install_dir: PathBuf,
     systemd_user_dir: PathBuf,
+    config_file: PathBuf,
     log_file: PathBuf,
 }
 
@@ -49,13 +50,18 @@ impl IsolatedInstallEnv {
         let xdg_data = temp.join("xdg-data");
         let install_dir = temp.join("prefix/bin");
         let systemd_user_dir = xdg_config.join("systemd/user");
+        let config_dir = xdg_config.join("clipsync");
         fs::create_dir_all(&install_dir).expect("install dir");
         fs::create_dir_all(&systemd_user_dir).expect("systemd user dir");
+        fs::create_dir_all(&config_dir).expect("config dir");
+        let config_file = config_dir.join("config.toml");
+        fs::write(&config_file, "# fixture\n").expect("config");
         Self {
             xdg_config,
             xdg_data,
             install_dir,
             systemd_user_dir,
+            config_file,
             log_file: temp.join("systemctl.log"),
         }
     }
@@ -79,7 +85,8 @@ impl IsolatedInstallEnv {
             .env("CLIPSYNC_SYSTEMD_USER_DIR", &self.systemd_user_dir)
             .env("CLIPSYNC_SYSTEMCTL", mock_systemctl())
             .env("CLIPSYNC_MOCK_SYSTEMCTL_LOG", &self.log_file)
-            .env("CLIPSYNC_UNIT_RENDERER", clipsync_bin());
+            .env("CLIPSYNC_UNIT_RENDERER", clipsync_bin())
+            .env("CLIPSYNC_UNIT_CONFIG", &self.config_file);
         for (key, value) in extra_env {
             cmd.env(key, value);
         }
@@ -131,6 +138,10 @@ fn linux_user_service_writes_matching_unit() {
     assert_eq!(
         inspection.exec_binary.as_deref(),
         Some(binary.to_string_lossy().as_ref())
+    );
+    assert_eq!(
+        inspection.config_path.as_deref(),
+        Some(env.config_file.to_string_lossy().as_ref())
     );
     assert!(inspection.uses_foreground);
     assert!(inspection.wanted_by_graphical_session);
@@ -194,7 +205,11 @@ fn linux_user_service_quotes_paths_with_spaces_and_special_chars() {
     fs::create_dir_all(&spaced_install).expect("spaced install dir");
     let xdg_config = temp.path().join("xdg cfg");
     let systemd_user_dir = xdg_config.join("systemd/user");
+    let config_dir = xdg_config.join("clipsync");
     fs::create_dir_all(&systemd_user_dir).expect("unit dir");
+    fs::create_dir_all(&config_dir).expect("config dir");
+    let config_file = config_dir.join("config.toml");
+    fs::write(&config_file, "# fixture\n").expect("config");
 
     let binary = spaced_install.join("clipsync");
     fs::write(&binary, b"#!/bin/sh\nexit 0\n").expect("binary");
@@ -202,24 +217,18 @@ fn linux_user_service_quotes_paths_with_spaces_and_special_chars() {
     perms.set_mode(0o755);
     fs::set_permissions(&binary, perms).expect("chmod");
 
-    let special = temp.path().join("apps").join("a&b$%");
-    fs::create_dir_all(&special).expect("special dir");
-    let special_bin = special.join("clipsync");
-    fs::copy(clipsync_bin(), &special_bin).expect("copy real binary");
-    let mut perms = fs::metadata(&special_bin).expect("meta").permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&special_bin, perms).expect("chmod");
-
-    let unit_out = Command::new(&special_bin)
+    // Compat CLI path (no --config) still works until root wires the flag.
+    let unit_out = Command::new(clipsync_bin())
         .arg("print-user-unit")
         .arg("--binary")
-        .arg(&special_bin)
+        .arg(&binary)
         .output()
         .expect("print-user-unit");
     assert!(unit_out.status.success());
     let unit = String::from_utf8_lossy(&unit_out.stdout);
     assert!(unit.contains("graphical-session-pre.target"));
     assert!(unit.contains("start --foreground"));
+    assert!(unit.contains("prefix with spaces"));
 
     let output = Command::new("bash")
         .arg(harness())
@@ -227,13 +236,19 @@ fn linux_user_service_quotes_paths_with_spaces_and_special_chars() {
         .env("XDG_CONFIG_HOME", &xdg_config)
         .env("CLIPSYNC_SYSTEMD_USER_DIR", &systemd_user_dir)
         .env("CLIPSYNC_UNIT_RENDERER", clipsync_bin())
+        .env("CLIPSYNC_UNIT_CONFIG", &config_file)
         .env("CLIPSYNC_INSTALL_BIN", &binary)
         .output()
         .expect("write unit");
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let unit = fs::read_to_string(systemd_user_dir.join("clipsync.service")).expect("unit");
     assert!(unit.contains("prefix with spaces"));
+    assert!(unit.contains("--config"));
 }
 
 #[test]

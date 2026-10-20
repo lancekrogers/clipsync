@@ -21,6 +21,35 @@ The repaired transport uses protocol **2.0.0**: update both devices together. It
 
 Images, RTF synchronization, global hotkeys, and primary-selection configuration are not supported by the repaired sync engine. Sensitive-content filtering is a heuristic and can suppress ordinary text; it is not a guarantee that every secret will be detected.
 
+## Desktop and terminal companions
+
+The experimental Rust desktop app and `clipsync tui` share **Overview, Devices,
+History, and Settings**. History shows actual saved copies, their source and time;
+select one to read it and copy it again. The daemon remains the sole clipboard
+owner, so closing either interface leaves syncing running.
+
+![Desktop clipboard history using isolated test data](docs/assets/companion-history.png)
+
+The desktop uses native macOS window controls with a blue/teal interface. Both
+clients support setup inspection, user-service controls, pause/resume and device
+authorization. Adding a device uses a temporary LAN enrollment window and full
+fingerprint comparison on **both** computers; it needs no Tailscale or SSH session.
+Discovery alone never authorizes a device.
+
+Build the companions with Rust 1.95 or newer:
+
+```sh
+cargo +1.95.0 build --locked --workspace --features tui
+./target/debug/clipsync-desktop
+./target/debug/clipsync tui
+```
+
+Existing configurations are inspected before changes. If multiple configurations
+conflict, choose one explicitly. See [companion setup, packaging and recovery](docs/COMPANION.md).
+See [verification and release gates](docs/COMPANION_ACCEPTANCE.md) for the isolated checks.
+These are development builds; public macOS signing/notarization and physical
+login/logout and sleep/wake acceptance remain release gates.
+
 ## Install and pair
 
 From the repository checkout on each device, build and install with a current stable Rust toolchain:

@@ -1,3 +1,8 @@
+[workspace]
+members = [".", "crates/desktop"]
+default-members = ["."]
+resolver = "2"
+
 [package]
 name = "clipsync"
 version = "0.1.0"
@@ -46,6 +51,7 @@ mdns-sd = "0.13"
 if-addrs = "0.15"
 
 # CLI
+ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29"], optional = true }
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"
 global-hotkey = "0.8"
@@ -112,6 +118,7 @@ pretty_assertions = "1.4"
 
 [features]
 default = []
+tui = ["dep:ratatui"]
 integration-tests = []
 cargo-clippy = []
 
@@ -133,3 +140,6 @@ name = "clipsync"
 path = "src/lib.rs"
 
 # Benchmarks removed temporarily
+[[example]]
+name = "companion_fixture"
+required-features = ["integration-tests"]

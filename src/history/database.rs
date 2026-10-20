@@ -11,7 +11,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 const SCHEMA_VERSION: u32 = 1;
-const HISTORY_LIMIT: usize = 20;
+/// Hard retention limit enforced by the INSERT trigger (`OFFSET 20`).
+pub const HISTORY_LIMIT: usize = 20;
 
 /// SQLite database wrapper for clipboard history storage
 pub struct HistoryDatabase {
@@ -204,6 +205,29 @@ impl HistoryDatabase {
         entry
     }
 
+    /// Get a retained entry by UUID. Missing id is `Ok(None)` — never falls back to another row.
+    pub async fn get_by_uuid(
+        &self,
+        id: Uuid,
+        encryptor: &Encryptor,
+    ) -> Result<Option<HistoryEntry>> {
+        let conn = self.conn.lock().await;
+        let entry = conn
+            .query_row(
+                "SELECT uuid, content, content_type, content_size, checksum, timestamp, origin_node, iv, compressed
+                 FROM clipboard_history
+                 WHERE uuid = ?",
+                params![id.to_string()],
+                |row| Ok(self.row_to_entry(row, encryptor)),
+            )
+            .optional()?;
+        match entry {
+            Some(Ok(entry)) => Ok(Some(entry)),
+            Some(Err(e)) => Err(e),
+            None => Ok(None),
+        }
+    }
+
     /// Search for entries containing query text
     pub async fn search(&self, query: &str, encryptor: &Encryptor) -> Result<Vec<HistoryEntry>> {
         let conn = self.conn.lock().await;
@@ -373,5 +397,26 @@ mod tests {
 
         let results = db.search("world", &encryptor).await.unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_by_uuid_found_and_missing() {
+        let (db, encryptor, _temp_dir) = setup_test_db().await.unwrap();
+        let id = Uuid::new_v4();
+        let content = ClipboardContent {
+            id,
+            content: b"by-uuid".to_vec(),
+            content_type: "text/plain".to_string(),
+            timestamp: Utc::now().timestamp(),
+            origin_node: Uuid::new_v4(),
+        };
+        db.insert(&content, &encryptor).await.unwrap();
+        let found = db.get_by_uuid(id, &encryptor).await.unwrap().unwrap();
+        assert_eq!(found.content, b"by-uuid");
+        assert!(db
+            .get_by_uuid(Uuid::new_v4(), &encryptor)
+            .await
+            .unwrap()
+            .is_none());
     }
 }

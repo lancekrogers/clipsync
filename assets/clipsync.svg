@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="ClipSync">
+  <rect width="128" height="128" rx="28" fill="#1B4F72"/>
+  <rect x="34" y="22" width="60" height="84" rx="10" fill="#F4F8FB" stroke="#D6E4F0" stroke-width="4"/>
+  <rect x="48" y="14" width="32" height="18" rx="6" fill="#5DADE2"/>
+  <rect x="46" y="48" width="36" height="8" rx="3" fill="#2874A6"/>
+  <rect x="46" y="64" width="36" height="8" rx="3" fill="#2874A6"/>
+  <rect x="46" y="80" width="24" height="8" rx="3" fill="#1ABC9C"/>
+</svg>

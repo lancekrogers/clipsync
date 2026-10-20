@@ -47,6 +47,10 @@ pub enum AuthError {
     /// Crypto error
     #[error("Cryptography error: {0}")]
     CryptoError(String),
+
+    /// Durable trust write aborted before publish (cancel/expiry won).
+    #[error("Trust commit aborted: {0}")]
+    CommitAborted(String),
 }
 
 /// Authentication trait for peer authentication

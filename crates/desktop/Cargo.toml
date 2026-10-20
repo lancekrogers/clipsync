@@ -1,0 +1,22 @@
+[package]
+name = "clipsync-desktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+description = "Native desktop companion for ClipSync"
+
+[dependencies]
+clipsync = { path = "../.." }
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "default_fonts", "glow", "wayland", "x11"] }
+clap = { version = "4.5", features = ["derive"] }
+uuid = "1.17"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tray-icon = { version = "=0.26.1", default-features = false }
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "=0.26.1", default-features = false, features = ["ksni"] }
+
+[features]
+# Only isolated UI harnesses may enable event injection / state inspection.
+ui-test = ["eframe/inspection"]

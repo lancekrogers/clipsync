@@ -105,3 +105,7 @@ scripts/local-*.sh
 # Rust
 **/*.rs.bk
 *.pdb
+
+# Local companion build and acceptance helpers
+/target-package/
+__pycache__/

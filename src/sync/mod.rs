@@ -35,7 +35,26 @@ struct SyncState {
     observed: Option<String>,
     pending: Option<Message>,
     queued_sessions: HashMap<Uuid, Uuid>,
+    /// Session-scoped; daemon start always leaves this false.
+    paused: bool,
+    /// Monotonic for clients within this `instance_id` only.
+    generation: u64,
+    /// Last peer set advertised via control (for generation bumps).
+    last_peer_ids: Vec<Uuid>,
 }
+
+/// Runtime snapshot for the control plane (not a wire DTO).
+#[derive(Debug, Clone)]
+pub struct EngineRuntime {
+    pub instance_id: Uuid,
+    pub state_generation: u64,
+    pub paused: bool,
+    pub outbound_pending: bool,
+    pub node_id: Uuid,
+    pub max_clipboard_bytes: usize,
+    pub history_capacity: u32,
+}
+
 pub struct SyncEngine {
     config: Arc<Config>,
     clipboard: Arc<ClipboardProviderWrapper>,
@@ -44,6 +63,7 @@ pub struct SyncEngine {
     transport: Arc<TransportManager>,
     state: Mutex<SyncState>,
     events: broadcast::Sender<SyncEvent>,
+    instance_id: Uuid,
 }
 impl SyncEngine {
     pub fn new(
@@ -73,7 +93,93 @@ impl SyncEngine {
             transport,
             state: Mutex::new(SyncState::default()),
             events,
+            instance_id: Uuid::new_v4(),
         }
+    }
+
+    pub fn instance_id(&self) -> Uuid {
+        self.instance_id
+    }
+
+    pub fn history_manager(&self) -> Arc<HistoryManager> {
+        Arc::clone(&self.history)
+    }
+
+    pub fn config_ref(&self) -> &Config {
+        &self.config
+    }
+
+    /// Authoritative pause flag and generation for control Status/SetPause.
+    pub async fn runtime(&self) -> EngineRuntime {
+        let state = self.state.lock().await;
+        EngineRuntime {
+            instance_id: self.instance_id,
+            state_generation: state.generation,
+            paused: state.paused,
+            outbound_pending: state.pending.is_some(),
+            node_id: self.config.node_id(),
+            max_clipboard_bytes: self.config.clipboard.max_size,
+            history_capacity: HistoryManager::retention_capacity(),
+        }
+    }
+
+    /// Note peer-set changes for `state_generation` (same instance only).
+    pub async fn note_peer_set(&self, peer_ids: &[Uuid]) -> u64 {
+        let mut state = self.state.lock().await;
+        let mut sorted = peer_ids.to_vec();
+        sorted.sort_unstable();
+        if sorted != state.last_peer_ids {
+            state.last_peer_ids = sorted;
+            state.generation = state.generation.saturating_add(1);
+        }
+        state.generation
+    }
+
+    /// Enter or leave pause. Resume baselines `observed` under the state lock before unpausing.
+    /// Failed clipboard read on resume leaves the daemon paused.
+    ///
+    /// Clearing `pending` / `queued_sessions` invalidates not-yet-sent outbound queue only.
+    /// Traffic already handed to the OS clipboard or peer transport cannot be recalled.
+    pub async fn set_pause(&self, paused: bool) -> Result<EngineRuntime> {
+        if paused {
+            let mut state = self.state.lock().await;
+            if !state.paused {
+                state.paused = true;
+                state.pending = None;
+                state.queued_sessions.clear();
+                state.generation = state.generation.saturating_add(1);
+            }
+        } else {
+            let mut state = self.state.lock().await;
+            if state.paused {
+                let text = match self.clipboard.get_text().await {
+                    Ok(text) => text,
+                    Err(e) => {
+                        bail!("Resume failed: could not read clipboard ({e})");
+                    }
+                };
+                state.observed = Some(Encryptor::compute_checksum(text.as_bytes()));
+                state.paused = false;
+                state.generation = state.generation.saturating_add(1);
+            }
+        }
+        Ok(self.runtime_locked(&*self.state.lock().await))
+    }
+
+    fn runtime_locked(&self, state: &SyncState) -> EngineRuntime {
+        EngineRuntime {
+            instance_id: self.instance_id,
+            state_generation: state.generation,
+            paused: state.paused,
+            outbound_pending: state.pending.is_some(),
+            node_id: self.config.node_id(),
+            max_clipboard_bytes: self.config.clipboard.max_size,
+            history_capacity: HistoryManager::retention_capacity(),
+        }
+    }
+
+    fn bump_generation(state: &mut SyncState) {
+        state.generation = state.generation.saturating_add(1);
     }
     pub async fn bind_listener(&self) -> Result<WebSocketListener> {
         Ok(self.transport.listener(self.config.socket_addr()?).await?)
@@ -158,6 +264,12 @@ impl SyncEngine {
     }
     async fn capture(&self, force: bool) -> Result<usize> {
         let mut state = self.state.lock().await;
+        if state.paused {
+            if force {
+                bail!("Sync paused");
+            }
+            return Ok(0);
+        }
         let text = self.clipboard.get_text().await?;
         self.admit(&text)?;
         let checksum = Encryptor::compute_checksum(text.as_bytes());
@@ -182,6 +294,7 @@ impl SyncEngine {
             checksum: checksum.clone(),
         };
         self.history.add_entry(&entry).await?;
+        Self::bump_generation(&mut state);
         state.clock = clock;
         state.last_order = Some((clock, self.config.node_id(), id));
         state.observed = Some(checksum.clone());
@@ -235,6 +348,11 @@ impl SyncEngine {
         if message.message_type != MessageType::ClipboardData {
             return Ok(());
         }
+        // While paused: drop apply-side effects (no clipboard, history, or order update).
+        // Transport may still have accepted the frame for session health; it cannot be recalled.
+        if self.state.lock().await.paused {
+            return Ok(());
+        }
         let MessagePayload::Clipboard(data) = message.payload else {
             bail!("Invalid clipboard message");
         };
@@ -262,6 +380,9 @@ impl SyncEngine {
         // Capture a local change that happened between monitor ticks before admitting remote data.
         let _ = self.capture(false).await;
         let mut state = self.state.lock().await;
+        if state.paused {
+            return Ok(());
+        }
         let order = (message.sequence, origin, id);
         if state.last_order.is_some_and(|last| order <= last) {
             return Ok(());
@@ -280,6 +401,7 @@ impl SyncEngine {
             checksum,
         };
         self.history.add_entry(&entry).await?;
+        Self::bump_generation(&mut state);
         let _ = self.events.send(SyncEvent {
             timestamp: entry.timestamp,
             source_peer: origin,
@@ -306,6 +428,7 @@ impl SyncEngine {
         self.capture(true).await
     }
     /// Apply an explicit local copy through the daemon-owned clipboard provider.
+    /// While paused: local pasteboard only (no history append, no outbound).
     pub async fn copy_local(&self, text: String) -> Result<usize> {
         if text.len() > self.config.clipboard.max_size {
             bail!("Clipboard exceeds configured size limit");
@@ -315,8 +438,8 @@ impl SyncEngine {
         let checksum = Encryptor::compute_checksum(text.as_bytes());
         let mut state = self.state.lock().await;
         self.clipboard.set_text(&text).await?;
-        if !forward {
-            state.observed = Some(checksum.clone());
+        if state.paused || !forward {
+            state.observed = Some(checksum);
             state.pending = None;
             state.queued_sessions.clear();
             return Ok(0);
@@ -335,6 +458,7 @@ impl SyncEngine {
             checksum: checksum.clone(),
         };
         self.history.add_entry(&entry).await?;
+        Self::bump_generation(&mut state);
         state.observed = Some(checksum.clone());
         state.clock = clock;
         state.last_order = Some((clock, self.config.node_id(), id));
@@ -360,6 +484,21 @@ impl SyncEngine {
             entry,
         });
         Ok(queued)
+    }
+
+    /// Load history by retained UUID and run the same path as an explicit local copy.
+    pub async fn history_copy(&self, id: Uuid) -> Result<usize> {
+        let entry = self
+            .history
+            .get_entry(id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("History entry not found"))?;
+        let ClipboardData::Text(text) = entry.content;
+        self.copy_local(text).await
+    }
+
+    pub async fn is_paused(&self) -> bool {
+        self.state.lock().await.paused
     }
 }
 fn now_millis() -> u64 {

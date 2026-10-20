@@ -188,37 +188,123 @@ impl SshAuthenticator {
         self.trust_manager = Some(trust_manager);
     }
 
-    /// Add a trusted peer's public key to authorized_keys
+    /// Add a trusted peer's public key to authorized_keys.
+    /// Uses the shared flock + atomic rename path so concurrent CLI/daemon
+    /// updates cannot lose unrelated entries.
     pub async fn add_trusted_peer(
         &self,
         openssh_key: &str,
         comment: Option<String>,
     ) -> Result<(), AuthError> {
-        let mut authorized_keys = self.authorized_keys.write().await;
-        authorized_keys.add_key_from_openssh(openssh_key, comment)?;
+        self.add_trusted_peer_with_commit_hooks(openssh_key, comment, || Ok(()), || {}, || {})
+            .await
+    }
 
-        // Save to file
-        authorized_keys
-            .save_to_file(&self.config.authorized_keys_path)
-            .await?;
+    /// Add a trusted peer with pre-publish and post-save hooks under the flock.
+    ///
+    /// `before_mutate` runs under flock before any key change (deadline/cancel).
+    /// `after_save` runs under flock only after durable rename (point of no return).
+    /// `on_save_fail` reopens a commit attempt if the rename fails.
+    pub async fn add_trusted_peer_with_commit_hooks<B, A, E>(
+        &self,
+        openssh_key: &str,
+        comment: Option<String>,
+        before_mutate: B,
+        after_save: A,
+        on_save_fail: E,
+    ) -> Result<(), AuthError>
+    where
+        B: FnOnce() -> Result<(), AuthError> + Send + 'static,
+        A: FnOnce() + Send + 'static,
+        E: FnOnce() + Send + 'static,
+    {
+        let path = self.config.authorized_keys_path.clone();
+        let openssh_key = openssh_key.to_string();
+        let comment = sanitize_authorized_comment(comment)?;
+        // Hold in-memory write lock across the file RMW so readers see a
+        // consistent snapshot and lost updates cannot race this process.
+        let mut guard = self.authorized_keys.write().await;
+        let updated = crate::auth::AuthorizedKeys::update_file_with_hooks(
+            &path,
+            move |keys| {
+                before_mutate()?;
+                keys.add_key_from_openssh(&openssh_key, comment)?;
+                Ok(keys.clone_keys())
+            },
+            after_save,
+            on_save_fail,
+        )
+        .await?;
+        *guard = updated;
         Ok(())
     }
 
-    /// Remove a peer from authorized_keys
+    /// Remove a peer from authorized_keys (offline revoke). Preserves unrelated pins.
     pub async fn remove_peer(&self, fingerprint: &str) -> Result<bool, AuthError> {
-        let mut authorized_keys = self.authorized_keys.write().await;
-        let removed = authorized_keys.remove_key_by_fingerprint(fingerprint);
-
-        if removed {
-            // Save to file
-            authorized_keys
-                .save_to_file(&self.config.authorized_keys_path)
-                .await?;
-        }
-
+        let path = self.config.authorized_keys_path.clone();
+        let fingerprint = fingerprint.to_string();
+        let mut guard = self.authorized_keys.write().await;
+        let (removed, updated) = crate::auth::AuthorizedKeys::update_file(&path, move |keys| {
+            let removed = keys.remove_key_by_fingerprint(&fingerprint);
+            Ok((removed, keys.clone_keys()))
+        })
+        .await?;
+        *guard = updated;
         Ok(removed)
     }
+
+    /// Snapshot of pinned devices for inventory / TrustedDevices IPC.
+    /// Re-reads disk so CLI `auth add|remove` in another process is visible.
+    pub async fn list_trusted_devices(&self) -> Result<Vec<(String, Option<String>)>, AuthError> {
+        let keys = self.reload_authorized_keys_fail_closed().await?;
+        Ok(keys
+            .list_keys()
+            .iter()
+            .map(|k| (k.public_key.fingerprint(), k.comment.clone()))
+            .collect())
+    }
+
+    /// Reload pins from disk under the write lock (after external update_file).
+    pub async fn reload_authorized_keys(&self) -> Result<(), AuthError> {
+        let _ = self.reload_authorized_keys_fail_closed().await?;
+        Ok(())
+    }
+
+    /// Cross-process coherent reload. Unreadable/invalid store fails closed.
+    async fn reload_authorized_keys_fail_closed(
+        &self,
+    ) -> Result<crate::auth::AuthorizedKeys, AuthError> {
+        let loaded =
+            crate::auth::AuthorizedKeys::load_from_file(&self.config.authorized_keys_path).await?;
+        *self.authorized_keys.write().await = loaded.clone_keys();
+        Ok(loaded)
+    }
 }
+
+/// Strip CR/LF and control bytes from authorized_keys comments; bound label size.
+/// Rejects comments that would inject extra authorization lines.
+pub fn sanitize_authorized_comment(comment: Option<String>) -> Result<Option<String>, AuthError> {
+    let Some(raw) = comment else {
+        return Ok(None);
+    };
+    if raw.bytes().any(|b| b == b'\n' || b == b'\r' || b == 0) {
+        return Err(AuthError::InvalidKeyFormat(
+            "authorized_keys comment must not contain CR/LF/NUL".into(),
+        ));
+    }
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_COMMENT_CHARS)
+        .collect();
+    if cleaned.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(cleaned))
+    }
+}
+
+const MAX_COMMENT_CHARS: usize = 128;
 
 #[async_trait]
 impl Authenticator for SshAuthenticator {
@@ -230,15 +316,14 @@ impl Authenticator for SshAuthenticator {
             .pkcs8())
     }
     async fn trusted_keys(&self) -> Result<Vec<PublicKey>, AuthError> {
-        match crate::auth::AuthorizedKeys::load_from_file(&self.config.authorized_keys_path).await {
-            Ok(keys) => Ok(keys
-                .list_keys()
-                .iter()
-                .map(|k| k.public_key.clone())
-                .collect()),
-            Err(AuthError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-            Err(e) => Err(e),
-        }
+        // Re-read authorized_keys so a separate CLI/daemon process that used
+        // update_file is reflected immediately. Fail closed on IO/parse errors.
+        let keys = self.reload_authorized_keys_fail_closed().await?;
+        Ok(keys
+            .list_keys()
+            .iter()
+            .map(|k| k.public_key.clone())
+            .collect())
     }
 
     async fn authenticate_peer(&self, peer_key: &PublicKey) -> Result<AuthToken, AuthError> {
@@ -304,7 +389,8 @@ impl Authenticator for SshAuthenticator {
     }
 
     async fn is_authorized(&self, peer_key: &PublicKey) -> Result<bool, AuthError> {
-        Ok(self.trusted_keys().await?.iter().any(|key| key == peer_key))
+        let keys = self.reload_authorized_keys_fail_closed().await?;
+        Ok(keys.is_authorized(peer_key))
     }
 }
 
@@ -361,5 +447,70 @@ mod tests {
         // Should fail authentication
         let result = auth.authenticate_peer(&other_key).await;
         assert!(matches!(result, Err(AuthError::UnauthorizedPeer(_))));
+    }
+
+    #[tokio::test]
+    async fn separate_authenticator_instances_see_add_and_remove() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("authorized_keys");
+        let key_path = temp_dir.path().join("id_ed25519");
+        let config = AuthConfig {
+            private_key_path: key_path.clone(),
+            authorized_keys_path: path.clone(),
+            generate_if_missing: true,
+        };
+        let writer = SshAuthenticator::new(config.clone()).await.unwrap();
+        let reader = SshAuthenticator::new(AuthConfig {
+            private_key_path: key_path,
+            authorized_keys_path: path,
+            generate_if_missing: false,
+        })
+        .await
+        .unwrap();
+
+        let peer = crate::auth::KeyPair::generate(crate::auth::KeyType::Ed25519)
+            .unwrap()
+            .public_key();
+        writer
+            .add_trusted_peer(&peer.to_openssh(), Some("peer".into()))
+            .await
+            .unwrap();
+        assert!(reader.is_authorized(&peer).await.unwrap());
+        assert!(reader
+            .list_trusted_devices()
+            .await
+            .unwrap()
+            .iter()
+            .any(|(fp, _)| fp == &peer.fingerprint()));
+
+        writer.remove_peer(&peer.fingerprint()).await.unwrap();
+        assert!(!reader.is_authorized(&peer).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn malicious_comment_with_newline_rejected() {
+        let (auth, _temp_dir) = create_test_authenticator().await;
+        let peer = crate::auth::KeyPair::generate(crate::auth::KeyType::Ed25519)
+            .unwrap()
+            .public_key();
+        let evil = format!(
+            "nice\nssh-ed25519 {}",
+            peer.to_openssh().split_whitespace().nth(1).unwrap()
+        );
+        let err = auth
+            .add_trusted_peer(&peer.to_openssh(), Some(evil))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AuthError::InvalidKeyFormat(_)));
+        assert!(!auth.is_authorized(&peer).await.unwrap());
+    }
+
+    #[test]
+    fn sanitize_rejects_crlf_injection() {
+        let injected = "x\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl evil";
+        assert!(sanitize_authorized_comment(Some(injected.into())).is_err());
+        assert!(sanitize_authorized_comment(Some("ok-name".into()))
+            .unwrap()
+            .is_some());
     }
 }

@@ -23,6 +23,7 @@ use crate::transport::{TransportConfig, TransportManager};
 
 pub mod commands;
 pub mod history_picker;
+mod service;
 
 #[derive(Parser)]
 #[command(name = "clipsync")]
@@ -44,6 +45,12 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    #[cfg(feature = "tui")]
+    #[command(about = "Open the terminal companion")]
+    Tui {
+        #[arg(long)]
+        daemon_binary: Option<PathBuf>,
+    },
     #[command(about = "Start the ClipSync daemon")]
     Start {
         #[arg(short, long)]
@@ -121,6 +128,9 @@ pub enum Commands {
     PrintUserUnit {
         #[arg(long)]
         binary: PathBuf,
+        /// Pin the user service to this absolute configuration path.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
 }
 
@@ -174,7 +184,23 @@ pub struct CliHandler {
 
 impl CliHandler {
     pub async fn new(config_path: Option<PathBuf>) -> Result<Self> {
-        let config = Arc::new(Config::load_config(config_path.clone()).await?);
+        let resolution = crate::config::resolution::resolve_config(
+            &crate::config::resolution::ResolvePaths::from_process_env()?,
+            config_path.map(|path| (path, crate::config::resolution::ExplicitKind::Flag)),
+        );
+        if resolution.is_fresh_eligible() {
+            anyhow::bail!("ClipSync is not configured. Open the desktop app or run `clipsync tui` to set up this computer; CLI users can run `clipsync config init` and configure an identity first.");
+        }
+        for warning in &resolution.warnings {
+            tracing::warn!("{}", warning.message);
+        }
+        let config_path = match &resolution.outcome {
+            Ok(crate::config::resolution::ResolveOutcome::Selected { path, .. }) => {
+                Some(path.clone())
+            }
+            _ => None,
+        };
+        let config = Arc::new(resolution.into_config_for_cli()?);
 
         Ok(Self {
             config,
@@ -188,24 +214,7 @@ impl CliHandler {
 
     /// Get the resolved config path for validation
     fn get_config_path_for_validation(&self) -> Option<PathBuf> {
-        if let Some(ref path) = self.config_path {
-            // CLI explicitly specified a config path
-            Some(path.clone())
-        } else {
-            // Use the same logic as Config::find_config_path()
-            // Check environment variable first
-            if let Ok(path) = std::env::var("CLIPSYNC_CONFIG") {
-                let path = PathBuf::from(path);
-                if path.exists() {
-                    return Some(path);
-                }
-            }
-
-            // Check default location
-            dirs::config_dir()
-                .map(|p| p.join("clipsync").join("config.toml"))
-                .filter(|p| p.exists())
-        }
+        self.config_path.clone()
     }
 
     /// Lazily initialize the history manager when needed
@@ -245,6 +254,10 @@ impl CliHandler {
 
     pub async fn handle_command(&mut self, command: Commands) -> Result<()> {
         match command {
+            #[cfg(feature = "tui")]
+            Commands::Tui { daemon_binary } => {
+                crate::companion::terminal::run(self.config_path.clone(), daemon_binary)
+            }
             Commands::Start { foreground } => self.start_daemon(foreground).await,
             Commands::Stop => self.stop_daemon().await,
             Commands::Status => self.show_status().await,
@@ -273,7 +286,7 @@ impl CliHandler {
             Commands::Paste => self.paste_text().await,
             Commands::Restart => self.restart_daemon().await,
             Commands::Clear => self.clear_clipboard().await,
-            Commands::Version => self.show_version().await,
+            Commands::Version => Self::show_version(),
             Commands::Config { action } => self.handle_config_action(action).await,
             Commands::Auth { action } => self.handle_auth_action(action).await,
             Commands::Doctor => self.run_diagnostics().await,
@@ -284,21 +297,29 @@ impl CliHandler {
                     self.show_logs(limit).await
                 }
             }
-            Commands::PrintUserUnit { binary } => self.print_user_unit(binary),
+            Commands::PrintUserUnit { binary, config } => self.print_user_unit(binary, config),
         }
     }
 
-    fn print_user_unit(&self, binary: PathBuf) -> Result<()> {
+    fn print_user_unit(&self, binary: PathBuf, config: Option<PathBuf>) -> Result<()> {
         let path = binary.to_string_lossy();
         crate::service_install::validate_executable_path(&path).map_err(|e| anyhow::anyhow!(e))?;
-        let unit = crate::service_install::render_systemd_user_unit(&path)
-            .map_err(|e| anyhow::anyhow!(e))?;
+        let config_text = config.as_ref().map(|path| path.to_string_lossy());
+        let unit = crate::service_install::render_systemd_user_unit_with_config(
+            &path,
+            config_text.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
         print!("{}", unit);
         Ok(())
     }
 
     async fn start_daemon(&mut self, foreground: bool) -> Result<()> {
         info!("Starting ClipSync daemon");
+        if !foreground && service::managed(service::Action::Start, self.config_path.as_deref())? {
+            println!("ClipSync user service started");
+            return Ok(());
+        }
 
         #[cfg(target_os = "linux")]
         if !foreground {
@@ -356,44 +377,8 @@ impl CliHandler {
         }
 
         #[cfg(target_os = "macos")]
-        {
-            if !foreground {
-                // On macOS, use launchctl to start the service
-                let plist_path = dirs::home_dir()
-                    .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-                    .join("Library/LaunchAgents/com.clipsync.plist");
-
-                if !plist_path.exists() {
-                    println!("ClipSync LaunchAgent not installed.");
-                    println!("Please run 'make install-user' first to install the service.");
-                    return Err(anyhow::anyhow!("LaunchAgent not installed"));
-                }
-
-                // Check if already loaded
-                let status_output = Command::new("launchctl")
-                    .args(&["list", "com.clipsync"])
-                    .output()?;
-
-                if status_output.status.success() {
-                    println!("ClipSync daemon is already running");
-                    return Ok(());
-                }
-
-                // Load and start the LaunchAgent
-                println!("Starting ClipSync daemon via launchctl...");
-                let load_output = Command::new("launchctl")
-                    .args(&["load", "-w", plist_path.to_str().unwrap()])
-                    .output()?;
-
-                if !load_output.status.success() {
-                    let error_msg = String::from_utf8_lossy(&load_output.stderr);
-                    return Err(anyhow::anyhow!("Failed to start daemon: {}", error_msg));
-                }
-
-                println!("ClipSync daemon started successfully");
-                println!("Use 'clipsync status' to check if it's running");
-                return Ok(());
-            }
+        if !foreground {
+            anyhow::bail!("ClipSync user service is not installed. Open Settings in the desktop app or TUI to install it.");
         }
 
         #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
@@ -452,9 +437,14 @@ impl CliHandler {
             tokio::select! { result = tokio::signal::ctrl_c() => result?, _ = term.recv() => {} }
             Ok::<(), std::io::Error>(())
         };
+        let enrollment = Arc::new(crate::enrollment::EnrollmentManager::new(
+            Arc::clone(&self.config),
+            sync_engine.ssh_authenticator(),
+        )?);
+        let target = crate::control::EnrollmentTarget::new(sync_engine.clone(), enrollment);
         let result = tokio::select! {
             result = sync_engine_task.run(listener) => result,
-            result = control.run(sync_engine.as_ref()) => result,
+            result = control.run(&target) => result,
             result = shutdown => result.map_err(anyhow::Error::from),
         };
         sync_engine.shutdown().await;
@@ -463,6 +453,10 @@ impl CliHandler {
 
     async fn stop_daemon(&self) -> Result<()> {
         info!("Stopping ClipSync daemon");
+        if service::managed(service::Action::Stop, self.config_path.as_deref())? {
+            println!("ClipSync user service stopped");
+            return Ok(());
+        }
         #[cfg(target_os = "linux")]
         {
             let path = crate::control::socket_path(&self.config);
@@ -486,31 +480,7 @@ impl CliHandler {
         }
         #[cfg(target_os = "macos")]
         {
-            // Check if service is loaded
-            let status_output = Command::new("launchctl")
-                .args(&["list", "com.clipsync"])
-                .output()?;
-
-            if !status_output.status.success() {
-                println!("ClipSync daemon is not running");
-                return Ok(());
-            }
-
-            // Unload the LaunchAgent
-            let plist_path = dirs::home_dir()
-                .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-                .join("Library/LaunchAgents/com.clipsync.plist");
-
-            let unload_output = Command::new("launchctl")
-                .args(&["unload", plist_path.to_str().unwrap()])
-                .output()?;
-
-            if !unload_output.status.success() {
-                let error_msg = String::from_utf8_lossy(&unload_output.stderr);
-                return Err(anyhow::anyhow!("Failed to stop daemon: {}", error_msg));
-            }
-
-            println!("ClipSync daemon stopped");
+            anyhow::bail!("ClipSync user service is not installed. A foreground daemon can be stopped from its terminal.");
         }
         #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
         {
@@ -633,6 +603,10 @@ impl CliHandler {
 
     async fn restart_daemon(&mut self) -> Result<()> {
         info!("Restarting ClipSync daemon");
+        if service::managed(service::Action::Restart, self.config_path.as_deref())? {
+            println!("ClipSync user service restarted");
+            return Ok(());
+        }
 
         #[cfg(target_os = "linux")]
         {
@@ -650,17 +624,9 @@ impl CliHandler {
         }
         #[cfg(target_os = "macos")]
         {
-            println!("Restarting ClipSync daemon...");
-
-            // Stop if running
-            let _ = self.stop_daemon().await;
-
-            // Wait briefly
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-            // Start again
-            self.start_daemon(false).await?;
-            println!("ClipSync daemon restarted successfully");
+            anyhow::bail!(
+                "ClipSync user service is not installed. Install it from Settings first."
+            );
         }
 
         #[cfg(all(not(target_os = "linux"), not(target_os = "macos")))]
@@ -679,7 +645,7 @@ impl CliHandler {
         Ok(())
     }
 
-    async fn show_version(&self) -> Result<()> {
+    pub fn show_version() -> Result<()> {
         println!("ClipSync {}", env!("CARGO_PKG_VERSION"));
         println!("Build Information:");
         println!("  Target: {}", env!("TARGET"));
@@ -691,7 +657,6 @@ impl CliHandler {
         println!("Runtime Information:");
         println!("  Platform: {}", std::env::consts::OS);
         println!("  Architecture: {}", std::env::consts::ARCH);
-        println!("  Node ID: {}", self.config.node_id());
 
         Ok(())
     }
@@ -1287,38 +1252,29 @@ impl CliHandler {
                 .map_err(|e| anyhow::anyhow!("Failed to parse public key: {}", e))?
         };
 
-        // Load existing authorized keys or create new
-        let mut auth_keys = if auth_keys_path.exists() {
-            AuthorizedKeys::load_from_file(auth_keys_path)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to load authorized keys: {}", e))?
-        } else {
-            AuthorizedKeys::new()
-        };
-
-        // Check if key already exists
-        if auth_keys.is_authorized(&public_key) {
+        // Share the atomic, cross-process update path with daemon enrollment.
+        let key = public_key.clone();
+        let comment = crate::auth::ssh::sanitize_authorized_comment(name.clone())?;
+        let added = AuthorizedKeys::update_file(auth_keys_path, move |keys| {
+            if keys.is_authorized(&key) {
+                return Ok(false);
+            }
+            keys.add_key(AuthorizedKey {
+                public_key: key,
+                comment,
+                options: vec![],
+            });
+            Ok(true)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update authorized keys: {}", e))?;
+        if !added {
             println!(
                 "Key is already authorized (fingerprint: {})",
                 public_key.fingerprint()
             );
             return Ok(());
         }
-
-        // Add the key
-        let authorized_key = AuthorizedKey {
-            public_key: public_key.clone(),
-            comment: name.clone(),
-            options: vec![],
-        };
-
-        auth_keys.add_key(authorized_key);
-
-        // Save updated keys
-        auth_keys
-            .save_to_file(auth_keys_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to save authorized keys: {}", e))?;
 
         println!("✓ Added authorized key");
         println!("  Fingerprint: {}", public_key.fingerprint());
@@ -1388,33 +1344,30 @@ impl CliHandler {
             return Ok(());
         }
 
-        let mut auth_keys = AuthorizedKeys::load_from_file(auth_keys_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to load authorized keys: {}", e))?;
-
-        if auth_keys.is_empty() {
-            println!("No authorized keys found to remove.");
-            return Ok(());
-        }
-
-        // Try to find key by fingerprint first
-        let removed = if auth_keys.remove_key_by_fingerprint(&key_id) {
-            true
-        } else {
-            // Try to find by comment/name
-            let keys_list = auth_keys.list_keys().to_vec();
-
-            // Find key with matching comment
-            if let Some(key_to_remove) = keys_list
+        let identifier = key_id.clone();
+        let (removed, remaining) = AuthorizedKeys::update_file(auth_keys_path, move |keys| {
+            let fingerprint = if keys
+                .list_keys()
                 .iter()
-                .find(|k| k.comment.as_ref().map_or(false, |c| c.contains(&key_id)))
+                .any(|key| key.public_key.fingerprint() == identifier)
             {
-                let fingerprint = key_to_remove.public_key.fingerprint();
-                auth_keys.remove_key_by_fingerprint(&fingerprint)
+                Some(identifier.clone())
             } else {
-                false
-            }
-        };
+                keys.list_keys()
+                    .iter()
+                    .find(|key| {
+                        key.comment
+                            .as_ref()
+                            .is_some_and(|comment| comment.contains(&identifier))
+                    })
+                    .map(|key| key.public_key.fingerprint())
+            };
+            let removed =
+                fingerprint.is_some_and(|fingerprint| keys.remove_key_by_fingerprint(&fingerprint));
+            Ok((removed, keys.len()))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to update authorized keys: {}", e))?;
 
         if !removed {
             println!("No key found matching '{}'", key_id);
@@ -1423,14 +1376,8 @@ impl CliHandler {
             return Ok(());
         }
 
-        // Save updated keys
-        auth_keys
-            .save_to_file(auth_keys_path)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to save authorized keys: {}", e))?;
-
         println!("✓ Removed authorized key matching '{}'", key_id);
-        println!("  Remaining keys: {}", auth_keys.len());
+        println!("  Remaining keys: {}", remaining);
 
         Ok(())
     }
