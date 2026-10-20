@@ -32,6 +32,7 @@ try:
     for script,args in [
         ('companion_ui.py',[str(out/'gui')]),
         ('companion_pty.py',[str(root/'target/debug/clipsync'),str(out/'tui')]),
+        ('companion_recovery.py',[str(root/'target/debug/clipsync'),str(out/'recovery')]),
         ('companion_large_history.py',[str(out/'large-history')]),
         ('companion_enrollment_ui.py',[str(out/'enrollment')]),
         ('companion_tray.py',[str(out/'tray')]),

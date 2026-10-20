@@ -266,3 +266,49 @@ async fn enrollment_open_and_cancel_reconcile_through_control() {
     .await;
     assert!(client.view.error.is_none());
 }
+
+#[tokio::test]
+async fn newer_resume_clears_a_stale_pause_success_notice() {
+    let Fixture {
+        config,
+        clipboard: _clipboard,
+        _engine,
+        enrollment: _enrollment,
+        task: _task,
+        _identity,
+    } = fixture().await;
+    let mut desktop = Controller::connect(config.clone()).unwrap();
+    let mut terminal = Controller::connect(config).unwrap();
+    wait(&mut desktop, |client| client.view.can_act()).await;
+    wait(&mut terminal, |client| client.view.can_act()).await;
+    desktop.dispatch(Intent::SetPaused(true));
+    wait(&mut desktop, |client| {
+        client.view.connection == Connection::Paused
+            && !client.view.action_pending
+            && client
+                .view
+                .notice
+                .as_deref()
+                .is_some_and(|text| text.contains("Paused until"))
+    })
+    .await;
+    wait(&mut terminal, |client| {
+        client.view.connection == Connection::Paused
+    })
+    .await;
+    terminal.dispatch(Intent::SetPaused(false));
+    wait(&mut terminal, |client| {
+        client.view.connection != Connection::Paused && !client.view.action_pending
+    })
+    .await;
+    wait(&mut desktop, |client| {
+        client.view.connection != Connection::Paused
+            && client
+                .view
+                .notice
+                .as_deref()
+                .is_none_or(|text| !text.contains("Paused"))
+    })
+    .await;
+    assert_ne!(desktop.view.connection, Connection::Paused);
+}

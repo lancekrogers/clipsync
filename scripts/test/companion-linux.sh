@@ -34,6 +34,7 @@ else
   echo 'Expected x11 or wayland' >&2; exit 2
 fi
 sleep .3
+rm -f "$out/fixture.jsonl"
 /work/target/debug/examples/companion_fixture > "$out/fixture.jsonl" 2> "$out/fixture.log" & fixture=$!
 for i in {1..300}; do
   [[ ! -s $out/fixture.jsonl ]] || break
@@ -56,8 +57,12 @@ out=Path(sys.argv[1]); session=json.loads(out.joinpath('fixture.jsonl').read_tex
 out.joinpath('session.json').write_text(json.dumps(session))
 PY
 config=$(python3 -c 'import json,os;print(json.load(open(os.environ["CLIPSYNC_UI_SESSION"]))["config"])')
+if [[ $(id -u) == 0 ]]; then
+  python3 scripts/test/companion_control_uid.py "$out/peer-credentials"
+fi
 /work/target/debug/clipsync-desktop --config "$config" --no-tray > "$out/app.log" 2>&1 & app=$!
 python3 scripts/test/companion_ui.py "$out/gui"
 python3 scripts/test/companion_pty.py "$CLIPSYNC_BINARY" "$out/tui"
+python3 scripts/test/companion_recovery.py "$CLIPSYNC_BINARY" "$out/recovery"
 
 python3 scripts/test/companion_large_history.py "$out/large-history"

@@ -50,19 +50,31 @@ impl Connection {
 pub fn display_text(text: &str, multiline: bool) -> String {
     text.chars()
         .filter_map(|ch| {
-            if ch == '\n' {
+            if ch == '\n' || ch == '\u{2028}' || ch == '\u{2029}' {
                 Some(if multiline { '\n' } else { ' ' })
             } else if ch == '\t' {
                 Some(' ')
-            } else if ch.is_control()
-                || matches!(ch, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-            {
+            } else if ch.is_control() || is_unsafe_format(ch) {
                 None
             } else {
                 Some(ch)
             }
         })
         .collect()
+}
+
+/// Bidirectional and invisible format marks that can reorder a label without
+/// being Unicode control characters (`Cc`).
+pub(crate) fn is_unsafe_format(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{061C}'
+            | '\u{200E}'
+            | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+    )
 }
 
 /// A token is scoped to an input domain so periodic status cannot invalidate a
@@ -89,6 +101,15 @@ pub struct Ticket {
     pub epoch: u64,
 }
 
+/// How a snapshot compares with the newest generation already applied for one
+/// daemon instance. Restarts are not applied here; Status owns the epoch bump.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotOrder {
+    Fresh,
+    Stale,
+    OtherInstance,
+}
+
 #[derive(Debug, Default)]
 pub struct Reconciliation {
     next: u64,
@@ -102,6 +123,29 @@ pub struct Reconciliation {
 impl Reconciliation {
     pub fn instance_id(&self) -> Option<Uuid> {
         self.instance
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    /// Record a completion that is newer for this process. Older generations and
+    /// other daemon instances are refused so a late reply cannot roll state back.
+    pub fn note_generation(&mut self, instance: Uuid, generation: u64) -> SnapshotOrder {
+        if let Some(current) = self.instance {
+            if current != instance {
+                return SnapshotOrder::OtherInstance;
+            }
+            if generation < self.generation {
+                return SnapshotOrder::Stale;
+            }
+        }
+        self.instance = Some(instance);
+        self.generation = generation;
+        SnapshotOrder::Fresh
+    }
+    /// A full status snapshot proves the service is answering.
+    pub fn mark_fresh(&mut self, now: Instant) {
+        self.last_status = Some(now);
+        self.failures = 0;
     }
     pub fn begin(&mut self, domain: Domain) -> Ticket {
         self.next = self.next.wrapping_add(1);
@@ -197,6 +241,29 @@ mod tests {
             "hello[2J world"
         );
         assert_eq!(display_text("a\nb\t", true), "a\nb ");
+        assert_eq!(
+            display_text("a\u{2028}b\u{202e}c\u{200f}\u{feff}", false),
+            "a bc"
+        );
+        assert_eq!(display_text("a\u{2028}b\u{2029}c", true), "a\nb\nc");
+    }
+    #[test]
+    fn older_generation_and_other_instances_cannot_replace_a_newer_snapshot() {
+        let mut state = Reconciliation::default();
+        let ticket = state.begin(Domain::Status);
+        let instance = Uuid::new_v4();
+        assert!(state.status(ticket, instance, 1, Instant::now()));
+        assert_eq!(state.note_generation(instance, 4), SnapshotOrder::Fresh);
+        assert_eq!(state.generation(), 4);
+        let late = state.begin(Domain::Status);
+        assert!(!state.status(late, instance, 2, Instant::now()));
+        assert_eq!(state.generation(), 4);
+        assert_eq!(
+            state.note_generation(Uuid::new_v4(), 0),
+            SnapshotOrder::OtherInstance
+        );
+        assert_eq!(state.instance_id(), Some(instance));
+        assert_eq!(state.generation(), 4);
     }
 }
 
