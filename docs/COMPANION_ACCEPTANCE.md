@@ -129,3 +129,26 @@ restart and do not collect host logs. Tests check sentinel clipboard text, keys,
 peer labels and paths are absent from exports, rendered errors and control debug
 logs. No history format, identity, service installation or dependency changes
 are part of this follow-up.
+
+## Pairing follow-up (2026-10-20)
+
+New dial results identify the session they created, so retrying after a failure
+selects that attempt in the TUI. The optional local-control field
+`EnrollmentSnapshot.requested_session_id` is absent on ordinary polls; older
+snapshots remain readable. Enrollment wire messages and trust formats are unchanged.
+
+Both connection directions now check the TLS fingerprint's failure budget before
+processing another verification attempt. Regressions cover repeated mismatches,
+independent rate-limit expiry, confirm replay, full session capacity, wrong ALPN,
+reverse dialing and identical display names with distinct authenticated keys.
+The trust harness enrolls two peers, opens production sync with the saved pins,
+revokes during a live connection, rejects reconnect and reloads the trust store.
+A separate write-failure case preserves prior pins, avoids false success and
+successfully retries after the fixture fault is removed.
+
+`companion_enrollment_ui.py` now runs on Linux as well as macOS and checks the
+visible waiting state after one confirmation. `companion_enrollment_recovery.py`
+drives unreachable addresses and cancellation through both the real GUI and PTY,
+compares full fingerprints, checks both trust files remain byte-identical, and
+verifies terminal restoration. All network targets and clipboard data are isolated.
+Physical two-device and packaged lifecycle acceptance remain separate gates.

@@ -66,3 +66,5 @@ python3 scripts/test/companion_pty.py "$CLIPSYNC_BINARY" "$out/tui"
 python3 scripts/test/companion_recovery.py "$CLIPSYNC_BINARY" "$out/recovery"
 
 python3 scripts/test/companion_large_history.py "$out/large-history"
+python3 scripts/test/companion_enrollment_ui.py "$out/enrollment"
+python3 scripts/test/companion_enrollment_recovery.py "$out/enrollment-recovery"

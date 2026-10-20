@@ -2,12 +2,13 @@
 //! no installed service, no production pasteboard.
 mod support;
 use clipsync::{
-    auth::{Authenticator, AuthorizedKeys, KeyPair, KeyType},
+    auth::{Authenticator, AuthorizedKeys, KeyPair, KeyType, SshAuthenticator},
     config::Config,
     control::{
         self, Command, EnrollmentCandidateView, EnrollmentTarget, Target, FEATURE_ENROLLMENT,
     },
     enrollment::EnrollmentManager,
+    transport::{websocket::WebSocketConfig, Listener, WebSocketTransport},
 };
 use std::{sync::Arc, time::Duration};
 use support::*;
@@ -103,6 +104,32 @@ fn dialing_session_id(snap: &clipsync::control::EnrollmentSnapshot) -> uuid::Uui
         .find(|s| s.state == "Dialing")
         .map(|s| s.session_id)
         .expect("dial snapshot should include Dialing session")
+}
+
+async fn trusted_fps(auth: &SshAuthenticator) -> Vec<String> {
+    let mut fps: Vec<String> = auth
+        .list_trusted_devices()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(fp, _)| fp)
+        .collect();
+    fps.sort();
+    fps
+}
+
+/// Live confirm window only. Cancelled/Failed rows keep the peer fingerprint.
+async fn wait_awaiting(mgr: &EnrollmentManager, peer_fp: &str) -> uuid::Uuid {
+    for _ in 0..200 {
+        let snap = mgr.inspect(None).await.unwrap();
+        if let Some(s) = snap.sessions.iter().find(|s| {
+            s.state == "AwaitingLocalConfirm" && s.peer_fingerprint.as_deref() == Some(peer_fp)
+        }) {
+            return s.session_id;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("no AwaitingLocalConfirm session for {peer_fp}");
 }
 
 async fn wait_authorized(auth: &clipsync::auth::SshAuthenticator, key: &clipsync::auth::PublicKey) {
@@ -799,4 +826,324 @@ async fn pause_applied_false_on_nonpaused_copy_and_control_error_preserves_code(
         );
     }
     drop(task);
+}
+
+#[tokio::test]
+async fn confirm_replay_after_cancel_writes_nothing() {
+    // cancel(Some) consumes the id and leaves the listener open, so confirm
+    // is "Enrollment replay" (control code enrollment_replay), not "closed".
+    let (a, b, ma, mb, _aa, addr_b) = managers_pair().await;
+    let keep = Identity::new().await;
+    a.auth
+        .add_trusted_peer(
+            &keep.key.public_key().to_openssh(),
+            Some("preexisting".into()),
+        )
+        .await
+        .unwrap();
+    let keep_fp = keep.key.public_key().fingerprint();
+    let a_fp = a.key.public_key().fingerprint();
+    let b_fp = b.key.public_key().fingerprint();
+
+    ma.dial(&addr_b.to_string(), None, None).await.unwrap();
+    let sid_a = wait_bound(&ma, &b_fp).await;
+    let sid_b = wait_bound(&mb, &a_fp).await;
+    ma.cancel(Some(sid_a)).await.unwrap();
+
+    let replay = ma.confirm(sid_a).await.unwrap_err();
+    assert!(
+        replay.to_string().starts_with("Enrollment replay"),
+        "{replay}"
+    );
+    let snap = ma.inspect(Some(sid_a)).await.unwrap();
+    assert_eq!(
+        snap.sessions
+            .iter()
+            .find(|s| s.session_id == sid_a)
+            .map(|s| s.state.as_str()),
+        Some("Cancelled")
+    );
+    // One-sided confirm on the peer must not publish either pin.
+    let _ = mb.confirm(sid_b).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(trusted_fps(&a.auth).await, vec![keep_fp.clone()]);
+    assert!(trusted_fps(&b.auth).await.is_empty());
+    assert!(!a.auth.is_authorized(&b.key.public_key()).await.unwrap());
+    assert!(!b.auth.is_authorized(&a.key.public_key()).await.unwrap());
+
+    // Later fresh session still reaches mutual trust; the cancelled id does not.
+    mb.cancel(Some(sid_b)).await.unwrap();
+    let snap = ma.dial(&addr_b.to_string(), None, None).await.unwrap();
+    let sid_a2 = dialing_session_id(&snap);
+    let sid_a2 = wait_bound_session(&ma, sid_a2, &b_fp).await;
+    let sid_b2 = wait_awaiting(&mb, &a_fp).await;
+    ma.confirm(sid_a2).await.unwrap();
+    mb.confirm(sid_b2).await.unwrap();
+    wait_authorized(&a.auth, &b.key.public_key()).await;
+    wait_authorized(&b.auth, &a.key.public_key()).await;
+
+    let again = ma.confirm(sid_a).await.unwrap_err();
+    assert!(
+        again.to_string().starts_with("Enrollment replay"),
+        "{again}"
+    );
+    let mut expect_a = vec![keep_fp, b_fp];
+    expect_a.sort();
+    assert_eq!(trusted_fps(&a.auth).await, expect_a);
+    assert_eq!(trusted_fps(&b.auth).await, vec![a_fp]);
+}
+
+#[tokio::test]
+async fn fourth_live_session_rejected_without_trust() {
+    assert_eq!(clipsync::enrollment::MAX_CONCURRENT_SESSIONS, 3);
+    let (a, b, ma, mb, _aa, addr_b) = managers_pair().await;
+    let keep = Identity::new().await;
+    a.auth
+        .add_trusted_peer(
+            &keep.key.public_key().to_openssh(),
+            Some("preexisting".into()),
+        )
+        .await
+        .unwrap();
+    let keep_fp = keep.key.public_key().fingerprint();
+    let a_fp = a.key.public_key().fingerprint();
+    let b_fp = b.key.public_key().fingerprint();
+
+    for _ in 0..3 {
+        let snap = ma.dial(&addr_b.to_string(), None, None).await.unwrap();
+        let sid = dialing_session_id(&snap);
+        let sid = wait_bound_session(&ma, sid, &b_fp).await;
+        let state = ma
+            .inspect(Some(sid))
+            .await
+            .unwrap()
+            .sessions
+            .into_iter()
+            .find(|s| s.session_id == sid)
+            .unwrap()
+            .state;
+        assert_eq!(state, "AwaitingLocalConfirm");
+    }
+    for _ in 0..200 {
+        let n = mb
+            .inspect(None)
+            .await
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|s| s.state == "AwaitingLocalConfirm")
+            .count();
+        if n == 3 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        mb.inspect(None)
+            .await
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|s| s.state == "AwaitingLocalConfirm")
+            .count(),
+        3
+    );
+
+    let before_a = ma.inspect(None).await.unwrap().sessions.len();
+    let before_b = mb.inspect(None).await.unwrap().sessions.len();
+    let busy = ma.dial(&addr_b.to_string(), None, None).await.unwrap_err();
+    assert!(busy.to_string().starts_with("Enrollment busy"), "{busy}");
+    assert_eq!(ma.inspect(None).await.unwrap().sessions.len(), before_a);
+    assert_eq!(mb.inspect(None).await.unwrap().sessions.len(), before_b);
+    assert_eq!(trusted_fps(&a.auth).await, vec![keep_fp.clone()]);
+    assert!(trusted_fps(&b.auth).await.is_empty());
+    assert!(!a.auth.is_authorized(&b.key.public_key()).await.unwrap());
+    assert!(!b.auth.is_authorized(&a.key.public_key()).await.unwrap());
+
+    // Free both caps without closing the listeners, then a new pair can commit.
+    for mgr in [&ma, &mb] {
+        let ids: Vec<_> = mgr
+            .inspect(None)
+            .await
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|s| {
+                !matches!(
+                    s.state.as_str(),
+                    "Failed" | "Cancelled" | "Expired" | "Succeeded"
+                )
+            })
+            .map(|s| s.session_id)
+            .collect();
+        for id in ids {
+            mgr.cancel(Some(id)).await.unwrap();
+        }
+    }
+    let snap = ma.dial(&addr_b.to_string(), None, None).await.unwrap();
+    let sid_a = dialing_session_id(&snap);
+    let sid_a = wait_bound_session(&ma, sid_a, &b_fp).await;
+    let sid_b = wait_awaiting(&mb, &a_fp).await;
+    ma.confirm(sid_a).await.unwrap();
+    mb.confirm(sid_b).await.unwrap();
+    wait_authorized(&a.auth, &b.key.public_key()).await;
+    wait_authorized(&b.auth, &a.key.public_key()).await;
+    let mut expect_a = vec![keep_fp, b_fp];
+    expect_a.sort();
+    assert_eq!(trusted_fps(&a.auth).await, expect_a);
+    assert_eq!(trusted_fps(&b.auth).await, vec![a_fp]);
+}
+
+#[tokio::test]
+async fn dial_sync_listener_does_not_authorize() {
+    // Production sync listener offers clipsync/2. The dialer is pre-pinned there
+    // so an unknown-key rejection cannot stand in for the ALPN mismatch.
+    assert_eq!(clipsync::enrollment::ENROLL_ALPN, b"clipsync-enroll/1");
+    let (a, b, ma, mb, _aa, addr_b) = managers_pair().await;
+    let keep = Identity::new().await;
+    a.auth
+        .add_trusted_peer(
+            &keep.key.public_key().to_openssh(),
+            Some("preexisting".into()),
+        )
+        .await
+        .unwrap();
+    let sync = Identity::new().await;
+    sync.trust(&a).await;
+    let keep_fp = keep.key.public_key().fingerprint();
+    let a_fp = a.key.public_key().fingerprint();
+    let b_fp = b.key.public_key().fingerprint();
+    let sync_fp = sync.key.public_key().fingerprint();
+    assert_eq!(trusted_fps(&sync.auth).await, vec![a_fp.clone()]);
+    assert_eq!(trusted_fps(&a.auth).await, vec![keep_fp.clone()]);
+
+    let listener_auth: Arc<dyn Authenticator> = sync.auth.clone();
+    let transport = WebSocketTransport::new(
+        "127.0.0.1:0".parse().unwrap(),
+        listener_auth,
+        WebSocketConfig::default(),
+        sync.id(),
+    );
+    let listener = transport.listen().await.expect("clipsync/2 listener");
+    let sync_addr = listener.local_addr();
+    let _accept_loop = Task(tokio::spawn(async move {
+        let mut listener = listener;
+        loop {
+            let _ = listener.accept().await;
+        }
+    }));
+    tokio::task::yield_now().await;
+
+    let snap = ma.dial(&sync_addr.to_string(), None, None).await.unwrap();
+    let sid = dialing_session_id(&snap);
+    let err = wait_session_failed(&ma, sid).await;
+    assert!(
+        err.contains("NoApplicationProtocol")
+            || err.contains("Missing enrollment protocol negotiation"),
+        "{err}"
+    );
+    assert_eq!(trusted_fps(&a.auth).await, vec![keep_fp.clone()]);
+    assert!(trusted_fps(&b.auth).await.is_empty());
+    assert_eq!(trusted_fps(&sync.auth).await, vec![a_fp.clone()]);
+    assert!(!a.auth.is_authorized(&sync.key.public_key()).await.unwrap());
+    assert!(sync.auth.is_authorized(&a.key.public_key()).await.unwrap());
+    assert!(!a.auth.is_authorized(&b.key.public_key()).await.unwrap());
+
+    let snap = ma.dial(&addr_b.to_string(), None, None).await.unwrap();
+    let sid_a = dialing_session_id(&snap);
+    let sid_a = wait_bound_session(&ma, sid_a, &b_fp).await;
+    let sid_b = wait_awaiting(&mb, &a_fp).await;
+    ma.confirm(sid_a).await.unwrap();
+    mb.confirm(sid_b).await.unwrap();
+    wait_authorized(&a.auth, &b.key.public_key()).await;
+    wait_authorized(&b.auth, &a.key.public_key()).await;
+    let mut expect_a = vec![keep_fp, b_fp];
+    expect_a.sort();
+    assert_eq!(trusted_fps(&a.auth).await, expect_a);
+    assert!(!expect_a.iter().any(|fp| fp == &sync_fp));
+    assert_eq!(trusted_fps(&b.auth).await, vec![a_fp.clone()]);
+    assert_eq!(trusted_fps(&sync.auth).await, vec![a_fp]);
+    assert!(!a.auth.is_authorized(&sync.key.public_key()).await.unwrap());
+}
+
+#[tokio::test]
+async fn repeated_peer_mismatch_exhausts_its_budget_without_blocking_another_peer() {
+    let (a, b, ma, _mb, _aa, addr_b) = managers_pair().await;
+    for _ in 0..5 {
+        let response = ma
+            .dial(&addr_b.to_string(), Some("SHA256:wrong".into()), None)
+            .await
+            .unwrap();
+        let id = response.requested_session_id.unwrap();
+        assert!(wait_session_failed(&ma, id).await.contains("mismatch"));
+    }
+    let response = ma
+        .dial(&addr_b.to_string(), Some("SHA256:wrong".into()), None)
+        .await
+        .unwrap();
+    let error = wait_session_failed(&ma, response.requested_session_id.unwrap()).await;
+    assert!(error.contains("rate limited"), "{error}");
+    assert!(!a.auth.is_authorized(&b.key.public_key()).await.unwrap());
+    assert!(!b.auth.is_authorized(&a.key.public_key()).await.unwrap());
+
+    let (c, _d, _mc, _md, addr_c, _addr_d) = managers_pair().await;
+    let response = ma.dial(&addr_c.to_string(), None, None).await.unwrap();
+    wait_bound_session(
+        &ma,
+        response.requested_session_id.unwrap(),
+        &c.key.public_key().fingerprint(),
+    )
+    .await;
+    assert!(!a.auth.is_authorized(&c.key.public_key()).await.unwrap());
+}
+
+#[tokio::test]
+async fn reverse_dial_distinguishes_identical_display_names_by_tls_key() {
+    async fn named(id: &Identity) -> Arc<EnrollmentManager> {
+        let mut config = Config::default();
+        config.node_id = id.id();
+        config.listen_addr = "127.0.0.1:0".into();
+        config.auth.ssh_key = id.dir.path().join("identity");
+        config.auth.authorized_keys = id.dir.path().join("authorized_keys");
+        config.clipboard.history_db = id.dir.path().join("history.db");
+        config.advertise_name = "same-desktop".into();
+        let manager = Arc::new(EnrollmentManager::new(Arc::new(config), id.auth.clone()).unwrap());
+        manager.set_listen_port_override(0).await;
+        manager
+    }
+    let a = Identity::new().await;
+    let b = Identity::new().await;
+    let ma = named(&a).await;
+    let mb = named(&b).await;
+    let addr_a = ma.open().await.unwrap().listen_addr.unwrap();
+    mb.open().await.unwrap();
+    let dial = mb.dial(&addr_a, None, None).await.unwrap();
+    let sid_b = wait_bound_session(
+        &mb,
+        dial.requested_session_id.unwrap(),
+        &a.key.public_key().fingerprint(),
+    )
+    .await;
+    let sid_a = wait_bound(&ma, &b.key.public_key().fingerprint()).await;
+    for (manager, id, expected) in [
+        (&ma, sid_a, b.key.public_key().fingerprint()),
+        (&mb, sid_b, a.key.public_key().fingerprint()),
+    ] {
+        let snapshot = manager.inspect(Some(id)).await.unwrap();
+        let session = snapshot
+            .sessions
+            .iter()
+            .find(|s| s.session_id == id)
+            .unwrap();
+        assert_eq!(session.peer_display_name.as_deref(), Some("same-desktop"));
+        assert_eq!(session.peer_fingerprint.as_deref(), Some(expected.as_str()));
+        assert_ne!(
+            session.peer_fingerprint.as_deref(),
+            Some(session.local_fingerprint.as_str())
+        );
+    }
+    ma.confirm(sid_a).await.unwrap();
+    mb.confirm(sid_b).await.unwrap();
+    wait_authorized(&a.auth, &b.key.public_key()).await;
+    wait_authorized(&b.auth, &a.key.public_key()).await;
 }

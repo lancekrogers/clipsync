@@ -59,6 +59,16 @@ class Inspection:
                     return value['bounds']
         raise AssertionError(f'No control {label}: {self.text()}')
 
+    def enabled(self, label):
+        for _, node in self.tree()[2][0]:
+            if node[0] != 'button':
+                continue
+            for value in node:
+                if isinstance(value, dict) and value.get('label') == label:
+                    # The pinned AccessKit 0.25 Node encodes Disabled as flag 9.
+                    return not node[3] & (1 << 9)
+        return False
+
     def events(self, events):
         return self.request({'ApplyEvents': [events]})
 
@@ -72,9 +82,17 @@ class Inspection:
         x, y, right, bottom = self.find(label)
         position = [(x + right) / 2, (y + bottom) / 2]
         assert 0 <= position[1] < 800
-        self.events([{'PointerMoved': position}])
-        for pressed in (True, False):
-            self.events([{'PointerButton': dict(pos=position, button='Primary', pressed=pressed, modifiers=self.modifiers)}])
+        self.click_at(position)
+
+    def click_at(self, position):
+        # Keep move/press/release together across inspection frames.
+        self.events([
+            {'PointerMoved': position},
+            *[
+                {'PointerButton': dict(pos=position, button='Primary', pressed=pressed, modifiers=self.modifiers)}
+                for pressed in (True, False)
+            ],
+        ])
 
     def screenshot(self, path):
         path.write_bytes(self.request({'GetScreenshot': [1.0]})['Screenshot'][1])

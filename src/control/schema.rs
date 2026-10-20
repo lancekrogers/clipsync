@@ -219,6 +219,9 @@ pub struct DiagnosticError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnrollmentSnapshot {
+    /// Session created by this dial request. Ordinary polls do not change focus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_session_id: Option<Uuid>,
     pub listening: bool,
     pub listen_addr: Option<String>,
     pub expires_at: Option<String>,
