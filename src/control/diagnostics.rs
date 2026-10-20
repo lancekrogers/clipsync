@@ -1,4 +1,6 @@
-//! Allowlisted diagnostics only — no payloads, paths, peer labels, or raw errors.
+//! Allowlisted diagnostics for control operations only.
+//! The server overlays its in-memory ring at export. This is not a host log:
+//! no shell scraping, paths, peer names, secrets, or raw errors.
 use crate::control::{
     error_codes,
     schema::{
@@ -25,15 +27,51 @@ pub fn build_report(snapshot: &ControlSnapshot) -> DiagnosticsReport {
         // D02 will refine; do not invent service inspection here.
         service_mode_hint: "unknown".into(),
         config_labels: allowlisted_config_labels(status),
-        // Allowlisted ring only; never serialize raw anyhow/IO text.
-        recent_errors: truncate_errors(Vec::new()),
+        // Empty until [`overlay_recent_errors`] replaces this from the server ring.
+        recent_errors: Vec::new(),
         redaction: REDACTION_LABEL.into(),
     }
 }
 
-fn truncate_errors(mut errors: Vec<DiagnosticError>) -> Vec<DiagnosticError> {
-    errors.truncate(DIAGNOSTICS_ERROR_MAX);
-    errors
+/// One ring entry. Unknown codes collapse to the generic control failure.
+pub fn diagnostic_error(code: &str) -> DiagnosticError {
+    let code = error_codes::canonical_diagnostic_code(code);
+    DiagnosticError {
+        at: Utc::now().to_rfc3339(),
+        code: code.to_string(),
+        message: error_codes::fixed_diagnostic_message(code).to_string(),
+    }
+}
+
+/// Replace `recent_errors` with the server ring. Target-supplied rows are dropped.
+pub fn overlay_recent_errors(report: &mut DiagnosticsReport, recorded: Vec<DiagnosticError>) {
+    let start = recorded.len().saturating_sub(DIAGNOSTICS_ERROR_MAX);
+    report.recent_errors = recorded
+        .into_iter()
+        .skip(start)
+        .map(sanitize_error)
+        .collect();
+}
+
+fn sanitize_error(entry: DiagnosticError) -> DiagnosticError {
+    let code = error_codes::canonical_diagnostic_code(&entry.code);
+    DiagnosticError {
+        at: safe_timestamp(&entry.at),
+        code: code.to_string(),
+        message: error_codes::fixed_diagnostic_message(code).to_string(),
+    }
+}
+
+fn safe_timestamp(at: &str) -> String {
+    let ok = (20..=40).contains(&at.len())
+        && at
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '-' | ':' | 'T' | 'Z' | '.' | '+'));
+    if ok {
+        at.to_string()
+    } else {
+        "1970-01-01T00:00:00Z".to_string()
+    }
 }
 
 fn allowlisted_config_labels(status: &crate::control::schema::DaemonStatus) -> Vec<String> {

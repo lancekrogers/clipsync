@@ -1,14 +1,22 @@
 //! A bounded background IPC worker shared by the GUI and TUI.
-use super::model::{display_text, Connection, Domain, Reconciliation, Route, Ticket};
+use super::model::{
+    display_text, Connection, Domain, Reconciliation, Route, SnapshotOrder, Ticket,
+};
 use crate::{
     config::Config,
-    control::{self, Command, EnrollmentSnapshot, Response, TrustedDeviceView},
+    control::{
+        self, error_codes, Command, ControlError, DaemonStatus, DiagnosticError, DiagnosticsReport,
+        EnrollmentSnapshot, Response, TrustedDeviceView,
+    },
 };
 use std::{
-    sync::mpsc,
+    collections::VecDeque,
+    sync::mpsc::{self, TrySendError},
     time::{Duration, Instant},
 };
 use uuid::Uuid;
+
+const DIAGNOSTICS_REDACTION: &str = "clipsync-diagnostics-v1";
 
 #[derive(Clone, Debug)]
 pub struct HistoryRow {
@@ -113,6 +121,211 @@ impl View {
         }
     }
 }
+
+/// Fixed explanations for stable codes. Raw daemon text can carry paths or
+/// clipboard fragments, so it is never shown once a code or a path marker exists.
+fn user_facing_error(error: &ControlError) -> (Option<String>, String) {
+    let code = error
+        .code
+        .as_deref()
+        .filter(|code| error_code_token(code).is_some());
+    let text = match code {
+        Some(error_codes::HISTORY_UNAVAILABLE) => {
+            "Clipboard history is unavailable. Restart the service or repair setup. History contents were not shown."
+        }
+        Some(error_codes::HISTORY_NOT_FOUND) => "That saved copy is no longer available.",
+        Some(error_codes::HISTORY_QUERY_TOO_LONG) => {
+            "Search is limited to 256 bytes. Shorten your search."
+        }
+        Some(error_codes::HISTORY_ENTRY_TOO_LARGE) | Some(error_codes::CLIPBOARD_TOO_LARGE) => {
+            "That copy is larger than the configured limit."
+        }
+        Some(error_codes::SYNC_PAUSED) => "Sync is paused. Resume syncing to share the current copy.",
+        Some(error_codes::RESUME_FAILED) => {
+            "Sync could not resume, so it stays paused. Check the clipboard and try again."
+        }
+        Some(error_codes::UNSUPPORTED_PROTOCOL) | Some(error_codes::UNSUPPORTED_COMMAND) => {
+            "This service needs an update before that action can run."
+        }
+        Some(error_codes::PEER_OTHER_USER) => {
+            "The service belongs to another user. Choose the service for this account."
+        }
+        Some(error_codes::FRAME_TOO_LARGE) => "The service rejected an oversized request.",
+        Some(error_codes::DAEMON_PAUSED) => "Sync is paused. Copies stay on this computer.",
+        Some(error_codes::ENROLLMENT_CLOSED) => "Enrollment is not open. Allow a device, then try again.",
+        Some(error_codes::ENROLLMENT_EXPIRED) => "Verification expired. Start the connection again.",
+        Some(error_codes::ENROLLMENT_CANCELLED) => "The connection was cancelled.",
+        Some(error_codes::ENROLLMENT_RATE_LIMITED) => {
+            "Too many connection attempts. Wait and try again."
+        }
+        Some(error_codes::ENROLLMENT_MISMATCH) => {
+            "These computers could not verify each other. No device was authorized."
+        }
+        Some(error_codes::ENROLLMENT_REFLECTION) | Some(error_codes::ENROLLMENT_REPLAY) => {
+            "That connection was refused. No device was authorized."
+        }
+        Some(error_codes::ENROLLMENT_OVERSIZE) => {
+            "The connection was refused because the message was too large."
+        }
+        Some(error_codes::ENROLLMENT_BUSY) => "A connection is already in progress.",
+        Some(error_codes::ENROLLMENT_NOT_FOUND) => "That connection is no longer available.",
+        Some(error_codes::ENROLLMENT_INCOMPLETE) => {
+            "Authorization is not finished on both computers."
+        }
+        Some(error_codes::ENROLLMENT_UNAUTHORIZED) => "The service rejected that device action.",
+        Some(_) => "The service could not complete that action. Try again.",
+        None if error.message.to_ascii_lowercase().contains("timed out") => {
+            "The service did not answer in time. Check that it is running, then try again."
+        }
+        None if error.message.to_ascii_lowercase().contains("another user") => {
+            "The service belongs to another user. Choose the service for this account."
+        }
+        None => "The service could not complete that request. Check that it is running, then try again.",
+    };
+    (code.map(str::to_string), text.to_string())
+}
+
+fn error_code_token(text: &str) -> Option<&str> {
+    if (1..=64).contains(&text.len())
+        && text
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    {
+        Some(text)
+    } else {
+        None
+    }
+}
+
+/// Allowlisted diagnostics text. Returns None when the redaction marker is missing
+/// or the rendered text still contains a path or format mark.
+fn render_diagnostics(report: &DiagnosticsReport) -> Option<String> {
+    if report.redaction != DIAGNOSTICS_REDACTION {
+        return None;
+    }
+    let version = plain_token(&report.app_version, 32, true).unwrap_or_else(|| "unknown".into());
+    let generated = plain_token(&report.generated_at, 40, true).unwrap_or_else(|| "unknown".into());
+    let service = match report.service_mode_hint.as_str() {
+        "user-launchd" | "user-systemd" | "foreground" | "unknown" => {
+            report.service_mode_hint.as_str()
+        }
+        _ => "unknown",
+    };
+    let features: Vec<String> = report
+        .features
+        .iter()
+        .filter_map(|feature| plain_token(feature, 32, false))
+        .take(32)
+        .collect();
+    let labels: Vec<String> = report
+        .config_labels
+        .iter()
+        .filter_map(|label| config_label(label))
+        .take(32)
+        .collect();
+    let errors: Vec<String> = report
+        .recent_errors
+        .iter()
+        .filter_map(diagnostic_error_line)
+        .take(20)
+        .collect();
+    let mut lines = vec![
+        format!("ClipSync diagnostics ({DIAGNOSTICS_REDACTION})"),
+        format!("Generated: {generated}"),
+        format!("Version: {version}"),
+        format!("Control protocol: {}", report.control_version),
+        format!("Paused: {}", if report.paused { "yes" } else { "no" }),
+        format!("Connected devices: {}", report.connected_peer_count),
+        format!(
+            "History: {}",
+            if report.history_available {
+                "available"
+            } else {
+                "unavailable"
+            }
+        ),
+        format!("History capacity: {}", report.history_capacity),
+        format!("Clipboard limit: {} bytes", report.max_clipboard_bytes),
+        format!("Service: {service}"),
+        format!(
+            "Features: {}",
+            if features.is_empty() {
+                "none".into()
+            } else {
+                features.join(", ")
+            }
+        ),
+        format!(
+            "Config: {}",
+            if labels.is_empty() {
+                "none".into()
+            } else {
+                labels.join(", ")
+            }
+        ),
+        "Recent errors:".into(),
+    ];
+    if errors.is_empty() {
+        lines.push("none".into());
+    } else {
+        lines.extend(errors);
+    }
+    let rendered = lines.join("\n");
+    if rendered.chars().any(|ch| {
+        ch == '/'
+            || ch == '\\'
+            || (ch.is_control() && ch != '\n')
+            || super::model::is_unsafe_format(ch)
+    }) {
+        return None;
+    }
+    Some(rendered)
+}
+
+fn plain_token(text: &str, max: usize, dotted: bool) -> Option<String> {
+    let cleaned = display_text(text, false);
+    if cleaned.is_empty() || cleaned.chars().count() > max {
+        return None;
+    }
+    let ok = cleaned.chars().all(|ch| {
+        ch.is_ascii_alphanumeric()
+            || ch == '_'
+            || (dotted && matches!(ch, '.' | '+' | '-' | ':' | 'T' | 'Z'))
+    });
+    ok.then_some(cleaned)
+}
+
+fn config_label(text: &str) -> Option<String> {
+    let cleaned = display_text(text, false);
+    if cleaned.len() > 80 {
+        return None;
+    }
+    let (key, value) = cleaned.split_once('=')?;
+    let ident = |part: &str| {
+        !part.is_empty()
+            && part
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    };
+    if ident(key) && ident(value) {
+        Some(cleaned)
+    } else {
+        None
+    }
+}
+
+fn diagnostic_error_line(error: &DiagnosticError) -> Option<String> {
+    let code = error_code_token(&display_text(&error.code, false))?.to_string();
+    let at = plain_token(&error.at, 40, true);
+    Some(match at {
+        Some(at) => format!("- {at} {code}"),
+        None => format!("- {code}"),
+    })
+}
+
+fn show_label(text: &str) -> String {
+    display_text(text, false)
+}
 #[derive(Debug)]
 pub enum Intent {
     Navigate(Route),
@@ -159,7 +372,22 @@ pub struct Controller {
     enrollment_pending: bool,
     devices_pending: bool,
     history_generation: Option<(Uuid, u64)>,
+    /// Generation that produced the current success notice. A newer status clears it.
+    notice_generation: Option<u64>,
+    /// Read requests that could not be queued. At most one job per read domain,
+    /// in the order that domain first waited. A later read replaces only its own
+    /// domain, so a status poll cannot discard a parked detail or search.
+    /// Mutations are not retried.
+    retries: VecDeque<Job>,
 }
+
+fn is_read(domain: Domain) -> bool {
+    matches!(
+        domain,
+        Domain::Status | Domain::History | Domain::Detail | Domain::Enrollment | Domain::Devices
+    )
+}
+
 impl Controller {
     /// Starts a client only. This never starts a daemon or opens its history DB.
     pub fn connect(config: Config) -> anyhow::Result<Self> {
@@ -207,6 +435,8 @@ impl Controller {
             enrollment_pending: false,
             devices_pending: false,
             history_generation: None,
+            notice_generation: None,
+            retries: VecDeque::new(),
         };
         client.refresh();
         Ok(client)
@@ -232,14 +462,30 @@ impl Controller {
                 if query.len() > 256 {
                     self.view.error =
                         Some("Search is limited to 256 bytes. Shorten your search.".into());
+                    self.view.error_code = Some(error_codes::HISTORY_QUERY_TOO_LONG.into());
                     return;
                 }
+                let unavailable = !matches!(
+                    self.view.connection,
+                    Connection::Ready | Connection::Connected(_) | Connection::Paused
+                );
                 self.view.query = query;
                 self.reconciliation.begin(Domain::Detail);
                 self.view.selected = None;
                 self.view.detail = None;
                 self.view.detail_page = 0;
                 self.view.detail_loading = false;
+                self.view.history.clear();
+                self.history_generation = None;
+                if unavailable {
+                    self.view.history_loading = false;
+                    self.view.error = Some(
+                        "The service cannot be reached, so search results were cleared. Try again when it is available."
+                            .into(),
+                    );
+                    self.view.error_code = None;
+                    return;
+                }
                 self.history();
             }
             Intent::DetailPage(page) => {
@@ -250,8 +496,8 @@ impl Controller {
                     self.view.selected = Some(id);
                     self.view.detail = None;
                     self.view.detail_page = 0;
-                    self.view.detail_loading =
-                        self.send(Domain::Detail, Command::HistoryGet { id });
+                    let sent = self.send(Domain::Detail, Command::HistoryGet { id });
+                    self.view.detail_loading = self.arm(Domain::Detail, sent);
                 }
             }
             Intent::CopySelected
@@ -338,16 +584,77 @@ impl Controller {
     }
     fn send(&mut self, domain: Domain, command: Command) -> bool {
         let ticket = self.reconciliation.begin(domain);
-        match self
-            .jobs
-            .as_ref()
-            .map(|jobs| jobs.try_send(Job { ticket, command }))
-        {
+        self.enqueue(Job { ticket, command })
+    }
+    fn enqueue(&mut self, job: Job) -> bool {
+        let read = is_read(job.ticket.domain);
+        match self.jobs.as_ref().map(|jobs| jobs.try_send(job)) {
             Some(Ok(())) => true,
-            _ => {
+            Some(Err(TrySendError::Full(job))) if read => {
+                self.park_read(job);
+                false
+            }
+            Some(Err(TrySendError::Full(_))) => {
                 self.view.error =
                     Some("The service is busy. Try again after the current request.".into());
                 false
+            }
+            _ => {
+                self.view.error = Some(
+                    "The service could not be reached. Start it from Settings, then try again."
+                        .into(),
+                );
+                false
+            }
+        }
+    }
+    /// Keep the newest read for this domain. Other parked domains stay in place,
+    /// so a later status or search cannot evict the latest detail.
+    fn park_read(&mut self, job: Job) {
+        if let Some(queued) = self
+            .retries
+            .iter_mut()
+            .find(|queued| queued.ticket.domain == job.ticket.domain)
+        {
+            *queued = job;
+            return;
+        }
+        self.retries.push_back(job);
+    }
+    fn arm(&self, domain: Domain, sent: bool) -> bool {
+        sent || self
+            .retries
+            .iter()
+            .any(|job| job.ticket.domain == domain && self.reconciliation.current(job.ticket))
+    }
+    fn note_read_pending(&mut self, domain: Domain) {
+        match domain {
+            Domain::Status => self.status_pending = true,
+            Domain::History => self.view.history_loading = true,
+            Domain::Detail => self.view.detail_loading = true,
+            Domain::Enrollment => self.enrollment_pending = true,
+            Domain::Devices => self.devices_pending = true,
+            _ => {}
+        }
+    }
+    fn flush_retry(&mut self) {
+        let waiting = std::mem::take(&mut self.retries);
+        let mut blocked = false;
+        for job in waiting {
+            if blocked {
+                self.retries.push_back(job);
+                continue;
+            }
+            // A newer request for this domain already owns the pending flag.
+            if !self.reconciliation.current(job.ticket) {
+                continue;
+            }
+            let domain = job.ticket.domain;
+            if self.enqueue(job) {
+                self.note_read_pending(domain);
+            } else {
+                // Full re-parks this read at the front. A dead worker does not.
+                blocked = true;
             }
         }
     }
@@ -359,18 +666,21 @@ impl Controller {
             return;
         }
         if !self.enrollment_pending {
-            self.enrollment_pending = self.send(
+            let sent = self.send(
                 Domain::Enrollment,
                 Command::EnrollmentInspect { session_id: None },
             );
+            self.enrollment_pending = self.arm(Domain::Enrollment, sent);
         }
         if !self.devices_pending {
-            self.devices_pending = self.send(Domain::Devices, Command::TrustedDevices);
+            let sent = self.send(Domain::Devices, Command::TrustedDevices);
+            self.devices_pending = self.arm(Domain::Devices, sent);
         }
     }
     fn refresh(&mut self) {
         if !self.status_pending {
-            self.status_pending = self.send(Domain::Status, Command::Status);
+            let sent = self.send(Domain::Status, Command::Status);
+            self.status_pending = self.arm(Domain::Status, sent);
             self.last_poll = Instant::now();
         }
     }
@@ -389,14 +699,20 @@ impl Controller {
                 limit: 20,
             }
         };
-        self.view.history_loading = self.send(Domain::History, command);
+        let sent = self.send(Domain::History, command);
+        self.view.history_loading = self.arm(Domain::History, sent);
     }
     pub fn tick(&mut self) {
         while let Ok(reply) = self.replies.try_recv() {
             self.apply(reply);
         }
+        self.flush_retry();
         let now = Instant::now();
-        self.view.stale = self.reconciliation.stale(now);
+        self.view.stale = self.reconciliation.stale(now)
+            || matches!(
+                self.view.connection,
+                Connection::Unavailable | Connection::UpgradeRequired
+            );
         if now.duration_since(self.last_poll) >= Duration::from_secs(1) {
             self.refresh();
         }
@@ -425,22 +741,52 @@ impl Controller {
             Err(error) => {
                 self.reconciliation.failed(reply.ticket);
                 if reply.ticket.domain == Domain::Status {
-                    self.view.connection = Connection::Unavailable;
+                    self.view.connection =
+                        if error.code.as_deref() == Some(error_codes::UNSUPPORTED_PROTOCOL) {
+                            Connection::UpgradeRequired
+                        } else {
+                            Connection::Unavailable
+                        };
                     self.view.stale = true;
                 }
-                self.view.error_code = error.code;
-                self.view.error = Some(display_text(&error.message, false));
+                if reply.ticket.domain == Domain::History {
+                    self.view.history.clear();
+                    self.view.selected = None;
+                    self.view.detail = None;
+                    self.view.detail_page = 0;
+                    self.view.detail_loading = false;
+                    self.history_generation = None;
+                    self.reconciliation.begin(Domain::Detail);
+                }
+                if reply.ticket.domain == Domain::Detail {
+                    self.view.detail = None;
+                    self.view.detail_page = 0;
+                }
+                let (code, text) = user_facing_error(&error);
+                self.view.error_code = code;
+                self.view.error = Some(text);
                 self.error_domain = Some(reply.ticket.domain);
                 return;
             }
         };
-        if reply.ticket.domain != Domain::Status
-            && response.instance_id.is_some()
-            && self.reconciliation.instance_id().is_some()
-            && response.instance_id != self.reconciliation.instance_id()
-        {
-            self.refresh();
-            return;
+        if reply.ticket.domain != Domain::Status {
+            if let (Some(instance), Some(generation)) =
+                (response.instance_id, response.state_generation)
+            {
+                match self.reconciliation.note_generation(instance, generation) {
+                    SnapshotOrder::Fresh => {}
+                    SnapshotOrder::Stale | SnapshotOrder::OtherInstance => {
+                        self.refresh();
+                        return;
+                    }
+                }
+            } else if response.instance_id.is_some()
+                && self.reconciliation.instance_id().is_some()
+                && response.instance_id != self.reconciliation.instance_id()
+            {
+                self.refresh();
+                return;
+            }
         }
         match reply.ticket.domain {
             Domain::Status => {
@@ -491,28 +837,22 @@ impl Controller {
                     self.view.detail_page = 0;
                     self.view.notice =
                         Some("The service restarted. State has been refreshed.".into());
+                    self.notice_generation = Some(generation);
                 }
                 if self.error_domain == Some(Domain::Status) {
                     self.view.error = None;
+                    self.view.error_code = None;
                     self.error_domain = None;
                 }
-                self.view.node_id = status.node_id.to_string();
-                self.view.connection = if status.paused {
-                    Connection::Paused
-                } else if response.peers.is_empty() {
-                    Connection::Ready
-                } else {
-                    Connection::Connected(response.peers.len())
-                };
-                self.view.devices = response
-                    .peers
-                    .into_iter()
-                    .map(|peer| DeviceRow {
-                        id: peer.id,
-                        name: display_text(&peer.hostname, false),
-                        address: display_text(&peer.address, false),
-                    })
-                    .collect();
+                if self
+                    .notice_generation
+                    .is_some_and(|notice| generation > notice)
+                    && !restarted
+                {
+                    self.view.notice = None;
+                    self.notice_generation = None;
+                }
+                self.apply_live_status(status, response.peers);
                 if self.view.route == Route::Devices {
                     self.refresh_devices();
                 }
@@ -539,7 +879,7 @@ impl Controller {
                                         .format("%b %-d · %-I:%M %p")
                                         .to_string()
                                 })
-                                .unwrap_or(entry.timestamp),
+                                .unwrap_or_else(|_| show_label(&entry.timestamp)),
                             source: if entry.origin_node.to_string() == self.view.node_id {
                                 "This computer".into()
                             } else {
@@ -588,7 +928,11 @@ impl Controller {
             Domain::Action => {
                 if reply.copy_action && response.pause_applied.is_none() {
                     self.view.error = Some("The service did not confirm the local copy. Update the service and try again.".into());
+                    self.view.error_code = None;
                     return;
+                }
+                if let Some(status) = response.status.clone() {
+                    self.apply_live_status(status, response.peers.clone());
                 }
                 self.view.error = None;
                 self.view.error_code = None;
@@ -599,11 +943,25 @@ impl Controller {
                 if let Some(devices) = response.trusted_devices {
                     self.apply_trusted(devices);
                 }
+                let reported_diagnostics = response.diagnostics.is_some();
                 if let Some(report) = response.diagnostics {
-                    self.view.diagnostics = serde_json::to_string_pretty(&report).ok();
-                    self.view.notice = Some(
-                        "Diagnostics are ready. Clipboard contents and keys are excluded.".into(),
-                    );
+                    match render_diagnostics(&report) {
+                        Some(text) => {
+                            self.view.diagnostics = Some(text);
+                            self.view.notice = Some(
+                                "Diagnostics are ready. Clipboard contents and keys are excluded."
+                                    .into(),
+                            );
+                            self.notice_generation = response.state_generation;
+                        }
+                        None => {
+                            self.view.diagnostics = None;
+                            self.view.error = Some(
+                                "Diagnostics could not be verified and were not shown.".into(),
+                            );
+                            self.view.error_code = None;
+                        }
+                    }
                 } else if let Some(paused) = response.pause_applied {
                     self.view.notice = Some(if response.queued.is_some() {
                         if paused {
@@ -621,31 +979,75 @@ impl Controller {
                     });
                 } else if let Some(queued) = response.queued {
                     self.view.notice = Some(format!("Queued for {queued} connected device(s)."));
+                    self.notice_generation = response.state_generation;
+                }
+                if !reported_diagnostics && response.pause_applied.is_some() {
+                    self.notice_generation = response.state_generation;
                 }
                 self.refresh();
             }
             _ => {}
         }
     }
+    fn apply_live_status(&mut self, status: DaemonStatus, peers: Vec<crate::adapters::Peer>) {
+        self.view.node_id = show_label(&status.node_id);
+        self.view.connection = if status.paused {
+            Connection::Paused
+        } else if peers.is_empty() {
+            Connection::Ready
+        } else {
+            Connection::Connected(peers.len())
+        };
+        self.view.devices = peers
+            .into_iter()
+            .map(|peer| DeviceRow {
+                id: peer.id,
+                name: show_label(&peer.hostname),
+                address: show_label(&peer.address),
+            })
+            .collect();
+        self.reconciliation.mark_fresh(Instant::now());
+    }
     fn apply_trusted(&mut self, mut devices: Vec<TrustedDeviceView>) {
         for device in &mut devices {
-            device.comment = device.comment.take().map(|text| display_text(&text, false));
+            device.fingerprint = show_label(&device.fingerprint);
+            device.comment = device.comment.take().map(|text| show_label(&text));
         }
         self.view.trusted_devices = devices;
     }
     fn apply_enrollment(&mut self, mut snapshot: EnrollmentSnapshot) {
+        snapshot.listen_addr = snapshot.listen_addr.take().map(|addr| show_label(&addr));
+        if let Some(outcome) = snapshot.outcome.as_mut() {
+            outcome.status = show_label(&outcome.status);
+            outcome.detail = outcome.detail.take().map(|detail| show_label(&detail));
+            outcome.peer_fingerprint = outcome
+                .peer_fingerprint
+                .take()
+                .map(|fingerprint| show_label(&fingerprint));
+        }
         for session in &mut snapshot.sessions {
+            session.role = show_label(&session.role);
+            session.state = show_label(&session.state);
+            session.local_fingerprint = show_label(&session.local_fingerprint);
+            session.peer_fingerprint = session
+                .peer_fingerprint
+                .take()
+                .map(|fingerprint| show_label(&fingerprint));
+            session.dialed_addr = session.dialed_addr.take().map(|addr| show_label(&addr));
             session.peer_display_name = session
                 .peer_display_name
                 .take()
-                .map(|name| display_text(&name, false));
-            session.error = session
-                .error
-                .take()
-                .map(|error| display_text(&error, false));
+                .map(|name| show_label(&name));
+            session.error = session.error.take().map(|error| show_label(&error));
         }
         for candidate in &mut snapshot.candidates {
-            candidate.display_name = display_text(&candidate.display_name, false);
+            candidate.display_name = show_label(&candidate.display_name);
+            candidate.address = show_label(&candidate.address);
+            candidate.source = show_label(&candidate.source);
+            candidate.advertised_fingerprint = candidate
+                .advertised_fingerprint
+                .take()
+                .map(|fingerprint| show_label(&fingerprint));
         }
         if self.view.selected_session.is_none_or(|id| {
             !snapshot
@@ -680,5 +1082,75 @@ mod tests {
         assert_eq!(reconstructed, original);
         view.detail_page = usize::MAX;
         assert!(!view.visible_detail().unwrap().is_empty());
+    }
+
+    #[test]
+    fn diagnostics_renderer_drops_payloads_paths_and_format_marks() {
+        let report = DiagnosticsReport {
+            generated_at: "2026-10-20T00:00:00Z".into(),
+            app_version: "0.1.0\u{202e}".into(),
+            control_version: 1,
+            features: vec!["pause".into(), "not a feature".into()],
+            paused: true,
+            connected_peer_count: 0,
+            history_available: false,
+            history_capacity: 20,
+            max_clipboard_bytes: 1024,
+            service_mode_hint: "foreground".into(),
+            config_labels: vec![
+                "history_key=configured".into(),
+                "authorized_keys=/Users/me/.ssh/authorized_keys".into(),
+            ],
+            recent_errors: vec![DiagnosticError {
+                at: "2026-10-20T00:00:01Z".into(),
+                code: "history_unavailable".into(),
+                message: "History unavailable: secret-clipboard /tmp/history.key".into(),
+            }],
+            redaction: DIAGNOSTICS_REDACTION.into(),
+        };
+        let text = render_diagnostics(&report).unwrap();
+        assert!(text.contains(DIAGNOSTICS_REDACTION));
+        assert!(text.contains("history_key=configured"));
+        assert!(text.contains("history_unavailable"));
+        assert!(text.contains("Paused: yes"));
+        assert!(!text.contains("secret-clipboard"), "{text}");
+        assert!(!text.contains("/Users"), "{text}");
+        assert!(!text.contains("history.key"), "{text}");
+        assert!(!text.contains('\u{202e}'), "{text}");
+        assert!(!text.contains("not a feature"), "{text}");
+
+        let mut rejected = report.clone();
+        rejected.redaction = "raw".into();
+        assert!(render_diagnostics(&rejected).is_none());
+    }
+
+    #[test]
+    fn error_text_follows_the_code_and_hides_paths() {
+        let error = ControlError {
+            code: Some(error_codes::HISTORY_UNAVAILABLE.into()),
+            message: "History unavailable: secret-clipboard /tmp/history.key".into(),
+        };
+        let (code, text) = user_facing_error(&error);
+        assert_eq!(code.as_deref(), Some(error_codes::HISTORY_UNAVAILABLE));
+        assert!(text.contains("unavailable"));
+        assert!(!text.contains("secret-clipboard"), "{text}");
+        assert!(!text.contains("history.key"), "{text}");
+
+        let leaked = ControlError {
+            code: None,
+            message: "expected ident at line 1 column 2".into(),
+        };
+        let (_, text) = user_facing_error(&leaked);
+        assert!(!text.contains("expected ident"), "{text}");
+        assert!(!text.contains("column"), "{text}");
+        assert!(text.contains("could not complete"));
+
+        let plaintext = ControlError {
+            code: None,
+            message: "secret-clipboard".into(),
+        };
+        let (_, text) = user_facing_error(&plaintext);
+        assert!(!text.contains("secret-clipboard"), "{text}");
+        assert!(text.contains("could not complete"));
     }
 }

@@ -36,7 +36,7 @@ test pasteboards.
 | Area | Observable behavior |
 |---|---|
 | History | Real encrypted rows, search and empty states, UUID-bound details, original text copied through daemon IPC, Unicode pagination |
-| Reconciliation | Restart identity and generation ordering, disconnected action gating, rapid selection changes, old-daemon capability mismatch |
+| Reconciliation | Restart identity and generation ordering, disconnected action gating, rapid selection changes, old-daemon capability mismatch; real GUI/TUI malformed/disconnected IPC and recovery |
 | Desktop | Native window, minimum-size action visibility, keyboard focus, first-run files, tray close/reopen/pause/quit on macOS |
 | Terminal | Shared routes, search, copy, pause, narrow terminal, NO_COLOR, terminal restoration |
 | Setup | Explicit/legacy/conflicting configurations, no-clobber identity creation, private permissions, repeat/interrupted setup, existing history key preservation |
@@ -84,3 +84,48 @@ The packaging fixtures simulate signing failure paths; no Developer ID signature
 or Apple notarization was obtained. Local evidence lives under
 `target/companion-evidence/` and `target/companion-linux-evidence/` and is excluded
 from version control. The README screenshot contains isolated fixture data.
+
+## Local-control recovery harness
+
+`companion_recovery.py` runs as part of both native and disposable Linux runners.
+It interposes a temporary same-user socket proxy on the isolated fixture, first
+closes requests and then returns malformed JSON. The actual GUI and TUI must both
+show Service unavailable, reject pause actions during the outage, recover without
+relaunch, and converge when pause is changed through one interface and resumed
+through the other. The PTY must restore terminal modes and cursor on exit.
+The original fixture socket is restored in cleanup. This verifies IPC recovery;
+it does not substitute for a physical reboot or remote-network lifecycle test.
+
+On the root-owned disposable X11 fixture, `companion_control_uid.py` temporarily
+allows traversal to the test socket and connects as `nobody`. The daemon must
+reject that connection without responding, then still answer its own user.
+The harness restores the fixture permissions. This tests kernel peer credentials
+independently of the directory's usual protection.
+
+## Local-control follow-up (2026-10-20)
+
+- Rust 1.95 workspace/all-features tests: 350 passed, 2 ignored on macOS;
+  348 passed, 3 ignored in Debian arm64. Formatting and workspace/all-features
+  Clippy with warnings denied passed on macOS. The ignored cases remain those
+  described above; multicast was not rerun for this control-only change.
+- Native macOS GUI/PTY, malformed/disconnected IPC recovery, full Unicode history,
+  mutual enrollment/revocation and isolated first-run setup passed.
+- Disposable X11 and Sway GUI/PTY, IPC recovery and full Unicode history passed.
+  X11 also passed the actual wrong-user credential check.
+- The macOS tray rerun could not click the icon because Hidden Bar positioned it
+  outside every display. Native close-to-tray succeeded, but tray actions are
+  **unverified on this revision**. The earlier candidate's tray result above is
+  historical evidence, not a pass for this rerun.
+
+Control calls stop pending handler work on disconnect or the three-second server
+deadline. Completed writes and bytes already handed to a peer cannot be recalled.
+Read retries retain the latest request separately for each view; mutations are
+not retried automatically. Incompatible protocol replies direct users to update
+instead of restart.
+
+Diagnostics include at most 20 recent failures from the current control server,
+using fixed allowlisted codes/messages and timestamps. They reset on daemon
+restart and do not collect host logs. Tests check sentinel clipboard text, keys,
+peer labels and paths are absent from exports, rendered errors and control debug
+logs. No history format, identity, service installation or dependency changes
+are part of this follow-up.

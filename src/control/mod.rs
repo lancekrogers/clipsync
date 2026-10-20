@@ -2,10 +2,16 @@
 //! Per-user daemon control. The socket directory and peer credentials protect both ends.
 //!
 //! Protocol version 1 with additive D04 commands and D03 enrollment IPC.
+//! One request is read per connection. The handler is dropped if that client
+//! disconnects or the 3s deadline expires, so a stalled peer cannot keep the
+//! accept loop busy past the bound. Same-user processes remain inside the
+//! trust boundary.
 //!
 //! **Pause / transport limit (honest):** pause clears not-yet-sent `pending` /
 //! `queued_sessions` only. Frames already handed to the OS clipboard or peer
 //! transport cannot be recalled; there is no transport cancellation API here.
+//! Dropping an in-flight control call stops at the current `.await`. Clipboard
+//! or history writes that already completed are not rolled back.
 
 mod diagnostics;
 pub mod error_codes;
@@ -30,19 +36,24 @@ use crate::config::Config;
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::{
+    collections::VecDeque,
     fs,
     os::unix::{
-        fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
+        fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
         io::AsRawFd,
     },
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::{UnixListener, UnixStream},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::{unix::OwnedReadHalf, UnixListener, UnixStream},
     time::timeout,
 };
+
+const SERVER_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Worst-case JSON string encoding per UTF-8 byte (`\u00XX`).
 const JSON_UTF8_BYTE_EXPANSION: usize = 6;
@@ -89,10 +100,15 @@ pub fn socket_path(config: &Config) -> PathBuf {
 
 fn private_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
-    match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+    let created = match fs::DirBuilder::new().mode(0o700).create(path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
         Err(e) => return Err(e.into()),
+    };
+    // mkdir applies umask. A directory this call just created is pinned to 0700.
+    // An existing directory is rejected below rather than widened.
+    if created {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
     let meta = fs::symlink_metadata(path)?;
     if !meta.is_dir()
@@ -105,11 +121,20 @@ fn private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn check_peer(stream: &UnixStream) -> Result<()> {
-    if stream.peer_cred()?.uid() != unsafe { libc::geteuid() } {
+fn ensure_same_user(peer_uid: u32) -> Result<()> {
+    if peer_uid != unsafe { libc::geteuid() } {
         bail!("Control peer belongs to another user");
     }
     Ok(())
+}
+
+fn check_peer(stream: &UnixStream) -> Result<()> {
+    // `peer_cred` failure fails closed: no credential, no dispatch.
+    ensure_same_user(stream.peer_cred()?.uid())
+}
+
+fn frame_too_large(max_frame: usize) -> String {
+    format!("Control frame exceeds {max_frame} bytes")
 }
 
 fn apply_snapshot(response: &mut Response, snap: ControlSnapshot) {
@@ -181,12 +206,37 @@ fn enrollment_error_code(message: &str) -> Option<&'static str> {
         .map(|(_, code)| *code)
 }
 
+/// Bounded control-operation failures for one [`Server`]. Not a host log.
+struct ErrorRing {
+    entries: VecDeque<DiagnosticError>,
+}
+
+impl ErrorRing {
+    fn new() -> Self {
+        Self {
+            entries: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, entry: DiagnosticError) {
+        while self.entries.len() >= schema::DIAGNOSTICS_ERROR_MAX {
+            self.entries.pop_front();
+        }
+        self.entries.push_back(entry);
+    }
+
+    fn snapshot(&self) -> Vec<DiagnosticError> {
+        self.entries.iter().cloned().collect()
+    }
+}
+
 pub struct Server {
     listener: UnixListener,
     path: PathBuf,
     _lock: fs::File,
     max_frame: usize,
     max_clipboard: usize,
+    recent_errors: Mutex<ErrorRing>,
 }
 
 impl Server {
@@ -194,13 +244,19 @@ impl Server {
         let max_frame = max_frame_bytes(config);
         let max_clipboard = config.clipboard.max_size;
         private_directory(path.parent().context("Socket has no parent")?)?;
+        let lock_path = path.with_extension("lock");
         let lock = fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(path.with_extension("lock"))?;
+            .open(&lock_path)?;
+        // fchmod the opened inode so umask or a pre-existing mode cannot leave
+        // the lock group-readable. O_NOFOLLOW above refuses a symlink.
+        if unsafe { libc::fchmod(lock.as_raw_fd(), 0o600) } != 0 {
+            bail!("Control lock must be mode 0600");
+        }
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             bail!("ClipSync daemon already owns this control socket");
         }
@@ -210,39 +266,159 @@ impl Server {
             Err(e) => return Err(e.into()),
         }
         let listener = UnixListener::bind(&path)?;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        if let Err(err) = prepare_socket(&path) {
+            drop(listener);
+            let _ = fs::remove_file(&path);
+            return Err(err);
+        }
         Ok(Self {
             listener,
             path,
             _lock: lock,
             max_frame,
             max_clipboard,
+            recent_errors: Mutex::new(ErrorRing::new()),
         })
     }
 
     pub async fn run(&self, target: &dyn Target) -> Result<()> {
         loop {
-            let (mut stream, _) = self.listener.accept().await?;
-            let result = timeout(Duration::from_secs(3), async {
-                check_peer(&stream)?;
-                let request: Request = read_json(&mut stream, self.max_frame).await?;
-                let mut response = Response::base();
-                if request.version != PROTOCOL_VERSION {
-                    response.fail(
-                        error_codes::UNSUPPORTED_PROTOCOL,
-                        "Unsupported control protocol",
-                    );
-                } else {
-                    dispatch(target, request.command, &mut response, self.max_clipboard).await;
+            let (stream, _) = self.listener.accept().await?;
+            match timeout(
+                SERVER_REQUEST_TIMEOUT,
+                self.handle_connection(stream, target),
+            )
+            .await
+            {
+                // Parser errors can echo request text. Keep the log payload-free;
+                // the bounded diagnostic ring carries the safe classification.
+                Ok(Err(_)) => tracing::debug!("Control request rejected"),
+                Err(_) => {
+                    tracing::debug!("Control request timed out");
+                    self.remember(error_codes::CONTROL_TIMEOUT);
                 }
-                write_json(&mut stream, &response, self.max_frame).await
-            })
-            .await;
-            if let Ok(Err(e)) = result {
-                tracing::debug!("Control request rejected: {e}");
+                Ok(Ok(())) => {}
             }
         }
     }
+
+    async fn handle_connection(&self, mut stream: UnixStream, target: &dyn Target) -> Result<()> {
+        if let Err(err) = check_peer(&stream) {
+            self.remember_rejected_peer(&err);
+            return Err(err);
+        }
+        let request = self.read_request(&mut stream).await?;
+        if request.version != PROTOCOL_VERSION {
+            let mut response = Response::base();
+            response.fail(
+                error_codes::UNSUPPORTED_PROTOCOL,
+                "Unsupported control protocol",
+            );
+            self.remember(error_codes::UNSUPPORTED_PROTOCOL);
+            return write_json(&mut stream, &response, self.max_frame).await;
+        }
+        // The request frame is already consumed. Poll disconnect first so a
+        // client that is already gone does not start `dispatch`. EOF or a read
+        // error drops the target future at its current await.
+        let command = request.command;
+        let (mut read_half, mut write_half) = stream.into_split();
+        let mut response = Response::base();
+        tokio::select! {
+            biased;
+            _ = peer_gone(&mut read_half) => {
+                tracing::debug!("Control client disconnected; in-flight request cancelled");
+                return Ok(());
+            }
+            _ = dispatch(target, command, &mut response, self.max_clipboard) => {}
+        }
+        self.overlay_diagnostics(&mut response);
+        self.note_response_error(&response);
+        let written = write_json(&mut write_half, &response, self.max_frame).await;
+        if written.is_err() && response.error.is_none() {
+            self.remember(error_codes::CONTROL_PROTOCOL);
+        }
+        written
+    }
+
+    async fn read_request(&self, stream: &mut UnixStream) -> Result<Request> {
+        match read_json(stream, self.max_frame).await {
+            Ok(request) => Ok(request),
+            Err(ReadFrameError::TooLarge { max_frame }) => {
+                let message = frame_too_large(max_frame);
+                let mut response = Response::base();
+                response.fail(error_codes::FRAME_TOO_LARGE, message.clone());
+                self.remember(error_codes::FRAME_TOO_LARGE);
+                write_json(stream, &response, self.max_frame).await?;
+                bail!("{message}");
+            }
+            Err(ReadFrameError::Failed(err)) => {
+                self.remember(error_codes::CONTROL_PROTOCOL);
+                Err(err)
+            }
+        }
+    }
+
+    /// Classifies the credential error. The text is not stored.
+    fn remember_rejected_peer(&self, err: &anyhow::Error) {
+        let code = if err
+            .to_string()
+            .starts_with("Control peer belongs to another user")
+        {
+            error_codes::PEER_OTHER_USER
+        } else {
+            error_codes::CONTROL_FAILED
+        };
+        self.remember(code);
+    }
+
+    fn note_response_error(&self, response: &Response) {
+        if response.error.is_some() {
+            self.remember(
+                response
+                    .error_code
+                    .as_deref()
+                    .unwrap_or(error_codes::CONTROL_FAILED),
+            );
+        }
+    }
+
+    fn overlay_diagnostics(&self, response: &mut Response) {
+        if let Some(report) = response.diagnostics.as_mut() {
+            diagnostics::overlay_recent_errors(report, self.recent_errors_snapshot());
+        }
+    }
+
+    fn remember(&self, code: &str) {
+        let entry = diagnostics::diagnostic_error(code);
+        self.recent_errors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(entry);
+    }
+
+    fn recent_errors_snapshot(&self) -> Vec<DiagnosticError> {
+        self.recent_errors
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .snapshot()
+    }
+}
+
+fn prepare_socket(path: &Path) -> Result<()> {
+    // chmod the filesystem path. fchmod on the listen fd returns EINVAL on
+    // macOS and does not change the path mode on Linux (it stays 0755). The
+    // parent is already 0700, so another uid cannot traverse during this
+    // window. Reject a symlink or a mode that still grants group/other access.
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    let meta = fs::symlink_metadata(path)?;
+    if meta.file_type().is_symlink()
+        || !meta.file_type().is_socket()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.mode() & 0o077 != 0
+    {
+        bail!("Control socket must be owned by this user with mode 0600");
+    }
+    Ok(())
 }
 
 async fn dispatch(
@@ -417,31 +593,67 @@ impl Drop for Server {
     }
 }
 
-async fn read_json<T: serde::de::DeserializeOwned>(
-    stream: &mut UnixStream,
-    max_frame: usize,
-) -> Result<T> {
-    let length = stream.read_u32().await? as usize;
-    if length > max_frame {
-        bail!("Control frame exceeds {max_frame} bytes");
-    }
-    let mut data = vec![0; length];
-    stream.read_exact(&mut data).await?;
-    Ok(serde_json::from_slice(&data)?)
+enum ReadFrameError {
+    TooLarge { max_frame: usize },
+    Failed(anyhow::Error),
 }
 
-async fn write_json<T: Serialize>(
-    stream: &mut UnixStream,
-    value: &T,
-    max_frame: usize,
-) -> Result<()> {
-    let data = serde_json::to_vec(value)?;
-    if data.len() > max_frame {
-        bail!("Control frame exceeds {max_frame} bytes");
+fn read_frame_error(err: ReadFrameError) -> anyhow::Error {
+    match err {
+        ReadFrameError::TooLarge { max_frame } => anyhow::anyhow!("{}", frame_too_large(max_frame)),
+        ReadFrameError::Failed(err) => err,
     }
-    stream.write_u32(data.len() as u32).await?;
+}
+
+async fn read_json<T, R>(stream: &mut R, max_frame: usize) -> std::result::Result<T, ReadFrameError>
+where
+    T: serde::de::DeserializeOwned,
+    R: AsyncRead + Unpin,
+{
+    let length = match stream.read_u32().await {
+        Ok(length) => length as usize,
+        Err(err) => return Err(ReadFrameError::Failed(err.into())),
+    };
+    if length > max_frame {
+        return Err(ReadFrameError::TooLarge { max_frame });
+    }
+    let mut data = vec![0; length];
+    if let Err(err) = stream.read_exact(&mut data).await {
+        return Err(ReadFrameError::Failed(err.into()));
+    }
+    match serde_json::from_slice(&data) {
+        Ok(value) => Ok(value),
+        Err(err) => Err(ReadFrameError::Failed(err.into())),
+    }
+}
+
+async fn write_json<T, W>(stream: &mut W, value: &T, max_frame: usize) -> Result<()>
+where
+    T: Serialize,
+    W: AsyncWrite + Unpin,
+{
+    let data = serde_json::to_vec(value)?;
+    let Ok(len) = u32::try_from(data.len()) else {
+        bail!("{}", frame_too_large(max_frame));
+    };
+    if data.len() > max_frame {
+        bail!("{}", frame_too_large(max_frame));
+    }
+    stream.write_u32(len).await?;
     stream.write_all(&data).await?;
     Ok(())
+}
+
+/// EOF or a reset after the request frame means the client is gone.
+/// Extra bytes are discarded: a connection carries one request.
+async fn peer_gone(read: &mut OwnedReadHalf) {
+    let mut buf = [0u8; 64];
+    loop {
+        match read.read(&mut buf).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+    }
 }
 
 fn daemon_unreachable_message() -> String {
@@ -466,7 +678,7 @@ pub async fn request(path: &Path, command: Command, max_frame: usize) -> Result<
 
 /// Raw response including failed envelopes (does not convert `error` into Err).
 pub async fn request_raw(path: &Path, command: Command, max_frame: usize) -> Result<Response> {
-    timeout(Duration::from_secs(4), async {
+    timeout(CLIENT_REQUEST_TIMEOUT, async {
         let mut stream = UnixStream::connect(path)
             .await
             .context(daemon_unreachable_message())?;
@@ -480,9 +692,15 @@ pub async fn request_raw(path: &Path, command: Command, max_frame: usize) -> Res
             max_frame,
         )
         .await?;
-        let response: Response = read_json(&mut stream, max_frame).await?;
+        let response: Response = read_json(&mut stream, max_frame)
+            .await
+            .map_err(read_frame_error)?;
         if response.version != PROTOCOL_VERSION {
-            bail!("Unsupported daemon control protocol");
+            return Err(ControlError {
+                code: Some(error_codes::UNSUPPORTED_PROTOCOL.into()),
+                message: "Unsupported daemon control protocol".into(),
+            }
+            .into());
         }
         Ok(response)
     })
@@ -496,12 +714,13 @@ pub async fn request_result(
     command: Command,
     max_frame: usize,
 ) -> std::result::Result<Response, ControlError> {
-    let response = request_raw(path, command, max_frame)
-        .await
-        .map_err(|e| ControlError {
-            code: None,
-            message: e.to_string(),
-        })?;
+    let response = request_raw(path, command, max_frame).await.map_err(|e| {
+        e.downcast::<ControlError>()
+            .unwrap_or_else(|error| ControlError {
+                code: None,
+                message: error.to_string(),
+            })
+    })?;
     if let Some(err) = ControlError::from_response(&response) {
         return Err(err);
     }
@@ -587,5 +806,13 @@ mod tests {
         let err = ControlError::from_response(&response).unwrap();
         assert_eq!(err.code.as_deref(), Some(error_codes::SYNC_PAUSED));
         assert_eq!(err.message, "Sync paused");
+    }
+
+    #[test]
+    fn other_uid_is_rejected_and_same_uid_is_allowed() {
+        let uid = unsafe { libc::geteuid() };
+        assert!(ensure_same_user(uid).is_ok());
+        let err = ensure_same_user(uid.wrapping_add(1)).unwrap_err();
+        assert!(err.to_string().contains("another user"));
     }
 }
