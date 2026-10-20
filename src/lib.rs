@@ -21,14 +21,17 @@ pub mod adapters;
 pub mod auth;
 pub mod cli;
 pub mod clipboard;
+pub mod companion;
 pub mod config;
 pub mod control;
 #[cfg(target_os = "linux")]
 pub mod daemon;
 pub mod discovery;
+pub mod enrollment;
 pub mod history;
 // pub mod hotkey; // Removed - we work with system clipboard
 pub mod progress;
+pub mod service;
 pub mod service_install;
 pub mod setup;
 pub mod sync;

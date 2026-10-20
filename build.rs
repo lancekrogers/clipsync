@@ -11,7 +11,7 @@ fn main() {
     println!("cargo:rustc-env=PROFILE={}", profile);
 
     // Get the rustc version
-    let rustc_version = Command::new("rustc")
+    let rustc_version = Command::new(env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
         .args(["--version"])
         .output()
         .ok()

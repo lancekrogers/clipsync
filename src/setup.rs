@@ -3,6 +3,8 @@
 //! This module provides a guided setup wizard to help users configure
 //! ClipSync for the first time with step-by-step instructions.
 
+pub mod bootstrap;
+
 use crate::config::{Config, ConfigError};
 use crate::progress::ProgressIndicator;
 use std::io::{self, Write};

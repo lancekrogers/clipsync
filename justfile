@@ -1,3 +1,6 @@
+import 'just/acceptance.just'
+import 'just/companion.just'
+
 # ClipSync build recipes
 
 default:

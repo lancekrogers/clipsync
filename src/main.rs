@@ -12,15 +12,32 @@ use clipsync::cli::{Cli, CliHandler, Commands, ConfigAction};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Commands::Version) {
+        return CliHandler::show_version();
+    }
+
+    #[cfg(feature = "tui")]
+    if let Commands::Tui { daemon_binary } = &cli.command {
+        return clipsync::companion::terminal::run(cli.config.clone(), daemon_binary.clone());
+    }
 
     // Unit generation is a pure command: no config, clipboard, or logging side effects.
-    if let Commands::PrintUserUnit { binary } = &cli.command {
+    if let Commands::PrintUserUnit { binary, config } = &cli.command {
         let path = binary
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Executable path must be UTF-8"))?;
+        let config = config
+            .as_ref()
+            .or(cli.config.as_ref())
+            .map(|value| {
+                value
+                    .to_str()
+                    .ok_or_else(|| anyhow::anyhow!("Config path must be UTF-8"))
+            })
+            .transpose()?;
         print!(
             "{}",
-            clipsync::service_install::render_systemd_user_unit(path)
+            clipsync::service_install::render_systemd_user_unit_with_config(path, config)
                 .map_err(anyhow::Error::msg)?
         );
         return Ok(());

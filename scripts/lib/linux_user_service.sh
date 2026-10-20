@@ -47,14 +47,40 @@ clipsync_unit_renderer() {
     printf '%s\n' "${CLIPSYNC_INSTALL_BIN:-}"
 }
 
+clipsync_resolve_unit_config() {
+    if [[ -n "${1:-}" ]]; then
+        printf '%s\n' "$1"
+        return
+    fi
+    if [[ -n "${CLIPSYNC_UNIT_CONFIG:-}" ]]; then
+        printf '%s\n' "$CLIPSYNC_UNIT_CONFIG"
+        return
+    fi
+    printf '%s/config.toml\n' "$(clipsync_config_dir)"
+}
+
 clipsync_write_user_unit() {
     local binary="$1"
+    local config
     local unit_path renderer temporary_unit
 
     if [[ -z "$binary" ]]; then
         echo "clipsync_write_user_unit: binary path is required" >&2
         return 1
     fi
+
+    config="$(clipsync_resolve_unit_config "${2:-}")"
+    if [[ -z "$config" ]]; then
+        echo "clipsync_write_user_unit: config path is required" >&2
+        return 1
+    fi
+    case "$config" in
+        /*) ;;
+        *)
+            echo "clipsync_write_user_unit: config path must be absolute: $config" >&2
+            return 1
+            ;;
+    esac
 
     unit_path="$(clipsync_user_unit_path)"
     mkdir -p "$(dirname "$unit_path")"
@@ -69,8 +95,10 @@ clipsync_write_user_unit() {
     fi
 
     temporary_unit=$(mktemp "${unit_path}.XXXXXX") || return 1
-    if ! "$renderer" print-user-unit --binary "$binary" >"$temporary_unit"; then
+    # Render through the packaged CLI to keep systemd quoting consistent.
+    if ! "$renderer" print-user-unit --binary "$binary" --config "$config" >"$temporary_unit"; then
         rm -f "$temporary_unit"
+        echo "clipsync_write_user_unit: print-user-unit --binary/--config failed for renderer=$renderer" >&2
         return 1
     fi
     chmod 644 "$temporary_unit" || { rm -f "$temporary_unit"; return 1; }
@@ -105,13 +133,14 @@ clipsync_try_start_user_service() {
 clipsync_install_linux_user_service() {
     local binary="$1"
     local start_service="${2:-0}"
+    local config="${3:-}"
 
     if [[ ! -x "$binary" ]]; then
         echo "ClipSync binary is missing or not executable: $binary" >&2
         return 1
     fi
 
-    clipsync_write_user_unit "$binary" || return 1
+    clipsync_write_user_unit "$binary" "$config" || return 1
     clipsync_reload_user_systemd || return 1
     clipsync_enable_user_service || return 1
 
