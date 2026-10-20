@@ -152,3 +152,21 @@ drives unreachable addresses and cancellation through both the real GUI and PTY,
 compares full fingerprints, checks both trust files remain byte-identical, and
 verifies terminal restoration. All network targets and clipboard data are isolated.
 Physical two-device and packaged lifecycle acceptance remain separate gates.
+
+## Desktop activation acceptance
+
+Opening the same configuration again asks the running desktop to show its window
+and exits without constructing another companion. Distinct explicit config paths
+remain independent. Existing symlink aliases resolve to the same instance; default
+first-run setup retains its identity when its config is created. The owner uses a
+private per-user socket with UID checks and a kernel-held lock. A crash releases
+the lock; only its successor may replace the stale, same-user socket.
+
+`just companion-test-instance-macos` runs the isolated duplicate-launch suite.
+The regular Mac and Linux acceptance runners also include it. The suite verifies
+duplicate and alias launches, route preservation, independent config windows,
+app-crash recovery, and an unchanged daemon PID. On macOS it presses the test
+window's native close button and checks that relaunch reveals that same process.
+The harness uses synthetic history, private pasteboards, and disposable Linux
+desktops. Process cleanup is not counted as a native Quit-menu test; compositor
+focus and packaged Launch Services reopening have separate acceptance limits.

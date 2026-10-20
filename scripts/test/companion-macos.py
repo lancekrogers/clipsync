@@ -14,7 +14,7 @@ if sys.platform != 'darwin':
 root = Path(__file__).resolve().parents[2]
 out = root/'target/companion-evidence/macos'
 out.mkdir(parents=True, exist_ok=True)
-for port in (18762,18763,18764,18765):
+for port in (18762,18763,18764,18765,18766,18767):
     with socket.socket() as probe:
         try: probe.bind(('127.0.0.1',port))
         except OSError: raise SystemExit(f'Test port {port} is in use; close the previous test fixture first.')
@@ -36,6 +36,7 @@ try:
         ('companion_large_history.py',[str(out/'large-history')]),
         ('companion_enrollment_ui.py',[str(out/'enrollment')]),
         ('companion_enrollment_recovery.py',[str(out/'enrollment-recovery')]),
+        ('companion_instance_ui.py',[str(out/'instance')]),
         ('companion_tray.py',[str(out/'tray')]),
         ('companion_setup_ui.py',[str(out/'setup')]),
     ]:

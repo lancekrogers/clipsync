@@ -1,6 +1,7 @@
 //! Native shell; application behavior lives in clipsync::companion.
 mod devices;
 mod history;
+mod instance;
 mod theme;
 use clap::Parser;
 use clipsync::companion::{
@@ -26,6 +27,9 @@ struct Options {
 }
 struct App {
     companion: Companion,
+    instance: instance::Guard,
+    reveal_left: u8,
+    waker_ready: bool,
     tray: Option<TrayIcon>,
     menu: Option<(String, String, String)>,
     menu_events: Option<std::sync::mpsc::Receiver<MenuEvent>>,
@@ -282,6 +286,13 @@ impl App {
 }
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        // `logic` runs while the window is hidden, so a second launch can show it.
+        if !self.waker_ready {
+            let wake = ctx.clone();
+            self.instance.set_waker(move || wake.request_repaint());
+            self.waker_ready = true;
+        }
+        reveal_existing(ctx, &self.instance, &mut self.reveal_left);
         self.companion.tick();
         self.tray(ctx);
         // logic also runs while hidden; menu events explicitly wake the event loop.
@@ -389,12 +400,38 @@ impl eframe::App for App {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 }
+fn reveal_existing(ctx: &egui::Context, instance: &instance::Guard, left: &mut u8) {
+    if instance.take_activation() {
+        *left = 4;
+    }
+    if *left == 0 {
+        return;
+    }
+    // Focus is ignored while the window is minimized or invisible, so repeat it.
+    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+    ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+        egui::UserAttentionType::Informational,
+    ));
+    *left -= 1;
+    if *left > 0 {
+        ctx.request_repaint();
+    }
+}
+
 fn main() -> eframe::Result {
     let options = Options::parse();
     #[cfg(not(feature = "ui-test"))]
     if std::env::var_os("EGUI_INSPECTION").is_some() {
         eprintln!("UI inspection requires an isolated ui-test build");
     }
+    let instance = match instance::claim(options.config.as_deref())
+        .map_err(|error| eframe::Error::AppCreation(Box::new(error)))?
+    {
+        instance::Launch::Signaled => return Ok(()),
+        instance::Launch::Primary(guard) => guard,
+    };
     let companion = Companion::new(options.config, options.daemon_binary)
         .map_err(|error| eframe::Error::AppCreation(error.into()))?;
     let viewport = egui::ViewportBuilder::default()
@@ -416,6 +453,9 @@ fn main() -> eframe::Result {
             theme::install(&creation.egui_ctx);
             Ok(Box::new(App {
                 companion,
+                instance,
+                reveal_left: 0,
+                waker_ready: false,
                 tray: None,
                 menu: None,
                 menu_events: None,
