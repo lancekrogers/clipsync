@@ -1,12 +1,21 @@
 # ClipSync
 
+Your clipboard, everywhere. A **Rust desktop app, terminal UI, and CLI** for
+sharing plain-text clipboards between trusted macOS and Linux computers.
+Browse saved copies, manage devices, and pause syncing from either companion.
+
 > **Experimental.** Plain-text sync is working in a macOS ↔ Arch Linux setup, with authenticated LAN connections and automatic reconnection after service restarts verified. Broader desktop compatibility, sleep/wake, and login/logout recovery are still being validated.
 
 <p align="center">
-  <img src="docs/assets/hero.jpg" width="880" alt="Laptop and desktop showing the same clipboard history over a LAN cable">
+  <img src="docs/assets/desktop-history.png" width="960" alt="ClipSync desktop app on macOS: searchable clipboard history, a selected note, and the Copy text button">
 </p>
 
-ClipSync synchronizes plain-text clipboards between explicitly trusted macOS and Linux devices. It uses direct connections, local discovery, Ed25519 device identities, and mutually authenticated TLS 1.3. No cloud service is involved. Devices can connect directly over the LAN without Tailscale or an SSH session.
+*The running macOS app, showing sample clipboard history in an isolated test setup.*
+
+ClipSync uses direct connections, local discovery, Ed25519 device identities, and mutually authenticated TLS 1.3. No cloud service is involved. Devices can connect directly over the LAN without Tailscale or an SSH session.
+
+Start with the [desktop and TUI guide](docs/COMPANION.md), or use the
+[CLI setup instructions](#cli-install-and-pair) below.
 
 The repaired transport uses protocol **2.0.0**: update both devices together. It intentionally refuses the old plaintext protocol.
 
@@ -28,7 +37,11 @@ History, and Settings**. History shows actual saved copies, their source and tim
 select one to read it and copy it again. The daemon remains the sole clipboard
 owner, so closing either interface leaves syncing running.
 
-![Desktop clipboard history using isolated test data](docs/assets/companion-history.png)
+<p align="center">
+  <img src="docs/assets/desktop-overview.png" width="960" alt="ClipSync desktop Overview showing service status, Pause syncing, Sync current copy, and Open clipboard history controls">
+</p>
+
+*Overview in the same isolated setup, with the service running and no device connected.*
 
 The desktop uses native macOS window controls with a blue/teal interface. Both
 clients support setup inspection, user-service controls, pause/resume and device
@@ -36,7 +49,19 @@ authorization. Adding a device uses a temporary LAN enrollment window and full
 fingerprint comparison on **both** computers; it needs no Tailscale or SSH session.
 Discovery alone never authorizes a device.
 
-Build the companions with Rust 1.95 or newer:
+To build an installable macOS app or Linux desktop package from this checkout,
+use Rust 1.95 or newer and `just`:
+
+```sh
+just companion-package
+```
+
+This packages the desktop app with a matching CLI and TUI. Follow the
+[platform installation steps](docs/COMPANION.md#install-from-a-local-package)
+to install it and complete setup. On macOS, open **ClipSync.app**; on Linux,
+launch **ClipSync** from the app menu. Run `clipsync tui` for the terminal interface.
+
+For a development build without packaging:
 
 ```sh
 cargo +1.95.0 build --locked --workspace --features tui
@@ -50,9 +75,11 @@ See [verification and release gates](docs/COMPANION_ACCEPTANCE.md) for the isola
 These are development builds; public macOS signing/notarization and physical
 login/logout and sleep/wake acceptance remain release gates.
 
-## Install and pair
+## CLI install and pair
 
-From the repository checkout on each device, build and install with a current stable Rust toolchain:
+For a CLI-only installation, run the following from the repository checkout on
+each device with a current stable Rust toolchain. These commands do not install
+the desktop app; add `--features tui` to the Cargo command to include the TUI.
 
 ```sh
 cargo install --path . --locked
@@ -138,7 +165,7 @@ systemctl --user start clipsync.service
 systemctl --user status clipsync.service
 ```
 
-Use `clipsync --config /path/to/config.toml status` and `peers` with the service's actual config path. On macOS, the CLI's default config location is `~/Library/Application Support/clipsync/config.toml`, while the installer uses `~/.config/clipsync/config.toml` unless `XDG_CONFIG_HOME` is set. An explicit `--config` avoids inspecting a different configuration.
+Use `clipsync --config /path/to/config.toml status` and `peers` with the service's actual config path. Config resolution prefers `${XDG_CONFIG_HOME:-~/.config}/clipsync/config.toml` and also inspects the legacy macOS `~/Library/Application Support/clipsync/config.toml`. Conflicting files require an explicit choice; identical duplicates select the canonical XDG path. An explicit `--config` keeps service and client commands on the intended configuration.
 
 ### Updating an older service installation
 
