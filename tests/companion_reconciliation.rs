@@ -312,3 +312,50 @@ async fn newer_resume_clears_a_stale_pause_success_notice() {
     .await;
     assert_ne!(desktop.view.connection, Connection::Paused);
 }
+
+#[tokio::test]
+async fn a_new_pairing_attempt_selects_its_own_result_after_failure() {
+    let fixture = fixture().await;
+    let mut client = Controller::connect(fixture.config.clone()).unwrap();
+    wait(&mut client, |c| c.view.can_act()).await;
+    client.dispatch(Intent::Navigate(Route::Devices));
+    client.dispatch(Intent::OpenEnrollment);
+    wait(&mut client, |c| {
+        !c.view.action_pending && c.view.enrollment.as_ref().is_some_and(|s| s.listening)
+    })
+    .await;
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = reserved.local_addr().unwrap().to_string();
+    drop(reserved);
+    let mut previous = None;
+    for attempt in 1..=2 {
+        client.dispatch(Intent::DialEnrollment {
+            address: address.clone(),
+            expected_fingerprint: None,
+            expected_node_id: None,
+        });
+        wait(&mut client, |c| {
+            !c.view.action_pending
+                && c.view.enrollment.as_ref().is_some_and(|s| {
+                    s.sessions.len() == attempt && s.sessions.iter().all(|s| s.state == "Failed")
+                })
+        })
+        .await;
+        let selected = client
+            .view
+            .selected_session
+            .expect("the attempt must be selected");
+        assert_ne!(
+            Some(selected),
+            previous,
+            "retry still shows the previous failed attempt"
+        );
+        previous = Some(selected);
+    }
+    assert!(fixture
+        .enrollment
+        .trusted_devices()
+        .await
+        .unwrap()
+        .is_empty());
+}

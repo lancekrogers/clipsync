@@ -35,6 +35,7 @@ try:
         ('companion_recovery.py',[str(root/'target/debug/clipsync'),str(out/'recovery')]),
         ('companion_large_history.py',[str(out/'large-history')]),
         ('companion_enrollment_ui.py',[str(out/'enrollment')]),
+        ('companion_enrollment_recovery.py',[str(out/'enrollment-recovery')]),
         ('companion_tray.py',[str(out/'tray')]),
         ('companion_setup_ui.py',[str(out/'setup')]),
     ]:

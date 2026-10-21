@@ -195,3 +195,19 @@ async fn new_instance_id_resets_generation_tracking() {
     assert!(!view.paused);
     drop(task);
 }
+
+#[test]
+fn legacy_enrollment_snapshots_do_not_request_a_selection_change() {
+    let legacy = serde_json::json!({
+        "listening": false,
+        "listen_addr": null,
+        "expires_at": null,
+        "sessions": [],
+        "candidates": [],
+        "outcome": null
+    });
+    let snapshot: clipsync::control::EnrollmentSnapshot =
+        serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(snapshot.requested_session_id, None);
+    assert_eq!(serde_json::to_value(snapshot).unwrap(), legacy);
+}

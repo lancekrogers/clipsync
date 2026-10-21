@@ -401,7 +401,9 @@ impl EnrollmentManager {
             }
         });
 
-        Ok(self.snapshot().await)
+        let mut snapshot = self.snapshot().await;
+        snapshot.requested_session_id = Some(session_id);
+        Ok(snapshot)
     }
 
     pub async fn inspect(&self, session_id: Option<Uuid>) -> Result<EnrollmentSnapshot> {
@@ -712,6 +714,9 @@ impl EnrollmentManager {
             if !g.listening {
                 bail!("Enrollment closed");
             }
+            if !g.rates.allow_failure_budget(&peer_fp, Instant::now()) {
+                bail!("Enrollment rate limited");
+            }
             if let Err(msg) = Self::bind_checks(
                 &g,
                 session_id,
@@ -804,6 +809,9 @@ impl EnrollmentManager {
             // pending_handshakes includes us; allow if active < max.
             if active >= MAX_CONCURRENT_SESSIONS {
                 bail!("Enrollment busy");
+            }
+            if !g.rates.allow_failure_budget(&peer_fp, Instant::now()) {
+                bail!("Enrollment rate limited");
             }
         }
 
@@ -1620,6 +1628,7 @@ impl EnrollmentManager {
             })
             .collect();
         EnrollmentSnapshot {
+            requested_session_id: None,
             listening: g.listening,
             listen_addr: g.listen_addr.map(|a| a.to_string()),
             expires_at: g.window_expires.map(|exp| {

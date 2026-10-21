@@ -69,3 +69,69 @@ impl RateLimits {
             .push_back(now);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D03 budgets are independent clocks. The accept cutoff is the inline
+    /// `Duration::from_secs(60)` in `prune` (`>`), not `SESSION_TTL`.
+    #[test]
+    fn accept_and_fingerprint_failure_budgets_expire_independently() {
+        assert_eq!(MAX_ACCEPTS_PER_MINUTE, 10);
+        assert_eq!(MAX_FAILURES_PER_FINGERPRINT, 5);
+        assert_eq!(FAILURE_WINDOW, Duration::from_secs(15 * 60));
+
+        let t0 = Instant::now();
+        let mut rates = RateLimits::default();
+
+        for _ in 0..MAX_FAILURES_PER_FINGERPRINT - 1 {
+            rates.record_failure("fp-a", t0);
+            assert!(rates.allow_failure_budget("fp-a", t0));
+        }
+        rates.record_failure("fp-a", t0);
+        assert!(!rates.allow_failure_budget("fp-a", t0));
+        // A second fingerprint still has a full failure budget.
+        assert!(rates.allow_failure_budget("fp-b", t0));
+        for _ in 0..MAX_FAILURES_PER_FINGERPRINT {
+            rates.record_failure("fp-b", t0);
+        }
+        assert!(!rates.allow_failure_budget("fp-b", t0));
+        assert!(rates.allow_failure_budget("fp-c", t0));
+
+        // Filling either failure bucket does not spend accept slots.
+        for _ in 0..MAX_ACCEPTS_PER_MINUTE {
+            assert!(rates.allow_accept(t0));
+        }
+        assert!(!rates.allow_accept(t0));
+        assert!(!rates.allow_failure_budget("fp-a", t0));
+        assert!(rates.allow_failure_budget("fp-c", t0));
+
+        // Exact 60s is still inside the accept window (`>`).
+        let accept_closed = t0 + Duration::from_secs(60);
+        assert!(!rates.allow_accept(accept_closed));
+        assert!(!rates.allow_failure_budget("fp-a", accept_closed));
+
+        let accept_open = accept_closed + Duration::from_nanos(1);
+        assert!(
+            rates.allow_accept(accept_open),
+            "accepts older than 60s must expire without a sleep"
+        );
+        assert!(
+            !rates.allow_failure_budget("fp-a", accept_open),
+            "accept expiry must not clear the 15-minute fingerprint budget"
+        );
+        assert!(rates.allow_failure_budget("fp-c", accept_open));
+
+        let failure_closed = t0 + FAILURE_WINDOW;
+        assert!(!rates.allow_failure_budget("fp-a", failure_closed));
+        assert!(!rates.allow_failure_budget("fp-b", failure_closed));
+
+        let failure_open = failure_closed + Duration::from_nanos(1);
+        assert!(rates.allow_failure_budget("fp-a", failure_open));
+        assert!(rates.allow_failure_budget("fp-b", failure_open));
+        assert!(rates.allow_failure_budget("fp-c", failure_open));
+        // The accept recorded at `accept_open` is itself outside 60s by now.
+        assert!(rates.allow_accept(failure_open));
+    }
+}

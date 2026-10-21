@@ -1049,6 +1049,17 @@ impl Controller {
                 .take()
                 .map(|fingerprint| show_label(&fingerprint));
         }
+        // A dial response identifies its own session, independent of HashMap
+        // order or older failed attempts. Polls carry no focus hint.
+        if let Some(id) = snapshot.requested_session_id {
+            if snapshot
+                .sessions
+                .iter()
+                .any(|session| session.session_id == id)
+            {
+                self.view.selected_session = Some(id);
+            }
+        }
         if self.view.selected_session.is_none_or(|id| {
             !snapshot
                 .sessions
