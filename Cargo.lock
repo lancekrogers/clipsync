@@ -964,6 +964,8 @@ dependencies = [
  "clap",
  "clipsync",
  "eframe",
+ "libc",
+ "sha2",
  "tray-icon",
  "uuid",
 ]

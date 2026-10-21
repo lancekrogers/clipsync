@@ -15,3 +15,8 @@ companion-test-linux:
   mkdir -p target/companion-linux-evidence
   docker build -f scripts/test/Dockerfile.companion -t clipsync-companion-test:local .
   docker run --rm --mount type=bind,source="{{justfile_directory()}}",target=/source,readonly --mount type=volume,source=clipsync-repair-cargo,target=/usr/local/cargo/registry --mount type=volume,source=clipsync-companion-target,target=/work/target --mount type=bind,source="{{justfile_directory()}}/target/companion-linux-evidence",target=/evidence clipsync-companion-test:local bash /source/scripts/test/companion-container.sh
+
+# Duplicate launch / crash recovery against a separate private macOS fixture.
+companion-test-instance-macos:
+  cargo +1.95.0 build --locked --workspace --all-features --bins --example companion_fixture
+  uv run --with msgpack python scripts/test/companion_instance_ui.py target/companion-evidence/instance
