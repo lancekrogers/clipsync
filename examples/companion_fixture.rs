@@ -1,6 +1,7 @@
 //! Isolated production IPC fixture for real GUI/PTY acceptance. Never uses the
 //! personal macOS pasteboard. Linux runs only inside the disposable test desktop.
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
+use clap::Parser;
 use clipsync::{
     adapters::{get_clipboard_provider, HistoryManager},
     auth::{AuthConfig, KeyPair, KeyType, SshAuthenticator},
@@ -9,10 +10,22 @@ use clipsync::{
     sync::SyncEngine,
     transport::{tls, Listener, TransportConfig, TransportManager},
 };
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
+
+const MARKER: &str = "clipsync-companion-fixture-v1\n";
+
+#[derive(Parser)]
+struct Options {
+    /// Resume a fixture left by SIGKILL, preserving its identity and history.
+    /// Only a directory created by this example is accepted. The caller owns
+    /// cleanup of the retained directory after crash/restart acceptance.
+    #[arg(long)]
+    resume: Option<PathBuf>,
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let options = Options::parse();
     #[cfg(target_os = "macos")]
     if !std::env::var("CLIPSYNC_TEST_PASTEBOARD")
         .is_ok_and(|name| name.starts_with("org.clipsync.test."))
@@ -23,25 +36,64 @@ async fn main() -> Result<()> {
     if std::env::var("CLIPSYNC_DISPOSABLE_DESKTOP").as_deref() != Ok("1") {
         bail!("Run this fixture only in a disposable Linux desktop");
     }
-    let dir = tempfile::tempdir()?;
-    let key = KeyPair::generate(KeyType::Ed25519)?;
-    key.save_to_file(&dir.path().join("identity")).await?;
+    let fresh = options.resume.is_none();
+    let dir = fresh.then(tempfile::tempdir).transpose()?;
+    let root = match options.resume {
+        Some(path) => path.canonicalize()?,
+        None => dir.as_ref().unwrap().path().canonicalize()?,
+    };
+    let key = if fresh {
+        let key = KeyPair::generate(KeyType::Ed25519)?;
+        key.save_to_file(&root.join("identity")).await?;
+        std::fs::write(root.join(".companion-fixture"), MARKER)?;
+        key
+    } else {
+        ensure!(
+            std::fs::read_to_string(root.join(".companion-fixture"))? == MARKER,
+            "Not a companion fixture directory"
+        );
+        // Never accept paths from an arbitrary configuration or follow links to
+        // personal identity/history files when resuming a retained fixture.
+        for name in [
+            "identity",
+            "history.db",
+            "history.key",
+            "config.toml",
+            "authorized_devices",
+        ] {
+            let path = root.join(name);
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) => ensure!(
+                    meta.is_file() && !meta.file_type().is_symlink(),
+                    "Unsafe fixture file: {name}"
+                ),
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::NotFound
+                        && name == "authorized_devices" => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        KeyPair::load_from_file(&root.join("identity")).await?
+    };
     let mut config = Config {
         node_id: tls::node_id(&key.public_key()),
         listen_addr: "127.0.0.1:0".into(),
         advertise_name: "Isolated test Mac".into(),
         auth: clipsync::config::AuthConfig {
-            ssh_key: dir.path().join("identity"),
-            authorized_keys: dir.path().join("authorized_devices"),
+            ssh_key: root.join("identity"),
+            authorized_keys: root.join("authorized_devices"),
         },
         clipboard: clipsync::config::ClipboardConfig {
-            history_db: dir.path().join("history.db"),
-            history_key: Some(dir.path().join("history.key")),
+            history_db: root.join("history.db"),
+            history_key: Some(root.join("history.key")),
             ..Default::default()
         },
         ..Default::default()
     };
-    let config_path = dir.path().join("config.toml");
+    let config_path = root.join("config.toml");
+    // Acquire the daemon lock before touching retained state. Resuming a live
+    // fixture must fail without rewriting its configuration or history.
+    let server = control::Server::bind(control::socket_path(&config), &config)?;
     let auth = Arc::new(
         SshAuthenticator::new(AuthConfig {
             private_key_path: config.auth.ssh_key.clone(),
@@ -77,10 +129,12 @@ async fn main() -> Result<()> {
         "cargo test --locked",
         "teammate@example.com",
         "The latest draft is ready for review. Let me know what you think.",
-    ] {
+    ]
+    .into_iter()
+    .filter(|_| fresh)
+    {
         engine.copy_local(sample.to_owned()).await?;
     }
-    let server = control::Server::bind(control::socket_path(&config), &config)?;
     let enrollment = Arc::new(clipsync::enrollment::EnrollmentManager::new(
         Arc::new(config.clone()),
         auth,

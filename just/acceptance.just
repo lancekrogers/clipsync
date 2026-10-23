@@ -20,3 +20,8 @@ companion-test-linux:
 companion-test-instance-macos:
   cargo +1.95.0 build --locked --workspace --all-features --bins --example companion_fixture
   uv run --with msgpack python scripts/test/companion_instance_ui.py target/companion-evidence/instance
+
+# Real process crash/restart; private Mac pasteboard or disposable Linux desktop.
+companion-test-restart:
+  cargo +1.95.0 build --locked --features tui,integration-tests --bin clipsync --example companion_fixture
+  uv run --with pyte python scripts/test/companion_restart.py '{{env_var_or_default("CARGO_TARGET_DIR", "target")}}/debug/examples/companion_fixture' '{{env_var_or_default("CARGO_TARGET_DIR", "target")}}/debug/clipsync' target/companion-evidence/restart
