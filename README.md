@@ -1,4 +1,6 @@
 # ClipSync
+  <a href="https://github.com/Obedience-Corp/festival"><img src="https://img.shields.io/badge/built%20with-Festival-7c3aed.svg" alt="Built with Festival"></a>
+
 
 Your clipboard, everywhere. A **Rust desktop app, terminal UI, and CLI** for
 sharing plain-text clipboards between trusted macOS and Linux computers.
