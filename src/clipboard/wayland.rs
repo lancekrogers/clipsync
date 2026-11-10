@@ -216,9 +216,7 @@ mod tests {
     async fn raw_png_roundtrip_and_size_limit() {
         let writer = WaylandClipboard::new_with_limit(1024).await.unwrap();
         let reader = WaylandClipboard::new_with_limit(64).await.unwrap();
-        reader
-            .image_capture
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(reader.enable_image_capture());
         writer
             .set_content(&ClipboardContent::image(vec![7; 64], "png"))
             .await

@@ -633,7 +633,7 @@ mod tests {
             }
         });
         let reader = X11Clipboard::new_with_limit(1024).unwrap();
-        reader.image_capture.store(true, Ordering::Release);
+        assert!(reader.enable_image_capture());
         let result = reader.get_content().await;
         done.store(true, Ordering::Release);
         source.join().unwrap();
@@ -704,9 +704,7 @@ mod tests {
     async fn png_roundtrip_bounds_and_primary_selection() {
         let writer = X11Clipboard::new_with_limit(1024 * 1024).unwrap();
         let reader = X11Clipboard::new_with_limit(64).unwrap();
-        reader
-            .image_capture
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(reader.enable_image_capture());
         writer
             .set_content(&ClipboardContent::text("primary text"))
             .await
