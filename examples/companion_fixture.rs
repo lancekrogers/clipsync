@@ -201,7 +201,16 @@ async fn main() -> Result<()> {
     #[cfg(target_os = "macos")]
     if fresh && std::env::var("CLIPSYNC_IMAGE_FIXTURE").as_deref() == Ok("1") {
         use base64::Engine;
-        let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGP4z8Dwn6HhfwMAEPoD/o3Nc3sAAAAASUVORK5CYII=")?;
+        let png = if std::env::var("CLIPSYNC_IMAGE_DETAIL_FIXTURE").as_deref() == Ok("1") {
+            let image = image::RgbaImage::from_fn(640, 400, |x, y| {
+                image::Rgba([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8, 255])
+            });
+            let mut png = std::io::Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(image).write_to(&mut png, image::ImageFormat::Png)?;
+            png.into_inner()
+        } else {
+            base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGP4z8Dwn6HhfwMAEPoD/o3Nc3sAAAAASUVORK5CYII=")?
+        };
         history
             .add_entry(&clipsync::adapters::ClipboardEntry {
                 id: uuid::Uuid::new_v4(),

@@ -3,6 +3,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -24,6 +25,10 @@ env = os.environ | {
     "TERM": "xterm-256color",
 }
 env.pop("NO_COLOR", None)
+env.pop("TERM_PROGRAM", None)
+kitty = os.environ.get("CLIPSYNC_TEST_KITTY") == "1"
+if kitty:
+    env["CLIPSYNC_IMAGE_DETAIL_FIXTURE"] = "1"
 fixture = subprocess.Popen(
     [str(root / "target/debug/examples/companion_fixture")], env=env,
     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -44,12 +49,40 @@ try:
     screen = pyte.Screen(100, 30)
     stream = pyte.Stream(screen)
     raw = bytearray()
+    answered = False
+    cursor_queries = 0
+    pending = bytearray()
 
     def pump():
+        global answered, cursor_queries
         if select.select([master], [], [], 0.1)[0]:
             data = os.read(master, 65536)
             raw.extend(data)
-            stream.feed(data.decode("utf-8", errors="replace"))
+            if kitty and not answered and b"\x1b[5n" in raw:
+                os.write(master, b"\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1b[0n")
+                answered = True
+            count = raw.count(b"\x1b[6n")
+            if count > cursor_queries:
+                os.write(master, b"\x1b[1;1R" * (count - cursor_queries))
+                cursor_queries = count
+            # pyte does not implement Kitty's APC image transmission. Remove
+            # complete graphics packets before feeding its text emulator.
+            pending.extend(data)
+            while pending:
+                start = pending.find(b"\x1b_G")
+                if start < 0:
+                    keep = 2 if pending.endswith(b"\x1b_") else 1 if pending.endswith(b"\x1b") else 0
+                    if len(pending) > keep:
+                        stream.feed(bytes(pending[:len(pending)-keep]).decode("utf-8", errors="replace"))
+                        del pending[:len(pending)-keep]
+                    break
+                if start:
+                    stream.feed(bytes(pending[:start]).decode("utf-8", errors="replace"))
+                    del pending[:start]
+                end = pending.find(b"\x1b\\", 3)
+                if end < 0:
+                    break
+                del pending[:end+2]
 
     def snapshot():
         return "\n".join(screen.display)
@@ -66,18 +99,27 @@ try:
     os.write(master, b"3")
     wait_for(lambda: "[Image]" in snapshot(), "image history row")
     os.write(master, b"\r")
-    wait_for(lambda: "▀" in snapshot(), "colored image preview")
-    assert b"\x1b[38;2;" in raw or b"\x1b[48;2;" in raw, "missing RGB styling"
+    if kitty:
+        wait_for(lambda: b",a=T,U=1,f=32" in raw, "Kitty graphics image")
+        dimensions = re.search(rb"a=T,U=1,f=32,t=d,s=(\d+),v=(\d+)", raw)
+        assert dimensions and int(dimensions[1]) > 64 and int(dimensions[2]) > 64, "graphics preview lost detail"
+    else:
+        wait_for(lambda: "▀" in snapshot(), "colored image preview")
+        assert b"\x1b[38;2;" in raw or b"\x1b[48;2;" in raw, "missing RGB styling"
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 18, 60, 0, 0))
     screen.resize(18, 60)
     os.killpg(tui.pid, signal.SIGWINCH)
-    wait_for(lambda: "▀" in snapshot(), "image preview after resize")
+    if kitty:
+        wait_for(lambda: raw.count(b",a=T,U=1,f=32") >= 2, "graphics image after resize")
+    else:
+        wait_for(lambda: "▀" in snapshot(), "image preview after resize")
     os.write(master, b"\x1b[B")
     wait_for(lambda: "▀" not in snapshot() and "Selected copy" in snapshot(), "text replaces preview")
+    assert "\U0010eeee" not in snapshot(), "stale graphics placeholder remains"
     os.write(master, b"q")
     assert tui.wait(timeout=5) == 0
     assert termios.tcgetattr(slave) == before, "terminal settings were not restored"
-    print("Real TUI rendered an RGB image preview and cleared it after selection changed.")
+    print("Real TUI rendered " + ("Kitty graphics" if kitty else "RGB fallback") + " and cleared it after selection changed.")
 finally:
     if tui is not None and tui.poll() is None:
         tui.terminate()

@@ -203,6 +203,9 @@ pub struct ImagePreview {
     pub width: u32,
     pub height: u32,
     pub rgb: Vec<u8>,
+    /// Optional, bounded high-resolution PNG for terminals with graphics support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub png: Option<String>,
 }
 
 impl ImagePreview {

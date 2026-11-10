@@ -46,16 +46,36 @@ pub fn run(config: Option<PathBuf>, daemon_binary: Option<PathBuf>) -> Result<()
         let _ = execute!(io::stdout(), LeaveAlternateScreen, crossterm::cursor::Show);
         previous(info);
     }));
+    let color = std::env::var_os("NO_COLOR").is_none();
+    let mut graphics = super::terminal_image::GraphicsPreview::new(color);
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut devices = super::terminal_devices::DevicesUi::default();
     let mut search = false;
     let mut choice = 0usize;
     let mut detail_scroll = 0u16;
-    let color = std::env::var_os("NO_COLOR").is_none();
     loop {
         app.tick();
-        terminal
-            .draw(|frame| render(frame, &app, search, choice, color, detail_scroll, &devices))?;
+        let image = app.client.as_ref().filter(|_| app.route == Route::History);
+        if graphics.update(
+            image.and_then(|c| c.view.selected),
+            image.and_then(|c| c.view.image_preview.as_ref()),
+        ) {
+            // Graphics placeholders span cells hidden from ratatui's normal
+            // diff; clear them before drawing another selection or route.
+            terminal.clear()?;
+        }
+        terminal.draw(|frame| {
+            render(
+                frame,
+                &app,
+                search,
+                choice,
+                color,
+                detail_scroll,
+                &devices,
+                &mut graphics,
+            )
+        })?;
         if !event::poll(Duration::from_millis(100))? {
             continue;
         }
@@ -240,6 +260,7 @@ fn render(
     color: bool,
     detail_scroll: u16,
     devices: &super::terminal_devices::DevicesUi,
+    graphics: &mut super::terminal_image::GraphicsPreview,
 ) {
     let accent = if color {
         Style::default().fg(Color::Rgb(105, 191, 255))
@@ -426,15 +447,17 @@ fn render(
                 let border = block(&title);
                 let inner = border.inner(columns[1]);
                 frame.render_widget(border, columns[1]);
-                frame.render_widget(
-                    Paragraph::new(super::terminal_image::lines(
-                        preview,
-                        inner.width,
-                        inner.height,
-                        color,
-                    )),
-                    inner,
-                );
+                if !graphics.render(frame, inner) {
+                    frame.render_widget(
+                        Paragraph::new(super::terminal_image::lines(
+                            preview,
+                            inner.width,
+                            inner.height,
+                            color,
+                        )),
+                        inner,
+                    );
+                }
             } else {
                 frame.render_widget(
                     Paragraph::new(detail)
