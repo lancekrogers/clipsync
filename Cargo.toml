@@ -55,6 +55,7 @@ if-addrs = "0.15"
 
 # CLI
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29"], optional = true }
+ratatui-image = { version = "=11.0.8", default-features = false, features = ["crossterm"], optional = true }
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"
 global-hotkey = "0.9"
@@ -122,7 +123,7 @@ pretty_assertions = "1.4"
 
 [features]
 default = []
-tui = ["dep:ratatui"]
+tui = ["dep:ratatui", "dep:ratatui-image"]
 integration-tests = []
 cargo-clippy = []
 

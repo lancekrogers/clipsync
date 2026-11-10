@@ -77,25 +77,44 @@ pub fn to_detail(entry: &ClipboardEntry, max_bytes: usize) -> Result<HistoryEntr
     })
 }
 
-/// Decode under the same admission limits as sync, then send only a small RGB
-/// thumbnail over the protected local control socket. Transparent pixels are
-/// composited against the terminal preview's dark background.
+/// Decode under the same admission limits as sync, then send bounded previews
+/// over the protected local control socket. The small RGB fallback composites
+/// transparent pixels against the terminal preview's dark background.
 pub fn image_preview(
     data: &[u8],
     limits: crate::transport::image_capability::ImageLimits,
     budget: u64,
+    png_budget: usize,
 ) -> Result<super::schema::ImagePreview> {
     use image::{DynamicImage, RgbaImage};
     let decoded = crate::clipboard::png::decode(data, limits, budget)?;
     let image = RgbaImage::from_raw(decoded.width, decoded.height, decoded.rgba)
         .ok_or_else(|| anyhow::anyhow!("Invalid image dimensions"))?;
+    use base64::Engine;
+    use std::io::Cursor;
+    // Encode a separately resized preview, never the original clipboard bytes.
+    // Leave enough frame space for the fallback RGB thumbnail and metadata.
+    let image = DynamicImage::ImageRgba8(image);
+    let mut png = None;
+    for size in [1600, 1024, 768, 512, 256] {
+        let high = if image.width() <= size && image.height() <= size {
+            image.clone()
+        } else {
+            image.thumbnail(size, size)
+        };
+        let mut encoded = Cursor::new(Vec::new());
+        if high.write_to(&mut encoded, image::ImageFormat::Png).is_ok()
+            && encoded.get_ref().len() <= png_budget
+        {
+            png = Some(base64::engine::general_purpose::STANDARD.encode(encoded.into_inner()));
+            break;
+        }
+    }
     let size = super::schema::IMAGE_PREVIEW_MAX_DIMENSION;
     let preview = if decoded.width > size || decoded.height > size {
-        DynamicImage::ImageRgba8(image)
-            .thumbnail(size, size)
-            .to_rgba8()
+        image.thumbnail(size, size).to_rgba8()
     } else {
-        image
+        image.into_rgba8()
     };
     let (width, height) = preview.dimensions();
     let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
@@ -105,7 +124,12 @@ pub fn image_preview(
             rgb.push(((u32::from(*color) * alpha + 24 * (255 - alpha) + 127) / 255) as u8);
         }
     }
-    Ok(super::schema::ImagePreview { width, height, rgb })
+    Ok(super::schema::ImagePreview {
+        width,
+        height,
+        rgb,
+        png,
+    })
 }
 
 pub fn page_from_entries(
@@ -136,4 +160,45 @@ pub fn page_from_entries(
 
 pub fn missing_id_message(_id: Uuid) -> &'static str {
     "History entry not found"
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::*;
+    use base64::Engine;
+    use image::{DynamicImage, ImageFormat, Rgba, RgbaImage};
+    use std::io::Cursor;
+
+    #[test]
+    fn preview_retains_detail_and_respects_wire_budget() {
+        let image = RgbaImage::from_fn(640, 400, |x, y| {
+            Rgba([
+                (x % 256) as u8,
+                (y % 256) as u8,
+                ((x * 7 + y * 13) % 256) as u8,
+                255,
+            ])
+        });
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        let bytes = png.into_inner();
+        let limits = crate::transport::image_capability::ImageLimits {
+            max_bytes: bytes.len(),
+            max_width: 8192,
+            max_height: 8192,
+            max_pixels: 16_777_216,
+        };
+        let result = image_preview(&bytes, limits, 64 * 1024 * 1024, 2 * 1024 * 1024).unwrap();
+        assert!(result.is_valid());
+        let png = base64::engine::general_purpose::STANDARD
+            .decode(result.png.unwrap())
+            .unwrap();
+        let image = image::load_from_memory_with_format(&png, ImageFormat::Png).unwrap();
+        assert_eq!((image.width(), image.height()), (640, 400));
+        let limited = image_preview(&bytes, limits, 64 * 1024 * 1024, 1).unwrap();
+        assert!(limited.png.is_none());
+        assert!(limited.is_valid());
+    }
 }

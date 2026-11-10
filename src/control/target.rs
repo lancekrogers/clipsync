@@ -209,6 +209,12 @@ async fn engine_history_get(engine: &SyncEngine, id: Uuid) -> Result<HistoryEntr
     if let (ClipboardData::Image(data), Some((limits, budget))) =
         (entry.content, engine.image_limits())
     {
+        let png_budget = (super::max_frame_bytes(engine.config_ref())
+            .saturating_sub(56 * 1024)
+            .min(3 * 1024 * 1024)
+            * 3
+            / 4)
+        .min(2 * 1024 * 1024);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         if let Ok(Ok(permit)) =
             tokio::time::timeout_at(deadline, crate::sync::image_decode_gate().acquire()).await
@@ -217,7 +223,7 @@ async fn engine_history_get(engine: &SyncEngine, id: Uuid) -> Result<HistoryEntr
             // while its blocking worker is still allocating.
             let task = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                history_view::image_preview(&data, limits, budget).ok()
+                history_view::image_preview(&data, limits, budget, png_budget).ok()
             });
             detail.image_preview = tokio::time::timeout_at(deadline, task)
                 .await

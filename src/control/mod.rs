@@ -844,6 +844,7 @@ mod tests {
                     width: 64,
                     height: 64,
                     rgb: vec![255; 64 * 64 * 3],
+                    png: Some("A".repeat(max_frame_bytes(&config) - 56 * 1024)),
                 }),
             }),
             ..Response::base()

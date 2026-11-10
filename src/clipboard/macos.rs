@@ -489,6 +489,38 @@ impl ClipboardProvider for MacOSClipboard {
                         ));
                     }
                     let staged: bool = msg_send![item, setData: data forType: kind];
+                    // Some native consumers inspect NSPasteboardItem directly and do
+                    // not use AppKit's board-level PNG-to-TIFF conversion. Offer
+                    // both representations on the same item when conversion succeeds.
+                    if content.mime_type == "image/png" {
+                        let dimensions = image::ImageReader::with_format(
+                            std::io::Cursor::new(&content.data),
+                            image::ImageFormat::Png,
+                        )
+                        .into_dimensions();
+                        if dimensions.is_ok_and(|(w, h)| {
+                            w > 0
+                                && h > 0
+                                && w <= 8192
+                                && h <= 8192
+                                && u64::from(w) * u64::from(h) <= 16_777_216
+                        }) {
+                            let rep: id =
+                                msg_send![class!(NSBitmapImageRep), imageRepWithData: data];
+                            if rep != nil {
+                                let tiff: id = msg_send![rep, TIFFRepresentation];
+                                if tiff != nil {
+                                    let length: usize = msg_send![tiff, length];
+                                    if length <= super::png::MAX_NATIVE_TIFF_BYTES {
+                                        let tiff_kind =
+                                            Self::get_type_string(NS_PASTEBOARD_TYPE_TIFF);
+                                        let _: bool =
+                                            msg_send![item, setData: tiff forType: tiff_kind];
+                                    }
+                                }
+                            }
+                        }
+                    }
                     let marker_type = NSString::alloc(nil).init_str(PRIVATE_IMAGE_MARKER);
                     let marker_string = uuid::Uuid::new_v4().to_string();
                     let marker_value = NSString::alloc(nil).init_str(&marker_string);
@@ -810,6 +842,29 @@ mod tests {
             .set_content(&ClipboardContent::image(png.clone(), "png"))
             .await
             .unwrap();
+        // A consumer that reads TIFF directly from the item cannot use the
+        // board-level synthesized representation.
+        unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let items: id = msg_send![first.0.pasteboard, pasteboardItems];
+            let item: id = msg_send![items, objectAtIndex: 0usize];
+            let kind = MacOSClipboard::get_type_string(NS_PASTEBOARD_TYPE_TIFF);
+            let tiff: id = msg_send![item, dataForType: kind];
+            assert_ne!(tiff, nil);
+            let len: usize = msg_send![tiff, length];
+            let ptr: *const u8 = msg_send![tiff, bytes];
+            let decoded = image::load_from_memory_with_format(
+                std::slice::from_raw_parts(ptr, len),
+                image::ImageFormat::Tiff,
+            )
+            .unwrap()
+            .to_rgba8();
+            let expected = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                .unwrap()
+                .to_rgba8();
+            assert_eq!(decoded, expected);
+            let _: () = msg_send![pool, drain];
+        }
         let content = first.0.get_content().await.unwrap();
         assert_eq!(content.mime_type, "image/png");
         assert_eq!(content.data, png);
