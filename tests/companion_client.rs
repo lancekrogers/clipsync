@@ -489,6 +489,7 @@ impl control::Target for HeldDetail {
             content_chars: text.chars().count() as u32,
             preview: text.into(),
             text: text.into(),
+            image_preview: None,
         })
     }
 }

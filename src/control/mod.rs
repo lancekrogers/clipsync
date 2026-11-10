@@ -26,9 +26,9 @@ pub use error_codes::{
 pub use schema::{
     Command, ControlError, ControlSnapshot, DaemonStatus, DiagnosticError, DiagnosticsReport,
     EnrollmentCandidateView, EnrollmentOutcomeView, EnrollmentSessionView, EnrollmentSnapshot,
-    HistoryEntryDetail, HistoryEntryView, HistoryPage, Request, Response, TrustedDeviceView,
-    HISTORY_PAGE_FRAME_MIN, HISTORY_PAGE_MAX, HISTORY_PREVIEW_CHARS, HISTORY_QUERY_MAX_BYTES,
-    PROTOCOL_VERSION,
+    HistoryEntryDetail, HistoryEntryView, HistoryPage, ImagePreview, Request, Response,
+    TrustedDeviceView, HISTORY_PAGE_FRAME_MIN, HISTORY_PAGE_MAX, HISTORY_PREVIEW_CHARS,
+    HISTORY_QUERY_MAX_BYTES, PROTOCOL_VERSION,
 };
 pub use target::{EnrollmentTarget, Target};
 
@@ -825,6 +825,37 @@ mod tests {
             frame.len(),
             max_frame_bytes(&config)
         );
+    }
+
+    #[test]
+    fn max_frame_fits_largest_image_thumbnail() {
+        let mut config = Config::default();
+        config.clipboard.max_size = 1024;
+        let response = Response {
+            history_entry: Some(HistoryEntryDetail {
+                id: uuid::Uuid::nil(),
+                timestamp: "2026-11-10T00:00:00Z".into(),
+                origin_node: uuid::Uuid::nil(),
+                content_type: "image/png".into(),
+                content_chars: 0,
+                preview: "[Image]".into(),
+                text: "[Image]".into(),
+                image_preview: Some(ImagePreview {
+                    width: 64,
+                    height: 64,
+                    rgb: vec![255; 64 * 64 * 3],
+                }),
+            }),
+            ..Response::base()
+        };
+        assert!(serde_json::to_vec(&response).unwrap().len() <= max_frame_bytes(&config));
+    }
+
+    #[test]
+    fn history_detail_without_preview_remains_compatible() {
+        let json = r#"{"id":"00000000-0000-0000-0000-000000000000","timestamp":"now","origin_node":"00000000-0000-0000-0000-000000000000","content_type":"image/png","content_chars":0,"preview":"[Image]","text":"[Image]"}"#;
+        let detail: HistoryEntryDetail = serde_json::from_str(json).unwrap();
+        assert!(detail.image_preview.is_none());
     }
 
     #[test]
