@@ -129,6 +129,12 @@ allow_self_signed = false                        # Require proper SSH key signat
 
 ### Clipboard Configuration
 
+The sync engine handles plain text and PNG images (including macOS TIFF
+clipboard images converted to PNG). Copied files are not synced; adding MIME
+types or changing compression settings does not enable file sync. Increasing
+`max_size` also reduces the number of simultaneous connections admitted by the
+transport: the default 5 MiB fits ten, while 50 MiB fits one.
+
 ```toml
 [clipboard]
 # Maximum clipboard content size (in bytes)
@@ -154,17 +160,6 @@ auto_sync = true                         # Enable automatic clipboard sync
 sync_interval = "100ms"                  # Clipboard polling interval
 # sync_interval = "500ms"                # Less frequent polling
 
-# Content filtering
-max_text_length = 1_000_000             # Maximum text length (characters)
-allowed_mime_types = [                   # Allowed MIME types
-    "text/plain",
-    "text/html", 
-    "text/rtf",
-    "image/png",
-    "image/jpeg",
-    "image/tiff"
-]
-
 # Excluded applications (don't sync from these apps)
 excluded_apps = [
     "1Password",                         # Password managers
@@ -184,8 +179,6 @@ excluded_apps = [
 | `sync_primary` | Boolean | `true` | Sync X11 primary selection (Linux only) |
 | `auto_sync` | Boolean | `true` | Enable automatic clipboard synchronization |
 | `sync_interval` | Duration | `"100ms"` | Clipboard polling interval |
-| `max_text_length` | Integer | `1000000` | Maximum text length in characters |
-| `allowed_mime_types` | Array | See above | Allowed MIME types for sync |
 | `excluded_apps` | Array | `[]` | Applications to exclude from sync |
 
 ### Hotkey Configuration

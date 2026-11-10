@@ -270,13 +270,18 @@ async fn reject_unknown_keys_public_key_only_impersonation_and_plaintext() {
 fn remote(origin: uuid::Uuid, text: &str, sequence: u64, id: uuid::Uuid) -> Message {
     let mut message = Message::new(
         MessageType::ClipboardData,
-        MessagePayload::Clipboard(clipsync::transport::ClipboardData {
-            format: clipsync::transport::protocol::ClipboardFormat::Text,
-            data: text.as_bytes().to_vec(),
-            compression: None,
-            checksum: clipsync::history::encryption::Encryptor::compute_checksum(text.as_bytes()),
-            metadata: Default::default(),
-        }),
+        MessagePayload::Clipboard(
+            clipsync::transport::ClipboardData {
+                format: clipsync::transport::protocol::ClipboardFormat::Text,
+                data: text.as_bytes().to_vec(),
+                compression: None,
+                checksum: clipsync::history::encryption::Encryptor::compute_checksum(
+                    text.as_bytes(),
+                ),
+                metadata: Default::default(),
+            }
+            .into(),
+        ),
     );
     message.source_peer_id = Some(origin);
     message.sequence = sequence;

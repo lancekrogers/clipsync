@@ -355,15 +355,18 @@ async fn pause_drops_remote_apply_and_clears_pending_without_resume_flush() {
     let origin = uuid::Uuid::new_v4();
     let mut remote = clipsync::transport::Message::new(
         clipsync::transport::MessageType::ClipboardData,
-        clipsync::transport::MessagePayload::Clipboard(clipsync::transport::ClipboardData {
-            format: clipsync::transport::protocol::ClipboardFormat::Text,
-            data: b"remote-during-pause".to_vec(),
-            compression: None,
-            checksum: clipsync::history::encryption::Encryptor::compute_checksum(
-                b"remote-during-pause",
-            ),
-            metadata: Default::default(),
-        }),
+        clipsync::transport::MessagePayload::Clipboard(
+            clipsync::transport::ClipboardData {
+                format: clipsync::transport::protocol::ClipboardFormat::Text,
+                data: b"remote-during-pause".to_vec(),
+                compression: None,
+                checksum: clipsync::history::encryption::Encryptor::compute_checksum(
+                    b"remote-during-pause",
+                ),
+                metadata: Default::default(),
+            }
+            .into(),
+        ),
     );
     remote.source_peer_id = Some(origin);
     remote.correlation_id = Some(uuid::Uuid::new_v4());
@@ -624,13 +627,18 @@ impl clipsync::clipboard::ClipboardProvider for ReadGate {
 fn remote_text(text: &str) -> clipsync::transport::Message {
     let mut remote = clipsync::transport::Message::new(
         clipsync::transport::MessageType::ClipboardData,
-        clipsync::transport::MessagePayload::Clipboard(clipsync::transport::ClipboardData {
-            format: clipsync::transport::protocol::ClipboardFormat::Text,
-            data: text.as_bytes().to_vec(),
-            compression: None,
-            checksum: clipsync::history::encryption::Encryptor::compute_checksum(text.as_bytes()),
-            metadata: Default::default(),
-        }),
+        clipsync::transport::MessagePayload::Clipboard(
+            clipsync::transport::ClipboardData {
+                format: clipsync::transport::protocol::ClipboardFormat::Text,
+                data: text.as_bytes().to_vec(),
+                compression: None,
+                checksum: clipsync::history::encryption::Encryptor::compute_checksum(
+                    text.as_bytes(),
+                ),
+                metadata: Default::default(),
+            }
+            .into(),
+        ),
     );
     remote.source_peer_id = Some(uuid::Uuid::new_v4());
     remote.correlation_id = Some(uuid::Uuid::new_v4());

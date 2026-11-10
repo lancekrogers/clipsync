@@ -20,7 +20,7 @@ Complete guide to using ClipSync for seamless clipboard synchronization across y
 
 ### What is ClipSync?
 
-ClipSync automatically synchronizes your clipboard content across multiple devices on your local network. When you copy text, images, or other content on one device, it instantly becomes available on all your connected devices.
+ClipSync synchronizes plain-text and image clipboard content between trusted devices on your local network. Image sync supports PNG, and macOS TIFF clipboard images are converted to PNG. Copied files and rich text are not synced. Connected peers receive queued events when eligible; queueing is not confirmation that a remote clipboard changed.
 
 ### Key Benefits
 
@@ -97,7 +97,7 @@ clipsync auth add --name "desktop" --key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI.
 clipsync peers
 
 # Test clipboard sync
-echo "Hello from Device 1!" | clipsync copy
+clipsync copy "Hello from Device 1!"
 # On Device 2:
 clipsync paste  # Should show "Hello from Device 1!"
 ```
@@ -109,7 +109,7 @@ clipsync paste  # Should show "Hello from Device 1!"
 ```bash
 # Copy text to clipboard
 clipsync copy "Your text here"
-echo "Text from stdin" | clipsync copy
+clipsync copy "$(printf %s 'Text from a command')"
 
 # Get current clipboard content
 clipsync paste
@@ -215,28 +215,6 @@ clipsync history --interactive
 # Search for specific text
 clipsync history --search "important note"
 
-# Case-insensitive search
-clipsync history --search "Password" --ignore-case
-
-# Search by content type
-clipsync history --type text
-clipsync history --type image
-```
-
-### Managing History
-
-```bash
-# Clear specific history item
-clipsync history --delete 3
-
-# Clear all history
-clipsync history --clear
-
-# Export history to file
-clipsync history --export ~/clipboard-backup.json
-
-# Import history from file
-clipsync history --import ~/clipboard-backup.json
 ```
 
 ## ⌨️ Global Hotkeys
@@ -284,23 +262,13 @@ show_history = ""  # Empty string disables this hotkey
 
 ### Clipboard Content Types
 
-ClipSync supports various content types:
-
-**Text Content:**
-- Plain text (UTF-8)
-- Rich text (RTF)
-- HTML content
-- Code snippets with syntax highlighting
-
-**Binary Content:**
-- Images (PNG, JPEG, TIFF)
-- Files (small files up to 5MB)
-- Custom binary data
-
-**Large Content:**
-- Automatic chunking for content >64KB
-- Progress indicators for large transfers
-- Compression for efficient transfer
+The sync engine supports plain UTF-8 text and PNG images, including macOS TIFF
+clipboard images converted to PNG. It does not sync copied files, RTF, or HTML.
+Copy an image in an application to sync it; `clipsync copy` takes a text
+argument and does not accept an image file. Image content is sent to trusted
+peers and encrypted in history. Sensitive-text filtering does not inspect text
+inside images. See the [README](../README.md#current-scope) for image limits and
+the current Linux clipboard-write limitation.
 
 ### Configuration Profiles
 
@@ -387,7 +355,7 @@ Perfect for developers working across multiple machines:
 
 ```bash
 # Terminal commands that sync across devices
-git status | clipsync copy       # Copy git status to other machines
+clipsync copy "$(git status)"       # Copy git status to other machines
 clipsync paste | grep "modified"  # Process synced content
 
 # Sync code snippets
@@ -400,12 +368,8 @@ clipsync copy "kubectl get pods --all-namespaces"
 For writers, designers, and content creators:
 
 ```bash
-# Collect research across devices
-clipsync history --search "research"  # Find all research clips
-clipsync history --export research.json  # Export for backup
-
-# Sync design assets
-clipsync copy < image.png  # Copy image to other devices
+# Find a saved text copy
+clipsync history --search "research"
 ```
 
 ### Workflow 3: System Administration
@@ -414,11 +378,11 @@ For managing multiple servers and workstations:
 
 ```bash
 # Sync configuration snippets
-cat nginx.conf | clipsync copy
+clipsync copy "$(cat nginx.conf)"
 # Apply on other servers
 
 # Share command output
-ps aux | grep nginx | clipsync copy
+clipsync copy "$(ps aux | grep nginx)"
 # Analyze on other machines
 ```
 
@@ -524,7 +488,7 @@ clipsync history --interactive  # Browse prepared content
        if [ $# -eq 0 ]; then
            clipsync paste
        else
-           echo "$*" | clipsync copy
+           clipsync copy "$*"
        fi
    }
    ```
@@ -541,16 +505,16 @@ clipsync history --interactive  # Browse prepared content
 **Git Integration:**
 ```bash
 # Copy git commit messages
-git log --oneline -5 | clipsync copy
+clipsync copy "$(git log --oneline -5)"
 
 # Share branch names
-git branch --show-current | clipsync copy
+clipsync copy "$(git branch --show-current)"
 ```
 
 **tmux Integration:**
 ```bash
 # Copy tmux buffer to ClipSync
-tmux show-buffer | clipsync copy
+clipsync copy "$(tmux show-buffer)"
 
 # Paste from ClipSync to tmux
 clipsync paste | tmux load-buffer -

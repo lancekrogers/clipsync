@@ -10,9 +10,7 @@ use clap::{Parser, Subcommand};
 use serde_json;
 use tracing::{error, info};
 
-use crate::adapters::{
-    get_clipboard_provider, ClipboardProviderWrapper, HistoryManager, PeerDiscovery,
-};
+use crate::adapters::{ClipboardProviderWrapper, HistoryManager, PeerDiscovery};
 use crate::auth::{AuthorizedKey, AuthorizedKeys, PublicKey};
 use crate::config::Config;
 #[cfg(target_os = "linux")]
@@ -236,7 +234,10 @@ impl CliHandler {
     async fn ensure_clipboard(&mut self) -> Result<Arc<ClipboardProviderWrapper>> {
         if self.clipboard.is_none() {
             info!("Initializing clipboard provider");
-            let clipboard = Arc::new(get_clipboard_provider().await?);
+            let clipboard = Arc::new(
+                crate::adapters::get_clipboard_provider_with_limit(self.config.clipboard.max_size)
+                    .await?,
+            );
             self.clipboard = Some(clipboard);
         }
         Ok(self.clipboard.as_ref().unwrap().clone())
@@ -527,6 +528,7 @@ impl CliHandler {
                             text.clone()
                         }
                     }
+                    crate::adapters::ClipboardData::Image(_) => "[Image]".to_string(),
                 }
             );
         }
@@ -536,7 +538,8 @@ impl CliHandler {
 
     async fn show_interactive_history(&mut self) -> Result<()> {
         let history = self.ensure_history().await?;
-        let mut picker = history_picker::HistoryPicker::new(Arc::clone(&history));
+        let mut picker =
+            history_picker::HistoryPicker::new(Arc::clone(&history), Arc::clone(&self.config));
         picker.show().await
     }
 
@@ -691,6 +694,7 @@ impl CliHandler {
                             text.clone()
                         }
                     }
+                    crate::adapters::ClipboardData::Image(_) => "[Image]".to_string(),
                 }
             );
         }

@@ -10,18 +10,21 @@ use crossterm::{
 use tracing::debug;
 
 use crate::adapters::{ClipboardEntry, HistoryManager};
+use crate::config::Config;
 
 pub struct HistoryPicker {
     history: Arc<HistoryManager>,
+    config: Arc<Config>,
     entries: Vec<ClipboardEntry>,
     selected_index: usize,
     search_term: String,
 }
 
 impl HistoryPicker {
-    pub fn new(history: Arc<HistoryManager>) -> Self {
+    pub fn new(history: Arc<HistoryManager>, config: Arc<Config>) -> Self {
         Self {
             history,
+            config,
             entries: Vec::new(),
             selected_index: 0,
             search_term: String::new(),
@@ -60,7 +63,7 @@ impl HistoryPicker {
                 match self.handle_key_event(key_event).await? {
                     PickerAction::Exit => break,
                     PickerAction::Select => {
-                        if let Some(entry) = self.entries.get(self.selected_index) {
+                        if let Some(entry) = self.get_filtered_entries().get(self.selected_index) {
                             self.copy_entry_to_clipboard(entry).await?;
                         }
                         break;
@@ -106,6 +109,7 @@ impl HistoryPicker {
                     // Replace newlines with spaces for display
                     preview.replace('\n', " ").replace('\r', "")
                 }
+                crate::adapters::ClipboardData::Image(_) => "[Image]".to_string(),
             };
 
             println!(
@@ -130,6 +134,7 @@ impl HistoryPicker {
                     crate::adapters::ClipboardData::Text(text) => text
                         .to_lowercase()
                         .contains(&self.search_term.to_lowercase()),
+                    crate::adapters::ClipboardData::Image(_) => false,
                 })
                 .collect()
         }
@@ -169,14 +174,12 @@ impl HistoryPicker {
     async fn copy_entry_to_clipboard(&self, entry: &ClipboardEntry) -> Result<()> {
         debug!("Copying entry {} to clipboard", entry.id);
 
-        // In a real implementation, we would get the clipboard provider here
-        // For now, we'll just print the selection
-        match &entry.content {
-            crate::adapters::ClipboardData::Text(text) => {
-                println!("\nSelected clipboard entry:");
-                println!("{}", text);
-            }
-        }
+        crate::control::request(
+            &crate::control::socket_path(&self.config),
+            crate::control::Command::HistoryCopy { id: entry.id },
+            crate::control::max_frame_bytes(&self.config),
+        )
+        .await?;
 
         Ok(())
     }

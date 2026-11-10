@@ -194,7 +194,7 @@ mod protocol_tests {
             metadata: HashMap::new(),
         };
 
-        let payload = MessagePayload::Clipboard(data);
+        let payload = MessagePayload::Clipboard(data.into());
         let msg = Message::new(MessageType::ClipboardData, payload);
 
         // Test serialization round-trip

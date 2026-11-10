@@ -120,6 +120,7 @@ impl HotKeyManager {
         let clipboard = Arc::clone(&self.clipboard);
         let history = Arc::clone(&self.history);
         let sync_engine = self.sync_engine.clone();
+        let config = self.config.clone();
 
         tokio::task::spawn_blocking(move || {
             let rt = tokio::runtime::Handle::current();
@@ -144,6 +145,7 @@ impl HotKeyManager {
                             let clipboard_clone = Arc::clone(&clipboard);
                             let history_clone = Arc::clone(&history);
                             let sync_engine_clone = sync_engine.clone();
+                            let config_clone = config.clone();
 
                             rt.spawn(async move {
                                 if let Err(e) = Self::execute_action(
@@ -151,6 +153,7 @@ impl HotKeyManager {
                                     clipboard_clone,
                                     history_clone,
                                     sync_engine_clone,
+                                    config_clone,
                                 )
                                 .await
                                 {
@@ -173,11 +176,12 @@ impl HotKeyManager {
         clipboard: Arc<ClipboardProviderWrapper>,
         history: Arc<HistoryManager>,
         sync_engine: Option<Arc<TrustAwareSyncEngine>>,
+        config: Arc<Config>,
     ) -> Result<()> {
         match action {
             HotKeyAction::ShowHistory => {
                 debug!("Executing show history action");
-                let mut picker = HistoryPicker::new(history);
+                let mut picker = HistoryPicker::new(history, config);
                 picker.show().await?;
             }
             HotKeyAction::ForceSync => {

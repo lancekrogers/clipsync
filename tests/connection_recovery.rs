@@ -223,6 +223,54 @@ async fn stalled_tls_first_candidate_falls_back_to_working_listener() {
 }
 
 #[tokio::test]
+async fn websocket_frame_admission_rejects_and_recovers_over_real_tls() {
+    use clipsync::transport::websocket::WebSocketConfig;
+    let server = Identity::new().await;
+    let client = Identity::new().await;
+    server.trust(&client).await;
+    client.trust(&server).await;
+    let max_message_size = 1024;
+    let charge = 3 * (4 * max_message_size + 65536);
+    let budget = Arc::new(tokio::sync::Semaphore::new(charge));
+    let config = WebSocketConfig {
+        max_message_size,
+        frame_budget: budget.clone(),
+        connect_timeout: Duration::from_secs(2),
+        ..Default::default()
+    };
+    let transport = WebSocketTransport::new(
+        "127.0.0.1:0".parse().unwrap(),
+        server.auth.clone(),
+        config,
+        server.id(),
+    );
+    let mut listener = transport.listen().await.unwrap();
+    let peer = server.peer(listener.local_addr());
+    let connect = || {
+        WebSocketTransport::connect_to_peer(
+            &peer,
+            client.auth.clone(),
+            WebSocketConfig::default(),
+            client.id(),
+        )
+    };
+    let (accepted, connected) = tokio::join!(listener.accept(), connect());
+    let accepted = accepted.unwrap();
+    let connected = connected.unwrap();
+    assert_eq!(budget.available_permits(), 0);
+
+    let (rejected, failed) = tokio::join!(listener.accept(), connect());
+    assert!(rejected.is_err());
+    assert!(failed.is_err());
+    drop(accepted);
+    drop(connected);
+    eventually(async || budget.available_permits() == charge).await;
+    let (accepted, connected) = tokio::join!(listener.accept(), connect());
+    assert!(accepted.is_ok());
+    assert!(connected.is_ok());
+}
+
+#[tokio::test]
 async fn aborted_dial_releases_in_flight_lease() {
     use tokio::net::TcpListener;
 

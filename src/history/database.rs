@@ -182,7 +182,9 @@ impl HistoryDatabase {
         )?;
 
         let entries = stmt
-            .query_map(params![count], |row| Ok(self.row_to_entry(row, encryptor)))?
+            .query_map(params![count as i64], |row| {
+                Ok(self.row_to_entry(row, encryptor))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
 
         entries.into_iter().collect()

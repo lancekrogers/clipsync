@@ -190,7 +190,10 @@ impl StreamingTransport {
     ) -> Result<oneshot::Receiver<Result<()>>> {
         if data.data.len() <= self.config.chunk_size {
             // Small payload, send directly
-            let message = Message::new(MessageType::ClipboardData, MessagePayload::Clipboard(data));
+            let message = Message::new(
+                MessageType::ClipboardData,
+                MessagePayload::Clipboard(data.into()),
+            );
             self.connection.send(message).await?;
 
             let (tx, rx) = oneshot::channel();

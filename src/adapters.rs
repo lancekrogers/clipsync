@@ -13,6 +13,7 @@ use crate::discovery::Discovery;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ClipboardData {
     Text(String),
+    Image(Vec<u8>),
 }
 
 #[derive(Debug, Clone)]
@@ -71,14 +72,15 @@ impl HistoryManager {
     }
 
     pub async fn add_entry(&self, entry: &ClipboardEntry) -> Result<()> {
-        let content = match &entry.content {
-            ClipboardData::Text(text) => text.as_bytes().to_vec(),
+        let (content, content_type) = match &entry.content {
+            ClipboardData::Text(text) => (text.as_bytes().to_vec(), "text/plain"),
+            ClipboardData::Image(png) => (png.clone(), "image/png"),
         };
 
         let history_content = crate::history::ClipboardContent {
             id: entry.id,
             content,
-            content_type: "text/plain".to_string(),
+            content_type: content_type.to_string(),
             timestamp: entry.timestamp.timestamp(),
             origin_node: entry.source,
         };
@@ -131,9 +133,13 @@ impl HistoryManager {
 }
 
 fn history_entry_to_clipboard(entry: crate::history::HistoryEntry) -> ClipboardEntry {
-    let content = match String::from_utf8(entry.content) {
-        Ok(text) => ClipboardData::Text(text),
-        Err(_) => ClipboardData::Text("[Binary Data]".to_string()),
+    let content = if entry.content_type == "image/png" {
+        ClipboardData::Image(entry.content)
+    } else {
+        match String::from_utf8(entry.content) {
+            Ok(text) => ClipboardData::Text(text),
+            Err(_) => ClipboardData::Text("[Binary Data]".to_string()),
+        }
     };
     ClipboardEntry {
         id: entry.id,
@@ -154,6 +160,18 @@ impl ClipboardProviderWrapper {
         Self { inner }
     }
 
+    pub fn enable_image_capture(&self) -> bool {
+        self.inner.enable_image_capture()
+    }
+
+    pub async fn get_content(&self) -> Result<crate::clipboard::ClipboardContent> {
+        Ok(self.inner.get_content().await?)
+    }
+
+    pub async fn set_content(&self, content: &crate::clipboard::ClipboardContent) -> Result<()> {
+        Ok(self.inner.set_content(content).await?)
+    }
+
     pub async fn get_text(&self) -> Result<String> {
         let content = self.inner.get_content().await?;
         if content.mime_type != "text/plain" {
@@ -168,6 +186,17 @@ impl ClipboardProviderWrapper {
         Ok(())
     }
 
+    pub async fn reconcile_unknown_image(
+        &self,
+        content: &crate::clipboard::ClipboardContent,
+        observed: &crate::clipboard::ClipboardContent,
+    ) -> Result<crate::clipboard::ImageAttribution> {
+        Ok(self
+            .inner
+            .reconcile_unknown_image(content, observed)
+            .await?)
+    }
+
     pub async fn clear(&self) -> Result<()> {
         self.inner.clear().await?;
         Ok(())
@@ -176,16 +205,24 @@ impl ClipboardProviderWrapper {
 
 // ClipboardProvider getter function
 pub async fn get_clipboard_provider() -> Result<ClipboardProviderWrapper> {
+    get_clipboard_provider_with_limit(crate::clipboard::MAX_CLIPBOARD_SIZE).await
+}
+
+pub async fn get_clipboard_provider_with_limit(
+    max_size: usize,
+) -> Result<ClipboardProviderWrapper> {
     #[cfg(target_os = "macos")]
     {
-        let provider = Box::new(crate::clipboard::macos::MacOSClipboard::new()?);
+        let provider = Box::new(crate::clipboard::macos::MacOSClipboard::new_with_limit(
+            max_size,
+        )?);
         Ok(ClipboardProviderWrapper::new(provider))
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         Ok(ClipboardProviderWrapper::new(
-            crate::clipboard::create_provider().await?,
+            crate::clipboard::create_provider_with_limit(max_size).await?,
         ))
     }
 
