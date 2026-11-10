@@ -6,7 +6,7 @@ use crate::{
     config::Config,
     control::{
         self, error_codes, Command, ControlError, DaemonStatus, DiagnosticError, DiagnosticsReport,
-        EnrollmentSnapshot, Response, TrustedDeviceView,
+        EnrollmentSnapshot, ImagePreview, Response, TrustedDeviceView,
     },
 };
 use std::{
@@ -49,6 +49,7 @@ pub struct View {
     pub query: String,
     pub selected: Option<Uuid>,
     pub detail: Option<String>,
+    pub image_preview: Option<ImagePreview>,
     pub detail_page: usize,
     pub notice: Option<String>,
     pub error: Option<String>,
@@ -75,6 +76,7 @@ impl Default for View {
             query: String::new(),
             selected: None,
             detail: None,
+            image_preview: None,
             detail_page: 0,
             notice: None,
             error: None,
@@ -484,6 +486,7 @@ impl Controller {
                 self.reconciliation.begin(Domain::Detail);
                 self.view.selected = None;
                 self.view.detail = None;
+                self.view.image_preview = None;
                 self.view.detail_page = 0;
                 self.view.detail_loading = false;
                 self.view.history.clear();
@@ -506,6 +509,7 @@ impl Controller {
                 if self.view.history.iter().any(|row| row.id == id) {
                     self.view.selected = Some(id);
                     self.view.detail = None;
+                    self.view.image_preview = None;
                     self.view.detail_page = 0;
                     let sent = self.send(Domain::Detail, Command::HistoryGet { id });
                     self.view.detail_loading = self.arm(Domain::Detail, sent);
@@ -768,6 +772,7 @@ impl Controller {
                     self.view.history.clear();
                     self.view.selected = None;
                     self.view.detail = None;
+                    self.view.image_preview = None;
                     self.view.detail_page = 0;
                     self.view.detail_loading = false;
                     self.history_generation = None;
@@ -775,6 +780,7 @@ impl Controller {
                 }
                 if reply.ticket.domain == Domain::Detail {
                     self.view.detail = None;
+                    self.view.image_preview = None;
                     self.view.detail_page = 0;
                 }
                 let (code, text) = user_facing_error(&error);
@@ -849,6 +855,7 @@ impl Controller {
                     self.view.history.clear();
                     self.view.selected = None;
                     self.view.detail = None;
+                    self.view.image_preview = None;
                     self.view.detail_page = 0;
                     self.view.notice =
                         Some("The service restarted. State has been refreshed.".into());
@@ -919,6 +926,7 @@ impl Controller {
                         self.reconciliation.begin(Domain::Detail);
                         self.view.selected = None;
                         self.view.detail = None;
+                        self.view.image_preview = None;
                         self.view.detail_page = 0;
                         self.view.detail_loading = false;
                     }
@@ -928,6 +936,8 @@ impl Controller {
                 if let Some(entry) = response.history_entry {
                     if self.view.selected == Some(entry.id) {
                         self.view.detail = Some(display_text(&entry.text, true));
+                        self.view.image_preview =
+                            entry.image_preview.filter(ImagePreview::is_valid);
                     }
                 }
             }

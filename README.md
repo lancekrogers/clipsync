@@ -52,6 +52,10 @@ History, and Settings**. History shows actual saved copies, their source and tim
 select one to read it and copy it again. The daemon remains the sole clipboard
 owner, so closing either interface leaves syncing running.
 
+In the TUI, selecting an image in History shows a color preview using terminal
+characters. With `NO_COLOR` set, the preview uses grayscale characters. Update
+both the TUI and its local daemon to use image previews.
+
 <p align="center">
   <img src="docs/assets/desktop-overview.png" width="960" alt="ClipSync desktop Overview showing service status, Pause syncing, Sync current copy, and Open clipboard history controls">
 </p>

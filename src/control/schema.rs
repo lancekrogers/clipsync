@@ -7,6 +7,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const HISTORY_PAGE_MAX: u32 = 20;
 pub const HISTORY_PREVIEW_CHARS: usize = 240;
 pub const HISTORY_QUERY_MAX_BYTES: usize = 256;
+/// Thumbnail dimensions keep the JSON response below the minimum frame budget.
+pub const IMAGE_PREVIEW_MAX_DIMENSION: u32 = 64;
 pub const DIAGNOSTICS_ERROR_MAX: usize = 20;
 /// Minimum frame budget reserved for a worst-case 20-preview history page.
 pub const HISTORY_PAGE_FRAME_MIN: usize = 64 * 1024;
@@ -191,6 +193,26 @@ pub struct HistoryEntryDetail {
     pub content_chars: u32,
     pub preview: String,
     pub text: String,
+    /// Small RGB thumbnail; absent for text, old daemons, or invalid images.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_preview: Option<ImagePreview>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImagePreview {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>,
+}
+
+impl ImagePreview {
+    pub fn is_valid(&self) -> bool {
+        self.width > 0
+            && self.height > 0
+            && self.width <= IMAGE_PREVIEW_MAX_DIMENSION
+            && self.height <= IMAGE_PREVIEW_MAX_DIMENSION
+            && self.rgb.len() == self.width as usize * self.height as usize * 3
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

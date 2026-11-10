@@ -1355,7 +1355,11 @@ async fn control_history_exposes_image_label_copy_and_partial_outcome_without_by
         .unwrap();
     let serialized = serde_json::to_string(&detail).unwrap();
     assert!(!serialized.contains(&base64::engine::general_purpose::STANDARD.encode(&bytes)));
-    assert_eq!(detail.history_entry.unwrap().text, "[Image]");
+    let detail = detail.history_entry.unwrap();
+    assert_eq!(detail.text, "[Image]");
+    let preview = detail.image_preview.expect("image thumbnail");
+    assert_eq!((preview.width, preview.height), (2, 1));
+    assert_eq!(preview.rgb, [255, 0, 0, 12, 76, 140]);
     *clipboard.content.lock().await = ClipboardContent::text("replacement");
     control::request(&path, Command::HistoryCopy { id }, max)
         .await

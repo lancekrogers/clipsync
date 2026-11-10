@@ -391,9 +391,22 @@ fn render(
                 columns[0],
                 &mut selection,
             );
-            let detail = client.view.visible_detail().unwrap_or(if client.view.history.is_empty() { "No copies match your search. Clear the query or copy text while the service is running." } else { "↑/↓ select a saved copy. Press c to copy it again." });
+            let image_without_preview = client.view.image_preview.is_none()
+                && client.view.detail.is_some()
+                && client.view.history.iter().any(|row| {
+                    Some(row.id) == client.view.selected && row.content_type == "image/png"
+                });
+            let detail = if image_without_preview {
+                "Image preview unavailable. Press c to copy it again."
+            } else {
+                client.view.visible_detail().unwrap_or(if client.view.history.is_empty() { "No copies match your search. Clear the query or copy text while the service is running." } else { "↑/↓ select a saved copy. Press c to copy it again." })
+            };
             let detail_title = if client.view.detail_loading {
                 "Loading selected copy…"
+            } else if client.view.image_preview.is_some() && client.view.can_act() {
+                "Selected image · c copy"
+            } else if client.view.image_preview.is_some() {
+                "Selected image · Copy unavailable"
             } else if client.view.can_act() && client.view.detail.is_some() {
                 "Selected copy · c copy · PgUp/PgDn"
             } else {
@@ -409,13 +422,28 @@ fn render(
             } else {
                 detail_title.to_owned()
             };
-            frame.render_widget(
-                Paragraph::new(detail)
-                    .scroll((detail_scroll, 0))
-                    .wrap(Wrap { trim: false })
-                    .block(block(&title)),
-                columns[1],
-            );
+            if let Some(preview) = &client.view.image_preview {
+                let border = block(&title);
+                let inner = border.inner(columns[1]);
+                frame.render_widget(border, columns[1]);
+                frame.render_widget(
+                    Paragraph::new(super::terminal_image::lines(
+                        preview,
+                        inner.width,
+                        inner.height,
+                        color,
+                    )),
+                    inner,
+                );
+            } else {
+                frame.render_widget(
+                    Paragraph::new(detail)
+                        .scroll((detail_scroll, 0))
+                        .wrap(Wrap { trim: false })
+                        .block(block(&title)),
+                    columns[1],
+                );
+            }
         }
         Route::Settings => {
             let mut lines = vec![

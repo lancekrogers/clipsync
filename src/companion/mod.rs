@@ -6,4 +6,7 @@ pub mod model;
 pub mod terminal;
 
 #[cfg(feature = "tui")]
+mod terminal_image;
+
+#[cfg(feature = "tui")]
 mod terminal_devices;

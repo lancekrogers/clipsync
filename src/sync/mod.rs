@@ -78,7 +78,7 @@ pub struct SyncEngine {
     image_support: Option<(crate::transport::image_capability::ImageLimits, u64)>,
 }
 
-fn image_decode_gate() -> &'static tokio::sync::Semaphore {
+pub(crate) fn image_decode_gate() -> &'static tokio::sync::Semaphore {
     static GATE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     GATE.get_or_init(|| tokio::sync::Semaphore::new(1))
 }
@@ -92,6 +92,11 @@ struct PreparedContent {
     dimensions: Option<(u32, u32)>,
 }
 impl SyncEngine {
+    pub(crate) fn image_limits(
+        &self,
+    ) -> Option<(crate::transport::image_capability::ImageLimits, u64)> {
+        self.image_support
+    }
     pub fn new(
         config: Arc<Config>,
         clipboard: Arc<ClipboardProviderWrapper>,

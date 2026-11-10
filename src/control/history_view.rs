@@ -73,7 +73,39 @@ pub fn to_detail(entry: &ClipboardEntry, max_bytes: usize) -> Result<HistoryEntr
         content_chars: view.content_chars,
         preview: view.preview,
         text,
+        image_preview: None,
     })
+}
+
+/// Decode under the same admission limits as sync, then send only a small RGB
+/// thumbnail over the protected local control socket. Transparent pixels are
+/// composited against the terminal preview's dark background.
+pub fn image_preview(
+    data: &[u8],
+    limits: crate::transport::image_capability::ImageLimits,
+    budget: u64,
+) -> Result<super::schema::ImagePreview> {
+    use image::{DynamicImage, RgbaImage};
+    let decoded = crate::clipboard::png::decode(data, limits, budget)?;
+    let image = RgbaImage::from_raw(decoded.width, decoded.height, decoded.rgba)
+        .ok_or_else(|| anyhow::anyhow!("Invalid image dimensions"))?;
+    let size = super::schema::IMAGE_PREVIEW_MAX_DIMENSION;
+    let preview = if decoded.width > size || decoded.height > size {
+        DynamicImage::ImageRgba8(image)
+            .thumbnail(size, size)
+            .to_rgba8()
+    } else {
+        image
+    };
+    let (width, height) = preview.dimensions();
+    let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+    for pixel in preview.pixels() {
+        let alpha = u32::from(pixel[3]);
+        for color in &pixel.0[..3] {
+            rgb.push(((u32::from(*color) * alpha + 24 * (255 - alpha) + 127) / 255) as u8);
+        }
+    }
+    Ok(super::schema::ImagePreview { width, height, rgb })
 }
 
 pub fn page_from_entries(

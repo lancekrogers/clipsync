@@ -205,7 +205,28 @@ async fn engine_history_get(engine: &SyncEngine, id: Uuid) -> Result<HistoryEntr
         }
         _ => {}
     }
-    history_view::to_detail(&entry, max_bytes)
+    let mut detail = history_view::to_detail(&entry, max_bytes)?;
+    if let (ClipboardData::Image(data), Some((limits, budget))) =
+        (entry.content, engine.image_limits())
+    {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        if let Ok(Ok(permit)) =
+            tokio::time::timeout_at(deadline, crate::sync::image_decode_gate().acquire()).await
+        {
+            // A timed-out control request must not release decode admission
+            // while its blocking worker is still allocating.
+            let task = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                history_view::image_preview(&data, limits, budget).ok()
+            });
+            detail.image_preview = tokio::time::timeout_at(deadline, task)
+                .await
+                .ok()
+                .and_then(Result::ok)
+                .flatten();
+        }
+    }
+    Ok(detail)
 }
 
 #[async_trait::async_trait]
