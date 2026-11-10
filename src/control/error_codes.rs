@@ -13,6 +13,12 @@ pub const HISTORY_ENTRY_TOO_LARGE: &str = "history_entry_too_large";
 pub const UNSUPPORTED_COMMAND: &str = "unsupported_command";
 pub const RESUME_FAILED: &str = "resume_failed";
 pub const DAEMON_PAUSED: &str = "daemon_paused";
+pub const CLIPBOARD_APPLIED_HISTORY_FAILED: &str = "clipboard_applied_history_failed";
+pub const CLIPBOARD_WRITE_UNKNOWN: &str = "clipboard_write_unknown";
+pub const IMAGE_PEER_UNSUPPORTED: &str = "image_peer_unsupported";
+pub const IMAGE_PEER_LIMIT: &str = "image_peer_limit";
+pub const IMAGE_QUEUE_FULL: &str = "image_queue_full";
+pub const IMAGE_NOT_QUEUED: &str = "image_not_queued";
 
 pub const ENROLLMENT_CLOSED: &str = "enrollment_closed";
 pub const ENROLLMENT_EXPIRED: &str = "enrollment_expired";
@@ -69,6 +75,21 @@ fn diagnostic_entry(code: &str) -> Option<(&'static str, &'static str)> {
             "The control connection belongs to another user.",
         ),
         (SYNC_PAUSED, "Sync is paused."),
+        (
+            IMAGE_PEER_UNSUPPORTED,
+            "Connected peers do not support image sync.",
+        ),
+        (IMAGE_PEER_LIMIT, "The image exceeds peer limits."),
+        (IMAGE_QUEUE_FULL, "The image queue is full."),
+        (IMAGE_NOT_QUEUED, "No eligible peer accepted the image."),
+        (
+            CLIPBOARD_APPLIED_HISTORY_FAILED,
+            "Clipboard changed, but history could not be saved.",
+        ),
+        (
+            CLIPBOARD_WRITE_UNKNOWN,
+            "Clipboard write outcome is uncertain.",
+        ),
         (HISTORY_UNAVAILABLE, "History is unavailable."),
         (HISTORY_NOT_FOUND, "The history entry was not found."),
         (HISTORY_QUERY_TOO_LONG, "The history query is too long."),

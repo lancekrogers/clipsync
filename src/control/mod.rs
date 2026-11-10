@@ -149,6 +149,18 @@ fn map_handler_error(response: &mut Response, err: anyhow::Error) {
     let message = err.to_string();
     let code = if message.starts_with("Unsupported control protocol") {
         error_codes::UNSUPPORTED_PROTOCOL
+    } else if message.starts_with("Clipboard applied; history save failed") {
+        error_codes::CLIPBOARD_APPLIED_HISTORY_FAILED
+    } else if message.starts_with("Clipboard write may have changed the clipboard") {
+        error_codes::CLIPBOARD_WRITE_UNKNOWN
+    } else if message.starts_with("Image not queued: peers do not support") {
+        error_codes::IMAGE_PEER_UNSUPPORTED
+    } else if message.starts_with("Image not queued: image exceeds peer limits") {
+        error_codes::IMAGE_PEER_LIMIT
+    } else if message.starts_with("Image not queued: image queue is full") {
+        error_codes::IMAGE_QUEUE_FULL
+    } else if message.starts_with("Image not queued:") {
+        error_codes::IMAGE_NOT_QUEUED
     } else if message.starts_with("Clipboard exceeds configured size limit") {
         error_codes::CLIPBOARD_TOO_LARGE
     } else if message.starts_with("Control frame exceeds") {
@@ -730,6 +742,41 @@ pub async fn request_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_partial_outcomes_have_stable_error_codes() {
+        for (message, code) in [
+            (
+                "Clipboard applied; history save failed: private path",
+                error_codes::CLIPBOARD_APPLIED_HISTORY_FAILED,
+            ),
+            (
+                "Clipboard write may have changed the clipboard: native failure",
+                error_codes::CLIPBOARD_WRITE_UNKNOWN,
+            ),
+            (
+                "Image not queued: peers do not support image sync",
+                error_codes::IMAGE_PEER_UNSUPPORTED,
+            ),
+            (
+                "Image not queued: image exceeds peer limits",
+                error_codes::IMAGE_PEER_LIMIT,
+            ),
+            (
+                "Image not queued: image queue is full",
+                error_codes::IMAGE_QUEUE_FULL,
+            ),
+            (
+                "Image not queued: no eligible peer accepted it",
+                error_codes::IMAGE_NOT_QUEUED,
+            ),
+        ] {
+            let mut response = Response::base();
+            map_handler_error(&mut response, anyhow::anyhow!(message.to_string()));
+            assert_eq!(response.error_code.as_deref(), Some(code));
+            assert!(!error_codes::fixed_diagnostic_message(code).contains("private path"));
+        }
+    }
 
     #[test]
     fn max_frame_fits_worst_case_copy_request() {

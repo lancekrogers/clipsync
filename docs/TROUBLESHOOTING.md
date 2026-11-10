@@ -24,7 +24,7 @@ clipsync doctor
 clipsync logs --tail 20
 
 # 5. Test basic functionality
-echo "test" | clipsync copy
+clipsync copy "test"
 clipsync paste
 ```
 
@@ -357,7 +357,7 @@ clipsync logs | grep -i auth
 **Diagnosis:**
 ```bash
 # Test basic clipboard operations
-echo "test sync" | clipsync copy
+clipsync copy "test sync"
 clipsync paste
 
 # Check clipboard monitoring
@@ -424,56 +424,20 @@ clipsync sync
 
 ### Large Content Issues
 
-**Problem:** Large images or files don't sync
+**Problem:** Images or files don't sync
 
-**Solutions:**
-
-1. **Increase size limits:**
-   ```toml
-   [clipboard]
-   max_size = 20_971_520  # 20MB instead of 5MB
-   ```
-
-2. **Enable compression:**
-   ```toml
-   [security]
-   compression = "zstd"
-   compression_level = 5
-   ```
-
-3. **Check available memory:**
-   ```bash
-   free -h                 # Linux
-   vm_stat                 # macOS
-   ```
+Image sync supports PNG clipboard data and macOS TIFF clipboard images, but not
+files copied as files. Check that both devices run an image-capable version and
+that the image fits their byte and dimension limits in the [README](../README.md#current-scope).
+Increasing the configured limit does not bypass the image queue budget.
 
 ### Content Type Issues
 
 **Problem:** Certain content types don't sync
 
-**Solutions:**
-
-1. **Check allowed MIME types:**
-   ```toml
-   [clipboard]
-   allowed_mime_types = [
-       "text/plain",
-       "text/html",
-       "text/rtf",
-       "image/png",
-       "image/jpeg",
-       "image/tiff",
-       "application/octet-stream"  # Add if needed
-   ]
-   ```
-
-2. **Debug content detection:**
-   ```bash
-   # Start with verbose logging
-   RUST_LOG=debug clipsync start --foreground
-   
-   # Copy content and check logs for MIME type detection
-   ```
+The sync engine supports plain text and PNG clipboard images, including macOS
+TIFF images converted to PNG. To troubleshoot, run `RUST_LOG=debug clipsync
+start --foreground`. Take care with logs from your own environment.
 
 ## ⌨️ Hotkey Issues
 
@@ -866,12 +830,8 @@ ERROR Database error: disk full
 
 ### Q: Large images don't sync
 
-**A:** Check size limits and compression:
-
-1. Increase max size: `max_size = 20_971_520` (20MB)
-2. Enable compression: `compression = "zstd"`
-3. Check available memory and disk space
-4. Monitor logs during large transfers
+**A:** Check the encoded size and dimensions against the [image limits](../README.md#current-scope)
+on both devices. Increasing the configured size does not bypass the queue budget.
 
 ### Q: ClipSync stops working after sleep/hibernate
 

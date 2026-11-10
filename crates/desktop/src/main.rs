@@ -195,7 +195,7 @@ impl App {
         ui.add_space(18.0);
         theme::card(ui, |ui| {
             ui.label(egui::RichText::new("Find something you copied earlier").size(22.0));
-            ui.weak("Browse your recent text, links and notes, then copy them again.");
+            ui.weak("Browse your recent copies, then copy them again.");
             if theme::primary(ui, "Open clipboard history").clicked() {
                 self.companion.navigate(Route::History);
             }
@@ -380,23 +380,64 @@ impl eframe::App for App {
                     }
                 }
             });
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left:16, right:32, top:10, bottom:24 })).show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt(("page_scroll", self.companion.route.label())).show(ui, |ui| {
-                ui.heading(if self.companion.route == Route::History { "Clipboard history" } else { self.companion.route.label() });
-                ui.add_space(14.0);
-                if self.companion.route == Route::Settings && let Some(error) = &self.companion.setup.service_error { ui.colored_label(theme::BLUE, error); }
-                if let Some(client) = &mut self.companion.client {
-                    if let Some(error) = &client.view.error { ui.colored_label(theme::BLUE, error); }
-                    if let Some(notice) = &client.view.notice { ui.colored_label(theme::TEAL, notice); }
-                    if (client.view.error.is_some() || client.view.notice.is_some()) && ui.small_button("Dismiss").clicked() { client.dispatch(Intent::ClearNotice); }
-                }
-                ui.add_space(10.0);
-                match self.companion.route {
-                    Route::Overview => self.overview(ui), Route::Devices => self.devices(ui), Route::Settings => self.settings(ui),
-                    Route::History => { if let Some(client) = &mut self.companion.client { ui.weak("Find a recent copy. Select it to read the full text and copy it again."); ui.add_space(18.0); history::show(ui, client); } else { self.setup(ui); } }
-                }
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(theme::BG)
+                    .inner_margin(egui::Margin {
+                        left: 16,
+                        right: 32,
+                        top: 10,
+                        bottom: 24,
+                    }),
+            )
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt(("page_scroll", self.companion.route.label()))
+                    .show(ui, |ui| {
+                        ui.heading(if self.companion.route == Route::History {
+                            "Clipboard history"
+                        } else {
+                            self.companion.route.label()
+                        });
+                        ui.add_space(14.0);
+                        if self.companion.route == Route::Settings
+                            && let Some(error) = &self.companion.setup.service_error
+                        {
+                            ui.colored_label(theme::BLUE, error);
+                        }
+                        if let Some(client) = &mut self.companion.client {
+                            if let Some(error) = &client.view.error {
+                                ui.colored_label(theme::BLUE, error);
+                            }
+                            if let Some(notice) = &client.view.notice {
+                                ui.colored_label(theme::TEAL, notice);
+                            }
+                            if (client.view.error.is_some() || client.view.notice.is_some())
+                                && ui.small_button("Dismiss").clicked()
+                            {
+                                client.dispatch(Intent::ClearNotice);
+                            }
+                        }
+                        ui.add_space(10.0);
+                        match self.companion.route {
+                            Route::Overview => self.overview(ui),
+                            Route::Devices => self.devices(ui),
+                            Route::Settings => self.settings(ui),
+                            Route::History => {
+                                if let Some(client) = &mut self.companion.client {
+                                    ui.weak(
+                                        "Find a recent copy. Select it to view and copy it again.",
+                                    );
+                                    ui.add_space(18.0);
+                                    history::show(ui, client);
+                                } else {
+                                    self.setup(ui);
+                                }
+                            }
+                        }
+                    });
             });
-        });
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 }

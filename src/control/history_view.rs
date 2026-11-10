@@ -36,29 +36,31 @@ pub fn preview_text(text: &str) -> String {
 fn entry_text(entry: &ClipboardEntry) -> Option<&str> {
     match &entry.content {
         ClipboardData::Text(text) => Some(text.as_str()),
+        ClipboardData::Image(_) => None,
     }
 }
 
-fn content_type(_entry: &ClipboardEntry) -> &'static str {
-    "text/plain"
+fn content_type(entry: &ClipboardEntry) -> &'static str {
+    match &entry.content {
+        ClipboardData::Text(_) => "text/plain",
+        ClipboardData::Image(_) => "image/png",
+    }
 }
 
 pub fn to_view(entry: &ClipboardEntry) -> Option<HistoryEntryView> {
-    let text = entry_text(entry)?;
+    let text = entry_text(entry).unwrap_or("[Image]");
     Some(HistoryEntryView {
         id: entry.id,
         timestamp: entry.timestamp.to_rfc3339(),
         origin_node: entry.source,
         content_type: content_type(entry).into(),
-        content_chars: text.chars().count() as u32,
+        content_chars: entry_text(entry).map_or(0, |text| text.chars().count() as u32),
         preview: preview_text(text),
     })
 }
 
 pub fn to_detail(entry: &ClipboardEntry, max_bytes: usize) -> Result<HistoryEntryDetail> {
-    let text = entry_text(entry)
-        .ok_or_else(|| anyhow::anyhow!("History entry not found"))?
-        .to_string();
+    let text = entry_text(entry).unwrap_or("[Image]").to_string();
     if text.len() > max_bytes {
         bail!("Clipboard exceeds configured size limit");
     }

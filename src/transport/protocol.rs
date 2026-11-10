@@ -14,6 +14,39 @@ pub const PROTOCOL_VERSION: &str = "2.0.0";
 /// Connection identifier type
 pub type ConnectionId = Uuid;
 
+/// Holds an in-process image queue budget until all message clones are dropped.
+#[derive(Debug)]
+pub struct ImageReservation(pub tokio::sync::OwnedSemaphorePermit);
+impl PartialEq for ImageReservation {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+/// Immutable clipboard data and its inbound allocation reservation travel together,
+/// including when a subscriber retains the payload after dropping its message.
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[serde(transparent)]
+pub struct SharedClipboard {
+    inner: ClipboardData,
+    #[serde(skip)]
+    pub(crate) image_reservation: Option<std::sync::Arc<ImageReservation>>,
+}
+impl std::ops::Deref for SharedClipboard {
+    type Target = ClipboardData;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+impl From<ClipboardData> for std::sync::Arc<SharedClipboard> {
+    fn from(inner: ClipboardData) -> Self {
+        std::sync::Arc::new(SharedClipboard {
+            inner,
+            image_reservation: None,
+        })
+    }
+}
+
 /// Wire format message container
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Message {
@@ -38,6 +71,9 @@ pub struct Message {
     /// Source peer ID (added for tracking message origin)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_peer_id: Option<Uuid>,
+    /// Local-only reservation; never serialized or accepted from a peer.
+    #[serde(skip)]
+    pub(crate) image_reservation: Option<std::sync::Arc<ImageReservation>>,
 }
 
 /// Message type enumeration
@@ -100,7 +136,7 @@ pub enum MessagePayload {
     Auth(AuthPayload),
 
     /// Clipboard data payload
-    Clipboard(ClipboardData),
+    Clipboard(std::sync::Arc<SharedClipboard>),
 
     /// Streaming payload
     Stream(StreamPayload),
@@ -450,6 +486,7 @@ impl Message {
             correlation_id: None,
             version: PROTOCOL_VERSION.to_string(),
             source_peer_id: None,
+            image_reservation: None,
         }
     }
 
@@ -556,6 +593,72 @@ mod tests {
         assert_eq!(msg.correlation_id, Some(correlation_id));
     }
 
+    #[tokio::test]
+    async fn local_image_reservation_survives_clones_and_is_not_serialized() {
+        let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+        let permit = budget.clone().try_acquire_many_owned(5).unwrap();
+        let mut message = Message::new(
+            MessageType::ClipboardData,
+            MessagePayload::Clipboard(
+                ClipboardData {
+                    format: ClipboardFormat::Image {
+                        mime_type: "image/png".into(),
+                    },
+                    data: vec![1, 2],
+                    compression: None,
+                    checksum: "sum".into(),
+                    metadata: Default::default(),
+                }
+                .into(),
+            ),
+        );
+        message.image_reservation = Some(std::sync::Arc::new(ImageReservation(permit)));
+        let clone = message.clone();
+        let (MessagePayload::Clipboard(original), MessagePayload::Clipboard(copied)) =
+            (&message.payload, &clone.payload)
+        else {
+            panic!("expected clipboard payload")
+        };
+        assert!(std::sync::Arc::ptr_eq(original, copied));
+        let wire = serde_json::to_string(&message).unwrap();
+        assert!(!wire.contains("image_reservation"));
+        let decoded: Message = serde_json::from_str(&wire).unwrap();
+        assert!(decoded.image_reservation.is_none());
+        drop(message);
+        assert_eq!(budget.available_permits(), 3);
+        drop(clone);
+        assert_eq!(budget.available_permits(), 8);
+    }
+
+    #[tokio::test]
+    async fn inbound_image_reservation_follows_retained_payload() {
+        let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(8));
+        let permit = budget.clone().try_acquire_many_owned(5).unwrap();
+        let mut payload: std::sync::Arc<SharedClipboard> = ClipboardData {
+            format: ClipboardFormat::Image {
+                mime_type: "image/png".into(),
+            },
+            data: vec![1, 2],
+            compression: None,
+            checksum: "sum".into(),
+            metadata: Default::default(),
+        }
+        .into();
+        std::sync::Arc::get_mut(&mut payload)
+            .unwrap()
+            .image_reservation = Some(std::sync::Arc::new(ImageReservation(permit)));
+        let message = Message::new(
+            MessageType::ClipboardData,
+            MessagePayload::Clipboard(payload.clone()),
+        );
+        let another = message.clone();
+        drop(message);
+        drop(another);
+        assert_eq!(budget.available_permits(), 3);
+        drop(payload);
+        assert_eq!(budget.available_permits(), 8);
+    }
+
     #[test]
     fn test_clipboard_format_mime_types() {
         assert_eq!(ClipboardFormat::Text.mime_type(), "text/plain");
@@ -594,7 +697,7 @@ mod tests {
             metadata: std::collections::HashMap::new(),
         };
 
-        let payload = MessagePayload::Clipboard(data);
+        let payload = MessagePayload::Clipboard(data.into());
         let msg = Message::new(MessageType::ClipboardData, payload);
 
         // Test serialization round-trip

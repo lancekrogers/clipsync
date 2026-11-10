@@ -31,7 +31,12 @@ pub struct WebSocketConfig {
     pub send_buffer_size: usize,
     pub recv_buffer_size: usize,
     pub enable_tls: bool,
+    pub image_budget: Arc<tokio::sync::Semaphore>,
+    /// Shared admission for each connection's worst-case WebSocket buffers.
+    pub frame_budget: Arc<tokio::sync::Semaphore>,
 }
+/// Allows ten default-sized connections while bounding larger configurations.
+const FRAME_BUDGET: usize = 640 * 1024 * 1024;
 impl Default for WebSocketConfig {
     fn default() -> Self {
         Self {
@@ -43,6 +48,8 @@ impl Default for WebSocketConfig {
             send_buffer_size: 16,
             recv_buffer_size: 16,
             enable_tls: true,
+            image_budget: Arc::new(tokio::sync::Semaphore::new(64 * 1024 * 1024)),
+            frame_budget: Arc::new(tokio::sync::Semaphore::new(FRAME_BUDGET)),
         }
     }
 }
@@ -88,6 +95,26 @@ fn frame_config(config: &WebSocketConfig) -> FrameConfig {
     FrameConfig::default()
         .max_message_size(Some(max))
         .max_frame_size(Some(max))
+}
+fn reserve_frame_capacity(config: &WebSocketConfig) -> Result<tokio::sync::OwnedSemaphorePermit> {
+    // One bounded incoming frame, one outgoing serialized frame, and one
+    // decoded representation as large as the encoded frame. This is admission
+    // accounting, not a claim about TLS, allocator overhead, or buffers
+    // internal to the WebSocket library.
+    let frame = config
+        .max_message_size
+        .checked_mul(4)
+        .and_then(|n| n.checked_add(65536))
+        .ok_or_else(|| failure("WebSocket frame limit is too large"))?;
+    let charge = frame
+        .checked_mul(3)
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| failure("WebSocket frame limit is too large"))?;
+    config
+        .frame_budget
+        .clone()
+        .try_acquire_many_owned(charge)
+        .map_err(|_| failure("WebSocket frame capacity exhausted"))
 }
 fn validate(message: &Message, max: usize) -> Result<()> {
     if message.version != PROTOCOL_VERSION {
@@ -199,6 +226,8 @@ impl WebSocketTransport {
                 "Discovered identity does not match authenticated peer",
             ));
         }
+        // Reserve before the upgrade: it may read bytes following the HTTP headers.
+        let frame_permit = reserve_frame_capacity(config)?;
         let (ws, _) = tokio_tungstenite::client_async_with_config(
             format!("wss://{addr}/clipsync"),
             stream,
@@ -213,6 +242,7 @@ impl WebSocketTransport {
             local,
             config.clone(),
             auth,
+            frame_permit,
         ))
     }
 }
@@ -238,6 +268,7 @@ impl Listener for WebSocketListener {
                 .map_err(failure)?;
             let stream = TlsStream::Server(TlsAcceptor::from(server).accept(tcp).await?);
             let key = session_key(&stream)?;
+            let frame_permit = reserve_frame_capacity(&self.config)?;
             let ws = tokio_tungstenite::accept_async_with_config(
                 stream,
                 Some(frame_config(&self.config)),
@@ -251,6 +282,7 @@ impl Listener for WebSocketListener {
                 local,
                 self.config.clone(),
                 self.authenticator.clone(),
+                frame_permit,
             )) as Box<dyn Connection>)
         })
         .await
@@ -271,6 +303,7 @@ impl WebSocketConnection {
         local: SocketAddr,
         config: WebSocketConfig,
         auth: Arc<dyn Authenticator>,
+        frame_permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Self {
         let peer_id = tls::node_id(&key);
         let peer = PeerInfo {
@@ -297,6 +330,7 @@ impl WebSocketConnection {
         let (inbound, receive) = mpsc::channel(16);
         let max_size = config.max_message_size;
         let task = tokio::spawn(async move {
+            let _frame_permit = frame_permit;
             let (mut writer, mut reader) = ws.split();
             let mut heartbeat = tokio::time::interval(config.keepalive_interval);
             let mut last_received = tokio::time::Instant::now();
@@ -316,6 +350,13 @@ impl WebSocketConnection {
                                     if !auth.is_authorized(&key).await? { return Err(failure("Peer authorization revoked")); }
                                     let mut message: Message = serde_json::from_str(&text)?;
                                     validate(&message, max_size)?;
+                                    if let MessagePayload::Clipboard(data) = &mut message.payload {
+                                        if matches!(data.format, ClipboardFormat::Image { .. }) {
+                                            let charge = u32::try_from(data.data.capacity()).map_err(failure)?;
+                                            let permit = config.image_budget.clone().try_acquire_many_owned(charge).map_err(failure)?;
+                                            Arc::get_mut(data).ok_or_else(|| failure("Clipboard payload is unexpectedly shared"))?.image_reservation = Some(Arc::new(ImageReservation(permit)));
+                                        }
+                                    }
                                     message.source_peer_id = Some(peer_id);
                                     inbound.try_send(message).map_err(failure)?;
                                 }
@@ -348,6 +389,7 @@ impl WebSocketConnection {
         }
     }
 }
+
 impl Drop for WebSocketConnection {
     fn drop(&mut self) {
         self.task.abort();
@@ -381,5 +423,30 @@ impl Connection for WebSocketConnection {
     async fn close(&mut self) -> Result<()> {
         self.task.abort();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+
+    #[test]
+    fn frame_capacity_rejects_saturation_and_recovers_when_released() {
+        let config = WebSocketConfig::default();
+        let reservations: Vec<_> = (0..10)
+            .map(|_| reserve_frame_capacity(&config).unwrap())
+            .collect();
+        assert!(reserve_frame_capacity(&config).is_err());
+        drop(reservations);
+        assert!(reserve_frame_capacity(&config).is_ok());
+
+        let large = WebSocketConfig {
+            max_message_size: 50 * 1024 * 1024,
+            ..config
+        };
+        let first = reserve_frame_capacity(&large).unwrap();
+        assert!(reserve_frame_capacity(&large).is_err());
+        drop(first);
+        assert!(reserve_frame_capacity(&large).is_ok());
     }
 }

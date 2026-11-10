@@ -25,6 +25,7 @@ pub struct HistoryRow {
     pub timestamp: String,
     pub source: String,
     pub characters: u32,
+    pub content_type: String,
 }
 #[derive(Clone, Debug)]
 pub struct DeviceRow {
@@ -140,6 +141,16 @@ fn user_facing_error(error: &ControlError) -> (Option<String>, String) {
         Some(error_codes::HISTORY_ENTRY_TOO_LARGE) | Some(error_codes::CLIPBOARD_TOO_LARGE) => {
             "That copy is larger than the configured limit."
         }
+        Some(error_codes::CLIPBOARD_APPLIED_HISTORY_FAILED) => {
+            "The clipboard changed, but this copy could not be saved to history."
+        }
+        Some(error_codes::CLIPBOARD_WRITE_UNKNOWN) => {
+            "The clipboard may have changed. Check it before copying again."
+        }
+        Some(error_codes::IMAGE_PEER_UNSUPPORTED) => "Connected devices do not support image sync.",
+        Some(error_codes::IMAGE_PEER_LIMIT) => "The image exceeds the connected devices’ limits.",
+        Some(error_codes::IMAGE_QUEUE_FULL) => "The image queue is full. Try syncing again.",
+        Some(error_codes::IMAGE_NOT_QUEUED) => "No connected device accepted the image. Check service logs for details.",
         Some(error_codes::SYNC_PAUSED) => "Sync is paused. Resume syncing to share the current copy.",
         Some(error_codes::RESUME_FAILED) => {
             "Sync could not resume, so it stays paused. Check the clipboard and try again."
@@ -740,6 +751,10 @@ impl Controller {
             Ok(response) => response,
             Err(error) => {
                 self.reconciliation.failed(reply.ticket);
+                if reply.ticket.domain == Domain::Action {
+                    self.view.notice = None;
+                    self.notice_generation = None;
+                }
                 if reply.ticket.domain == Domain::Status {
                     self.view.connection =
                         if error.code.as_deref() == Some(error_codes::UNSUPPORTED_PROTOCOL) {
@@ -893,6 +908,7 @@ impl Controller {
                                     })
                             },
                             characters: entry.content_chars,
+                            content_type: entry.content_type,
                         })
                         .collect();
                     if self
@@ -927,6 +943,8 @@ impl Controller {
             }
             Domain::Action => {
                 if reply.copy_action && response.pause_applied.is_none() {
+                    self.view.notice = None;
+                    self.notice_generation = None;
                     self.view.error = Some("The service did not confirm the local copy. Update the service and try again.".into());
                     self.view.error_code = None;
                     return;
@@ -1133,6 +1151,24 @@ mod tests {
         let mut rejected = report.clone();
         rejected.redaction = "raw".into();
         assert!(render_diagnostics(&rejected).is_none());
+    }
+
+    #[test]
+    fn image_partial_outcomes_are_distinct_and_redacted() {
+        for (code, phrase) in [
+            (
+                error_codes::CLIPBOARD_APPLIED_HISTORY_FAILED,
+                "could not be saved",
+            ),
+            (error_codes::CLIPBOARD_WRITE_UNKNOWN, "may have changed"),
+        ] {
+            let (_, text) = user_facing_error(&ControlError {
+                code: Some(code.into()),
+                message: "private-path".into(),
+            });
+            assert!(text.contains(phrase));
+            assert!(!text.contains("private-path"));
+        }
     }
 
     #[test]

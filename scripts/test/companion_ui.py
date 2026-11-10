@@ -36,15 +36,18 @@ mods=dict(alt=False,ctrl=False,shift=False,mac_cmd=False,command=False)
 def events(values):return req({'ApplyEvents':[values]})
 viewport_height=800
 def click(label):
+    min_y=390 if '\n' in label else 110
     for _ in range(12):
         x,y,r,b=find(label)
-        if y>=110 and b<=viewport_height-10:break
+        if y>=min_y and b<=viewport_height-10:break
         delta=-260 if b>viewport_height-10 else 260
         events([{'PointerMoved':[(x+r)/2,min(500,viewport_height-80)]},{'MouseWheel':dict(unit='Point',delta=[0,delta],phase='Move',source='Wheel',modifiers=mods)}]);time.sleep(.2)
     x,y,r,b=find(label);pos=[(x+r)/2,(y+b)/2]
     assert 0<=pos[1]<viewport_height, f'{label} is outside viewport: {pos}'
     events([{'PointerMoved':pos},{'PointerButton':dict(pos=pos,button='Primary',pressed=True,modifiers=mods)}])
+    time.sleep(.1)
     events([{'PointerButton':dict(pos=pos,button='Primary',pressed=False,modifiers=mods)}])
+    time.sleep(.1)
 def key(name):
     for pressed in (True,False):events([{'Key':dict(key=name,physical_key=None,pressed=pressed,repeat=False,modifiers=mods)}])
 def shot(name):
@@ -99,6 +102,26 @@ if sys.platform=='darwin':
 else:
     output=subprocess.check_output([os.environ['CLIPSYNC_BINARY'],'--config',session['config'],'paste'],env=copy_env,text=True)
 assert 'cargo test --locked' in output,output
+if os.environ.get('CLIPSYNC_IMAGE_FIXTURE') == '1' and sys.platform == 'darwin':
+    click(find_copy('[Image]'))
+    wait_for(lambda:'Copy image' in text(), 'image detail loads')
+    shot('history-image-selected')
+    click('Copy image')
+    if os.environ.get('CLIPSYNC_IMAGE_FAILURE_FIXTURE') == '1':
+        wait_for(lambda:'The clipboard may have changed. Check it before copying again.' in text(), 'uncertain image write warning')
+        assert 'Copied locally' not in text(), 'uncertain write must not report success'
+        shot('history-image-write-unknown')
+    elif os.environ.get('CLIPSYNC_IMAGE_HISTORY_FAILURE_FIXTURE') == '1':
+        wait_for(lambda:'The clipboard changed, but this copy could not be saved to history.' in text(), 'image history failure warning')
+        assert 'Copied locally' not in text(), 'partial failure must not report full success'
+        import sqlite3
+        with sqlite3.connect(str(Path(session['config']).parent / 'history.db')) as db:
+            assert db.execute("SELECT count(*) FROM clipboard_history WHERE content_type = 'image/png'").fetchone()[0] == 1
+        shot('history-image-history-failed')
+    else:
+        wait_for(lambda:'Queued for' in text() or 'Copied locally' in text(), 'image copy acknowledgement')
+    image=subprocess.check_output(['swift',str(Path(__file__).with_name('read_private_pasteboard.swift')),session['pasteboard'],'--png-base64'],text=True).strip()
+    assert image == 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGP4z8Dwn6HhfwMAEPoD/o3Nc3sAAAAASUVORK5CYII=', image
 replace_search('review')
 wait_for(lambda:'Review notes' in text() and 'cargo test --locked' not in text(), 'filter results')
 shot('history-search')
@@ -118,5 +141,12 @@ wait_for(lambda:'clipsync-diagnostics-v1' in text(),'diagnostics')
 assert 'cargo test --locked' not in text(),'clipboard data in diagnostics'
 click('History');shot('history-final')
 results={'passed':['native daemon status','pause and resume through actual IPC','real encrypted history list and detail','Copy verified independently on isolated native clipboard','search and empty-state recovery','hidden selection cleared','800x640 layout retains Copy action','Tab focus movement','redacted diagnostics'], 'info':req('GetInfo')}
+if os.environ.get('CLIPSYNC_IMAGE_FIXTURE') == '1' and sys.platform == 'darwin':
+    if os.environ.get('CLIPSYNC_IMAGE_FAILURE_FIXTURE') == '1':
+        results['passed'].append('uncertain image write warning and native pasteboard verified')
+    elif os.environ.get('CLIPSYNC_IMAGE_HISTORY_FAILURE_FIXTURE') == '1':
+        results['passed'].append('image history failure warning, unchanged history, and native pasteboard verified')
+    else:
+        results['passed'].append('image history copy verified on isolated native pasteboard')
 out.joinpath('results.json').write_text(json.dumps(results,indent=2)+'\n')
 print(json.dumps(results,indent=2))

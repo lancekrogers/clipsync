@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod image_capability;
 pub mod protocol;
 pub mod reconnect;
 // Legacy large-payload API is outside the text-sync path.
@@ -53,11 +54,26 @@ fn connection_direction_rank(local_id: Uuid, peer_id: Uuid, direction: Connectio
     }
 }
 
+/// In-process reservations for queued image payloads and outgoing JSON frames.
+const IMAGE_QUEUE_BUDGET: usize = 64 * 1024 * 1024;
+const IMAGE_FRAME_OVERHEAD: usize = 65536;
+const MAX_IMAGE_WIRE_BYTES: usize = (IMAGE_QUEUE_BUDGET - IMAGE_FRAME_OVERHEAD) / 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageQueueOutcome {
+    Queued,
+    Unsupported,
+    OverLimit,
+    QueueFull,
+    StaleSession,
+}
+
 struct ManagedConnection {
     session: Uuid,
     peer: PeerInfo,
     direction: ConnectionDirection,
     sender: tokio::sync::mpsc::Sender<Message>,
+    image_limits: Arc<Mutex<Option<image_capability::ImageLimits>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -98,6 +114,9 @@ pub struct TransportManager {
     config: TransportConfig,
     auth: Option<Arc<dyn Authenticator>>,
     node_id: Uuid,
+    image_capability: Mutex<Option<image_capability::ImageLimits>>,
+    image_budget: Arc<tokio::sync::Semaphore>,
+    frame_budget: Arc<tokio::sync::Semaphore>,
 }
 impl TransportManager {
     pub fn new(config: TransportConfig) -> Self {
@@ -109,6 +128,9 @@ impl TransportManager {
             config,
             auth: None,
             node_id: Uuid::nil(),
+            image_capability: Mutex::new(None),
+            image_budget: Arc::new(tokio::sync::Semaphore::new(IMAGE_QUEUE_BUDGET)),
+            frame_budget: websocket::WebSocketConfig::default().frame_budget,
         }
     }
     pub fn with_auth(config: TransportConfig, auth: Arc<dyn Authenticator>, node_id: Uuid) -> Self {
@@ -130,6 +152,8 @@ impl TransportManager {
             connect_timeout: self.config.connect_timeout,
             keepalive_interval: self.config.keepalive_interval,
             max_connections: self.config.max_connections,
+            image_budget: self.image_budget.clone(),
+            frame_budget: self.frame_budget.clone(),
             ..Default::default()
         }
     }
@@ -244,6 +268,66 @@ impl TransportManager {
                 message: e.to_string(),
             })
     }
+    /// Enable PNG negotiation before creating any sessions. Native backends must
+    /// only opt in once bounded reads and safe write reconciliation are available.
+    pub fn enable_image_capability(
+        &self,
+        mut limits: image_capability::ImageLimits,
+    ) -> image_capability::ImageLimits {
+        limits.max_bytes = limits
+            .max_bytes
+            .min(self.config.max_message_size)
+            .min(MAX_IMAGE_WIRE_BYTES);
+        *self
+            .image_capability
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(limits);
+        limits
+    }
+
+    /// Queue to this exact authenticated session only if its advertised limits allow it.
+    pub async fn send_image_to_session(
+        &self,
+        peer: Uuid,
+        session: Uuid,
+        message: &Message,
+        bytes: usize,
+        width: u32,
+        height: u32,
+    ) -> ImageQueueOutcome {
+        let connections = self.connections.read().await;
+        let Some(connection) = connections.get(&peer).filter(|c| c.session == session) else {
+            return ImageQueueOutcome::StaleSession;
+        };
+        let limits = *connection
+            .image_limits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(limits) = limits else {
+            return ImageQueueOutcome::Unsupported;
+        };
+        if !limits.admits(bytes, width, height) {
+            return ImageQueueOutcome::OverLimit;
+        }
+        let Some(charge) = bytes
+            .checked_mul(5)
+            .and_then(|v| v.checked_add(IMAGE_FRAME_OVERHEAD))
+            .and_then(|v| u32::try_from(v).ok())
+        else {
+            return ImageQueueOutcome::OverLimit;
+        };
+        let Ok(permit) = self.image_budget.clone().try_acquire_many_owned(charge) else {
+            return ImageQueueOutcome::QueueFull;
+        };
+        let mut reserved = message.clone();
+        reserved.image_reservation = Some(Arc::new(protocol::ImageReservation(permit)));
+        if connection.sender.try_send(reserved).is_ok() {
+            ImageQueueOutcome::Queued
+        } else {
+            ImageQueueOutcome::QueueFull
+        }
+    }
+
     pub async fn subscribe(&self) -> Result<broadcast::Receiver<Message>> {
         Ok(self.message_sender.subscribe())
     }
@@ -288,12 +372,32 @@ impl TransportManager {
         let peer = connection.peer_info().clone();
         let (sender, mut commands) = tokio::sync::mpsc::channel(16);
         let messages = self.message_sender.clone();
+        let limits = Arc::new(Mutex::new(None));
+        let received_limits = limits.clone();
+        let local_limits = *self
+            .image_capability
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let task = tokio::spawn(async move {
             let mut connection = connection;
+            if let Some(limits) = local_limits {
+                let message = Message::new(
+                    MessageType::Capabilities,
+                    MessagePayload::Capabilities(limits.capabilities()),
+                );
+                if connection.send(message).await.is_err() {
+                    return;
+                }
+            }
             loop {
                 tokio::select! {
                     message = commands.recv() => match message { Some(m) => if connection.send(m).await.is_err() { break; }, None => break },
-                    message = connection.receive() => match message { Ok(m) => { let _ = messages.send(m); }, Err(_) => break },
+                    message = connection.receive() => match message { Ok(m) => {
+                        if let (MessageType::Capabilities, MessagePayload::Capabilities(payload)) = (&m.message_type, &m.payload) {
+                            *received_limits.lock().unwrap_or_else(|e| e.into_inner()) = image_capability::ImageLimits::from_capabilities(payload);
+                        }
+                        let _ = messages.send(m);
+                    }, Err(_) => break },
                 }
             }
             let _ = connection.close().await;
@@ -303,6 +407,7 @@ impl TransportManager {
             peer,
             direction,
             sender,
+            image_limits: limits,
             task,
         }
     }
@@ -574,6 +679,96 @@ impl Default for TransportConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn image_queue_budget_and_session_limits_are_enforced() {
+        let manager = TransportManager::new(TransportConfig::default());
+        let peer_id = Uuid::new_v4();
+        let session = Uuid::new_v4();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+        let peer = PeerInfo {
+            id: peer_id,
+            name: "fixture".into(),
+            addresses: Vec::new(),
+            port: 0,
+            version: "2.0.0".into(),
+            platform: "test".into(),
+            metadata: Default::default(),
+            last_seen: 0,
+        };
+        let limits = image_capability::ImageLimits {
+            max_bytes: 10,
+            max_width: 1,
+            max_height: 1,
+            max_pixels: 1,
+        };
+        manager.connections.write().await.insert(
+            peer_id,
+            ManagedConnection {
+                session,
+                peer,
+                direction: ConnectionDirection::Outbound,
+                sender,
+                image_limits: Arc::new(Mutex::new(Some(limits))),
+                task: tokio::spawn(std::future::pending()),
+            },
+        );
+        let message = Message::new(
+            MessageType::ClipboardData,
+            MessagePayload::Clipboard(
+                protocol::ClipboardData {
+                    format: protocol::ClipboardFormat::Image {
+                        mime_type: "image/png".into(),
+                    },
+                    data: vec![1; 10],
+                    compression: None,
+                    checksum: "fixture".into(),
+                    metadata: Default::default(),
+                }
+                .into(),
+            ),
+        );
+        assert_eq!(
+            manager
+                .send_image_to_session(peer_id, Uuid::new_v4(), &message, 10, 1, 1)
+                .await,
+            ImageQueueOutcome::StaleSession
+        );
+        assert_eq!(
+            manager
+                .send_image_to_session(peer_id, session, &message, 11, 1, 1)
+                .await,
+            ImageQueueOutcome::OverLimit
+        );
+        let charge = 10 * 5 + IMAGE_FRAME_OVERHEAD;
+        let held = manager
+            .image_budget
+            .clone()
+            .try_acquire_many_owned((IMAGE_QUEUE_BUDGET - charge) as u32)
+            .unwrap();
+        assert_eq!(
+            manager
+                .send_image_to_session(peer_id, session, &message, 10, 1, 1)
+                .await,
+            ImageQueueOutcome::Queued
+        );
+        let queued = receiver.recv().await.unwrap();
+        assert_eq!(
+            manager
+                .send_image_to_session(peer_id, session, &message, 10, 1, 1)
+                .await,
+            ImageQueueOutcome::QueueFull
+        );
+        drop(queued);
+        assert_eq!(
+            manager
+                .send_image_to_session(peer_id, session, &message, 10, 1, 1)
+                .await,
+            ImageQueueOutcome::Queued
+        );
+        drop(held);
+        manager.shutdown().await;
+    }
 
     #[test]
     fn test_transport_config_default() {

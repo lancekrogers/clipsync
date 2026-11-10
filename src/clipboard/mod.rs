@@ -3,6 +3,8 @@
 //! This module provides a platform-agnostic interface for clipboard operations
 //! with implementations for macOS, X11, and Wayland.
 
+pub mod image_identity;
+pub mod png;
 pub mod safety;
 
 use async_trait::async_trait;
@@ -88,14 +90,38 @@ impl ClipboardContent {
     }
 }
 
+/// Attribution of an uncertain image write after native readback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageAttribution {
+    Owned,
+    Foreign,
+    Unknown,
+}
+
 /// Clipboard provider trait
 #[async_trait]
 pub trait ClipboardProvider: Send + Sync {
     /// Get current clipboard content
     async fn get_content(&self) -> Result<ClipboardContent, ClipboardError>;
 
+    /// Enable platform image selection only when the engine is prepared to sync images.
+    /// Backends without an image path return false.
+    fn enable_image_capture(&self) -> bool {
+        false
+    }
+
     /// Set clipboard content
     async fn set_content(&self, content: &ClipboardContent) -> Result<(), ClipboardError>;
+
+    /// Verify that an uncertain image write is still the sole attributable item.
+    /// Providers without reliable ownership evidence must return Unknown.
+    async fn reconcile_unknown_image(
+        &self,
+        _content: &ClipboardContent,
+        _observed: &ClipboardContent,
+    ) -> Result<ImageAttribution, ClipboardError> {
+        Ok(ImageAttribution::Unknown)
+    }
 
     /// Clear clipboard
     async fn clear(&self) -> Result<(), ClipboardError>;
@@ -153,6 +179,14 @@ pub enum ClipboardError {
     #[error("Platform error: {0}")]
     Platform(String),
 
+    /// A native write failed after the clipboard may have changed.
+    #[error("Clipboard write may have changed the clipboard: {0}")]
+    WriteOutcomeUnknown(String),
+
+    /// Clipboard contains a mixed snapshot that cannot be attributed safely.
+    #[error("Clipboard contains an ambiguous mixed image copy")]
+    Ambiguous,
+
     /// Content too large
     #[error("Content too large: {size} bytes (max: {max} bytes)")]
     TooLarge { size: usize, max: usize },
@@ -176,9 +210,15 @@ pub enum ClipboardError {
 
 /// Create a clipboard provider for the current platform
 pub async fn create_provider() -> Result<Box<dyn ClipboardProvider>, ClipboardError> {
+    create_provider_with_limit(MAX_CLIPBOARD_SIZE).await
+}
+
+pub async fn create_provider_with_limit(
+    max_size: usize,
+) -> Result<Box<dyn ClipboardProvider>, ClipboardError> {
     #[cfg(target_os = "macos")]
     {
-        Ok(Box::new(macos::MacOSClipboard::new()?))
+        Ok(Box::new(macos::MacOSClipboard::new_with_limit(max_size)?))
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -186,17 +226,17 @@ pub async fn create_provider() -> Result<Box<dyn ClipboardProvider>, ClipboardEr
         // Try Wayland first, fall back to X11
         match std::env::var("WAYLAND_DISPLAY") {
             Ok(_) => {
-                match wayland::WaylandClipboard::new().await {
+                match wayland::WaylandClipboard::new_with_limit(max_size).await {
                     Ok(provider) => Ok(Box::new(provider)),
                     Err(_) => {
                         // Fall back to X11
-                        Ok(Box::new(x11::X11Clipboard::new()?))
+                        Ok(Box::new(x11::X11Clipboard::new_with_limit(max_size)?))
                     }
                 }
             }
             Err(_) => {
                 // Use X11
-                Ok(Box::new(x11::X11Clipboard::new()?))
+                Ok(Box::new(x11::X11Clipboard::new_with_limit(max_size)?))
             }
         }
     }

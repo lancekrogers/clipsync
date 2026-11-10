@@ -179,19 +179,31 @@ fn detail(ui: &mut egui::Ui, view: &View, actions: &mut Vec<Intent>) {
                 });
             }
             ui.add_space(16.0);
-            ui.weak(format!("{} characters · Plain text", entry.characters));
+            let image = entry.content_type == "image/png";
+            if image {
+                ui.weak("Image");
+            } else {
+                ui.weak(format!("{} characters · Plain text", entry.characters));
+            }
             if ui
                 .add_enabled(
                     view.can_act() && view.detail.is_some() && !view.detail_loading,
-                    egui::Button::new(RichText::new("Copy text").color(theme::BG))
-                        .fill(theme::BLUE)
-                        .min_size(egui::vec2(140.0, 44.0)),
+                    egui::Button::new(
+                        RichText::new(if image { "Copy image" } else { "Copy text" })
+                            .color(theme::BG),
+                    )
+                    .fill(theme::BLUE)
+                    .min_size(egui::vec2(140.0, 44.0)),
                 )
                 .clicked()
             {
                 actions.push(Intent::CopySelected);
             }
-            ui.weak("Copy puts the original text on this computer’s clipboard.");
+            ui.weak(if image {
+                "Copy puts the image on this computer’s clipboard."
+            } else {
+                "Copy puts the original text on this computer’s clipboard."
+            });
         } else {
             ui.weak("Choose a saved copy to read it and copy it again.");
         }
