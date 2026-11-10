@@ -170,3 +170,33 @@ window's native close button and checks that relaunch reveals that same process.
 The harness uses synthetic history, private pasteboards, and disposable Linux
 desktops. Process cleanup is not counted as a native Quit-menu test; compositor
 focus and packaged Launch Services reopening have separate acceptance limits.
+
+## Real daemon crash/restart acceptance
+
+Run `just companion-test-restart` on macOS, or in a disposable Linux desktop
+with `CLIPSYNC_DISPOSABLE_DESKTOP=1`. It requires `uv` and Rust 1.95 and honors
+`CARGO_TARGET_DIR`. Do not run the Linux fixture in a personal desktop session.
+The Mac runner generates its own private named pasteboard.
+
+Unlike the socket-proxy recovery test, this runner kills the actual fixture
+process and starts a new daemon on the same configuration and socket. The live
+TUI must show Service unavailable, recover without relaunch, and successfully
+pause the new daemon. It verifies new PID/instance identity, unchanged device
+identity and history key, readable unchanged encrypted history, reset pause
+state, and terminal restoration while the daemon stays running after TUI exit.
+Results and terminal screens are saved under `target/companion-evidence/restart/`.
+
+The integration-only `companion_fixture --resume DIRECTORY` accepts a retained
+fixture directory, reconstructs paths within it, and rejects unmarked directories,
+symlinked state files and a live daemon's lock before rewriting state. Fresh
+fixtures clean up on normal exit. SIGKILL leaves their directory behind;
+callers resuming a fixture own its final cleanup. The regression runner performs
+that cleanup and checks all three rejection paths.
+
+On 2026-10-23 this regression passed on macOS and disposable Debian ARM64/X11.
+Manual native GUI interaction also verified unavailable/recovered states on both,
+Mac close/hide and same-instance reopening, Mac native Quit leaving the daemon
+running, and Linux no-tray close/reopen. Mac Tab/Shift-Tab focus and text zoom
+passed. Linux history search and keyboard result selection passed. Linux zoom,
+current native tray actions and physical login/sleep acceptance remain unverified;
+these fixture results do not close those gates. No production code changed.
