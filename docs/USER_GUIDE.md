@@ -237,6 +237,9 @@ clipboard cleared; `clear` empties the clipboard on every connected device.
 Devices that are offline, or run a ClipSync version without this support,
 keep their copy; delete it there directly.
 
+In `clipsync tui`, open History (`3`), select a copy and press `d` to delete it,
+or press `D` to clear all history. Each asks first; only `y` confirms.
+
 ## ⌨️ Global Hotkeys
 
 ClipSync provides system-wide hotkeys for quick access:

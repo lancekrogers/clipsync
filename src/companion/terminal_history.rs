@@ -1,10 +1,11 @@
 //! History list and selected-copy pane for the terminal companion.
 use super::{
-    client::{HistoryRow, View},
+    client::{HistoryRow, Intent, View},
     terminal_image::GraphicsPreview,
     terminal_theme::Theme,
 };
 use chrono::{DateTime, Datelike, TimeZone};
+use crossterm::event::KeyCode;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
@@ -13,6 +14,81 @@ use ratatui::{
     Frame,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use uuid::Uuid;
+
+/// A History removal waiting for the user to answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removal {
+    Entry(Uuid),
+    All { searching: bool },
+}
+
+impl Removal {
+    pub fn question(self) -> &'static str {
+        match self {
+            Self::Entry(_) => "Delete this saved copy on this computer and connected devices?",
+            Self::All { searching: false } => {
+                "Clear all history and the clipboard on this computer and connected devices?"
+            }
+            Self::All { searching: true } => {
+                "Clear ALL history, not only these matches, and the clipboard on this computer and connected devices?"
+            }
+        }
+    }
+
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Entry(_) => "delete",
+            Self::All { .. } => "clear all",
+        }
+    }
+
+    fn intent(self) -> Intent {
+        match self {
+            Self::Entry(id) => Intent::DeleteEntry(id),
+            Self::All { .. } => Intent::ClearHistory,
+        }
+    }
+}
+
+/// `d` deletes the selected copy and `D` clears everything, each only after `y`.
+#[derive(Debug, Default)]
+pub struct Confirm(Option<Removal>);
+
+impl Confirm {
+    pub fn pending(&self) -> Option<Removal> {
+        self.0
+    }
+
+    /// Opens the question. A service without support gets the intent at once
+    /// so the controller can explain; it never sends that service a removal.
+    pub fn ask(&mut self, all: bool, view: &View) -> Option<Intent> {
+        let (removal, supported) = if all {
+            (
+                Removal::All {
+                    searching: !view.query.is_empty(),
+                },
+                view.history_clear_supported,
+            )
+        } else {
+            (
+                Removal::Entry(view.selected?),
+                view.history_delete_supported,
+            )
+        };
+        if !supported {
+            return Some(removal.intent());
+        }
+        self.0 = Some(removal);
+        None
+    }
+
+    /// Only `y` confirms; any other key cancels.
+    pub fn answer(&mut self, key: KeyCode) -> Option<Intent> {
+        let removal = self.0.take()?;
+        matches!(key, KeyCode::Char('y' | 'Y')).then(|| removal.intent())
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
@@ -343,6 +419,9 @@ impl Pane<'_> {
             } else {
                 keys.push(quiet("Copy unavailable".into()));
             }
+            if view.history_delete_supported {
+                keys.extend([quiet("  ".into()), key("d"), quiet(" delete".into())]);
+            }
             if view.image_preview.is_none() {
                 keys.extend([
                     quiet("  ".into()),
@@ -400,7 +479,11 @@ impl Pane<'_> {
                 .collect()
         } else if view.history.is_empty() {
             vec![Line::styled(
-                "No copies match your search. Clear the query or copy text while the service is running.",
+                if view.query.is_empty() {
+                    "New copies appear here while the service is running."
+                } else {
+                    "No copies match your search. Clear the query or copy text while the service is running."
+                },
                 theme.muted(),
             )]
         } else {
@@ -437,6 +520,78 @@ mod tests {
             origin: uuid::Uuid::nil(),
             copied_at: None,
         }
+    }
+
+    fn view(selected: Option<Uuid>, supported: bool) -> View {
+        View {
+            selected,
+            history_delete_supported: supported,
+            history_clear_supported: supported,
+            ..View::default()
+        }
+    }
+
+    #[test]
+    fn removal_waits_for_an_explicit_yes() {
+        let id = Uuid::from_u128(5);
+        let view = view(Some(id), true);
+        let mut confirm = Confirm::default();
+        for cancel in [
+            KeyCode::Char('n'),
+            KeyCode::Esc,
+            KeyCode::Char('q'),
+            KeyCode::Enter,
+            KeyCode::Char('d'),
+        ] {
+            assert!(confirm.ask(false, &view).is_none());
+            assert_eq!(confirm.pending(), Some(Removal::Entry(id)));
+            assert!(confirm.answer(cancel).is_none(), "{cancel:?} must cancel");
+            assert_eq!(confirm.pending(), None);
+        }
+        confirm.ask(false, &view);
+        assert!(
+            matches!(confirm.answer(KeyCode::Char('y')), Some(Intent::DeleteEntry(target)) if target == id)
+        );
+        confirm.ask(true, &view);
+        assert_eq!(confirm.pending(), Some(Removal::All { searching: false }));
+        assert!(matches!(
+            confirm.answer(KeyCode::Char('Y')),
+            Some(Intent::ClearHistory)
+        ));
+        assert!(
+            confirm.answer(KeyCode::Char('y')).is_none(),
+            "an answer is used once"
+        );
+    }
+
+    #[test]
+    fn delete_needs_a_selection_and_clear_while_searching_says_everything_goes() {
+        let mut confirm = Confirm::default();
+        assert!(confirm.ask(false, &view(None, true)).is_none());
+        assert_eq!(confirm.pending(), None);
+        let searching = View {
+            query: "lunch".into(),
+            ..view(None, true)
+        };
+        confirm.ask(true, &searching);
+        let removal = confirm.pending().unwrap();
+        assert_eq!(removal, Removal::All { searching: true });
+        assert!(removal.question().contains("not only these matches"));
+    }
+
+    #[test]
+    fn an_older_service_is_not_asked_and_is_left_to_explain() {
+        let id = Uuid::from_u128(5);
+        let mut confirm = Confirm::default();
+        assert!(matches!(
+            confirm.ask(false, &view(Some(id), false)),
+            Some(Intent::DeleteEntry(target)) if target == id
+        ));
+        assert!(matches!(
+            confirm.ask(true, &view(Some(id), false)),
+            Some(Intent::ClearHistory)
+        ));
+        assert_eq!(confirm.pending(), None);
     }
 
     #[test]

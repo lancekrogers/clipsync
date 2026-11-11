@@ -52,6 +52,10 @@ History, and Settings**. History shows actual saved copies, their source and tim
 select one to read it and copy it again. The daemon remains the sole clipboard
 owner, so closing either interface leaves syncing running.
 
+In the TUI's History, `d` deletes the selected copy and `D` clears all history
+and the clipboard. Both ask for `y` first and, like `clipsync history delete`
+and `clipsync history clear`, also remove it on connected devices.
+
 In the TUI, selecting an image in History shows a color preview using terminal
 characters. With `NO_COLOR` set, the preview uses grayscale characters. Update
 both the TUI and its local daemon to use image previews. Terminals that support

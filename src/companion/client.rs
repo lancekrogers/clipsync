@@ -7,7 +7,7 @@ use crate::{
     config::Config,
     control::{
         self, error_codes, Command, ControlError, DaemonStatus, DiagnosticError, DiagnosticsReport,
-        EnrollmentSnapshot, ImagePreview, Response, TrustedDeviceView,
+        EnrollmentSnapshot, HistoryRemovalView, ImagePreview, Response, TrustedDeviceView,
     },
 };
 use std::{
@@ -45,6 +45,8 @@ pub struct View {
     pub devices: Vec<DeviceRow>,
     pub node_id: String,
     pub enrollment_supported: bool,
+    pub history_delete_supported: bool,
+    pub history_clear_supported: bool,
     pub enrollment: Option<EnrollmentSnapshot>,
     pub trusted_devices: Vec<TrustedDeviceView>,
     pub device_address: String,
@@ -75,6 +77,8 @@ impl Default for View {
             devices: Vec::new(),
             node_id: String::new(),
             enrollment_supported: false,
+            history_delete_supported: false,
+            history_clear_supported: false,
             enrollment: None,
             trusted_devices: Vec::new(),
             device_address: String::new(),
@@ -388,6 +392,42 @@ fn diagnostic_error_line(error: &DiagnosticError) -> Option<String> {
 fn show_label(text: &str) -> String {
     display_text(text, false)
 }
+
+const NEEDS_UPDATE: &str = "This service needs an update before that action can run.";
+
+/// One line for the footer. Peers are counted as queued, not acknowledged.
+fn removal_notice(action: Action, removal: &HistoryRemovalView) -> String {
+    let devices = |count: u32| {
+        format!(
+            "{count} connected device{}",
+            if count == 1 { "" } else { "s" }
+        )
+    };
+    let mut parts = vec![match action {
+        Action::Clear => format!(
+            "Cleared {} saved cop{}",
+            removal.removed,
+            if removal.removed == 1 { "y" } else { "ies" }
+        ),
+        _ if removal.removed == 0 => "Already removed here".into(),
+        _ => "Deleted".into(),
+    }];
+    if removal.clipboard_cleared {
+        parts.push("clipboard cleared".into());
+    } else if action == Action::Clear {
+        parts.push("the clipboard could not be cleared".into());
+    }
+    if removal.peers_notified > 0 {
+        parts.push(format!("sent to {}", devices(removal.peers_notified)));
+    }
+    if removal.peers_skipped > 0 {
+        parts.push(format!(
+            "not sent to {} (older ClipSync or busy)",
+            devices(removal.peers_skipped)
+        ));
+    }
+    parts.join(" · ")
+}
 #[derive(Debug)]
 pub enum Intent {
     Navigate(Route),
@@ -395,6 +435,10 @@ pub enum Intent {
     Search(String),
     Select(Uuid),
     CopySelected,
+    /// Delete one saved copy here and on connected devices. Renderers confirm first.
+    DeleteEntry(Uuid),
+    /// Clear all history and the clipboard here and on connected devices.
+    ClearHistory,
     DetailPage(usize),
     SetPaused(bool),
     SyncNow,
@@ -420,7 +464,26 @@ struct Job {
 struct Reply {
     ticket: Ticket,
     result: Result<Response, control::ControlError>,
-    copy_action: bool,
+    action: Action,
+}
+
+/// The command an action reply answers, so its outcome can be applied and worded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    Copy,
+    Delete(Uuid),
+    Clear,
+    Other,
+}
+impl Action {
+    fn of(command: &Command) -> Self {
+        match command {
+            Command::HistoryCopy { .. } | Command::Copy { .. } => Self::Copy,
+            Command::HistoryDelete { id } => Self::Delete(*id),
+            Command::HistoryClear => Self::Clear,
+            _ => Self::Other,
+        }
+    }
 }
 
 pub struct Controller {
@@ -470,17 +533,14 @@ impl Controller {
                 let path = control::socket_path(&config);
                 let max_frame = control::max_frame_bytes(&config);
                 while let Ok(job) = incoming.recv() {
-                    let copy_action = matches!(
-                        &job.command,
-                        Command::HistoryCopy { .. } | Command::Copy { .. }
-                    );
+                    let action = Action::of(&job.command);
                     let result =
                         runtime.block_on(control::request_result(&path, job.command, max_frame));
                     if outgoing
                         .send(Reply {
                             ticket: job.ticket,
                             result,
-                            copy_action,
+                            action,
                         })
                         .is_err()
                     {
@@ -488,7 +548,12 @@ impl Controller {
                     }
                 }
             })?;
-        let mut client = Self {
+        let mut client = Self::with_channels(jobs, replies);
+        client.refresh();
+        Ok(client)
+    }
+    fn with_channels(jobs: mpsc::SyncSender<Job>, replies: mpsc::Receiver<Reply>) -> Self {
+        Self {
             view: View::default(),
             jobs: Some(jobs),
             replies,
@@ -502,9 +567,7 @@ impl Controller {
             trusted_checked: None,
             notice_generation: None,
             retries: VecDeque::new(),
-        };
-        client.refresh();
-        Ok(client)
+        }
     }
     pub fn dispatch(&mut self, intent: Intent) {
         match intent {
@@ -577,6 +640,14 @@ impl Controller {
                         self.send(Domain::Action, Command::HistoryCopy { id });
                 }
             }
+            Intent::DeleteEntry(id) => {
+                let supported = self.view.history_delete_supported;
+                self.remove(supported, Command::HistoryDelete { id });
+            }
+            Intent::ClearHistory => {
+                let supported = self.view.history_clear_supported;
+                self.remove(supported, Command::HistoryClear);
+            }
             Intent::SetPaused(paused) if self.view.can_act() => {
                 self.view.action_pending = self.send(Domain::Action, Command::SetPause { paused });
             }
@@ -648,6 +719,58 @@ impl Controller {
             }
             _ => {}
         }
+    }
+    /// Older services cannot parse removal commands and drop the connection
+    /// unanswered, so they are never sent one.
+    fn remove(&mut self, supported: bool, command: Command) {
+        let refusal = if !supported {
+            NEEDS_UPDATE
+        } else if self.view.can_act() {
+            self.view.action_pending = self.send(Domain::Action, command);
+            return;
+        } else {
+            "The service is busy or unavailable, so nothing was removed. Try again."
+        };
+        self.view.error = Some(refusal.into());
+        self.view.error_code = None;
+    }
+    fn deselect(&mut self) {
+        self.reconciliation.begin(Domain::Detail);
+        self.view.selected = None;
+        self.view.detail = None;
+        self.view.image_preview = None;
+        self.view.detail_page = 0;
+        self.view.detail_loading = false;
+    }
+    /// Show the result before the reloaded page arrives, keeping a neighbor
+    /// selected: the row that moved into the deleted one's place, else the last.
+    fn apply_removal(&mut self, action: Action, removal: &HistoryRemovalView) {
+        match action {
+            Action::Delete(id) => {
+                if let Some(index) = self.view.history.iter().position(|row| row.id == id) {
+                    self.view.history.remove(index);
+                    if self.view.selected == Some(id) {
+                        let next = self
+                            .view
+                            .history
+                            .get(index)
+                            .or(self.view.history.last())
+                            .map(|row| row.id);
+                        match next {
+                            Some(next) => self.dispatch(Intent::Select(next)),
+                            None => self.deselect(),
+                        }
+                    }
+                }
+            }
+            Action::Clear => {
+                self.view.history.clear();
+                self.deselect();
+            }
+            Action::Copy | Action::Other => {}
+        }
+        self.view.notice = Some(removal_notice(action, removal));
+        self.history();
     }
     fn send(&mut self, domain: Domain, command: Command) -> bool {
         let ticket = self.reconciliation.begin(domain);
@@ -885,10 +1008,15 @@ impl Controller {
         }
         match reply.ticket.domain {
             Domain::Status => {
-                self.view.enrollment_supported = response
-                    .features
-                    .as_ref()
-                    .is_some_and(|features| features.iter().any(|feature| feature == "enrollment"));
+                let supports = |name: &str| {
+                    response
+                        .features
+                        .as_ref()
+                        .is_some_and(|features| features.iter().any(|feature| feature == name))
+                };
+                self.view.enrollment_supported = supports(control::FEATURE_ENROLLMENT);
+                self.view.history_delete_supported = supports(control::FEATURE_HISTORY_DELETE);
+                self.view.history_clear_supported = supports(control::FEATURE_HISTORY_CLEAR);
                 let compatible = response.features.as_ref().is_some_and(|features| {
                     ["pause", "history_read", "history_copy", "diagnostics"]
                         .iter()
@@ -1035,11 +1163,24 @@ impl Controller {
                 }
             }
             Domain::Action => {
-                if reply.copy_action && response.pause_applied.is_none() {
+                if reply.action == Action::Copy && response.pause_applied.is_none() {
                     self.view.notice = None;
                     self.notice_generation = None;
                     self.view.error = Some("The service did not confirm the local copy. Update the service and try again.".into());
                     self.view.error_code = None;
+                    return;
+                }
+                let removing = matches!(reply.action, Action::Delete(_) | Action::Clear);
+                if removing && response.history_removal.is_none() {
+                    self.view.notice = None;
+                    self.notice_generation = None;
+                    self.view.error = Some(
+                        "The service did not confirm the removal. Check History, then try again."
+                            .into(),
+                    );
+                    self.view.error_code = None;
+                    self.history();
+                    self.refresh();
                     return;
                 }
                 if let Some(status) = response.status.clone() {
@@ -1055,7 +1196,10 @@ impl Controller {
                     self.apply_trusted(devices);
                 }
                 let reported_diagnostics = response.diagnostics.is_some();
-                if let Some(report) = response.diagnostics {
+                if let Some(removal) = response.history_removal.filter(|_| removing) {
+                    self.apply_removal(reply.action, &removal);
+                    self.notice_generation = response.state_generation;
+                } else if let Some(report) = response.diagnostics {
                     match render_diagnostics(&report) {
                         Some(text) => {
                             self.view.diagnostics = Some(text);
@@ -1190,6 +1334,221 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const BASE_FEATURES: [&str; 4] = ["pause", "history_read", "history_copy", "diagnostics"];
+
+    /// A controller whose worker is the test: jobs are inspected, replies applied directly.
+    fn ready(extra: &[&str]) -> (Controller, mpsc::Receiver<Job>) {
+        let (jobs, incoming) = mpsc::sync_channel(8);
+        let (_, replies) = mpsc::sync_channel(8);
+        let mut client = Controller::with_channels(jobs, replies);
+        client.refresh();
+        let mut response = Response::base();
+        response.features = Some(
+            BASE_FEATURES
+                .iter()
+                .chain(extra)
+                .map(|feature| feature.to_string())
+                .collect(),
+        );
+        response.status = Some(DaemonStatus {
+            paused: false,
+            observed_at: String::new(),
+            connected_peer_count: 0,
+            history_available: true,
+            node_id: Uuid::nil().to_string(),
+            max_clipboard_bytes: 1024,
+            history_capacity: 20,
+            outbound_pending: false,
+        });
+        answer(&mut client, &incoming, 1, response);
+        client.view.stale = false;
+        (client, incoming)
+    }
+
+    /// Answers the oldest queued request and returns what it asked for.
+    fn answer(
+        client: &mut Controller,
+        jobs: &mpsc::Receiver<Job>,
+        generation: u64,
+        mut response: Response,
+    ) -> Command {
+        let job = jobs.try_recv().expect("a queued request");
+        response.instance_id = Some(Uuid::from_u128(99));
+        response.state_generation = Some(generation);
+        client.apply(Reply {
+            ticket: job.ticket,
+            action: Action::of(&job.command),
+            result: Ok(response),
+        });
+        job.command
+    }
+
+    fn removed(
+        removed: u32,
+        clipboard_cleared: bool,
+        peers_notified: u32,
+        peers_skipped: u32,
+    ) -> Response {
+        let mut response = Response::base();
+        response.history_removal = Some(HistoryRemovalView {
+            removed,
+            clipboard_cleared,
+            peers_notified,
+            peers_skipped,
+        });
+        response
+    }
+
+    fn with_rows(client: &mut Controller, count: u128) -> Vec<Uuid> {
+        let ids = (1..=count).map(Uuid::from_u128).collect::<Vec<_>>();
+        client.view.history = ids
+            .iter()
+            .map(|id| HistoryRow {
+                id: *id,
+                preview: format!("copy {id}"),
+                timestamp: String::new(),
+                source: String::new(),
+                characters: 6,
+                content_type: "text/plain".into(),
+                origin: Uuid::nil(),
+                copied_at: None,
+            })
+            .collect();
+        ids
+    }
+
+    fn shown(client: &Controller) -> Vec<Uuid> {
+        client.view.history.iter().map(|row| row.id).collect()
+    }
+
+    fn sent(jobs: &mpsc::Receiver<Job>) -> Vec<Command> {
+        jobs.try_iter().map(|job| job.command).collect()
+    }
+
+    #[test]
+    fn an_older_service_is_never_sent_a_removal() {
+        let (mut client, jobs) = ready(&[]);
+        assert!(!client.view.history_delete_supported);
+        assert!(!client.view.history_clear_supported);
+        assert_eq!(client.view.connection, Connection::Ready);
+        client.dispatch(Intent::DeleteEntry(Uuid::from_u128(1)));
+        client.dispatch(Intent::ClearHistory);
+        assert!(sent(&jobs).is_empty());
+        assert_eq!(client.view.error.as_deref(), Some(NEEDS_UPDATE));
+        assert!(!client.view.action_pending);
+    }
+
+    #[test]
+    fn a_removal_is_not_sent_while_the_service_is_stale() {
+        let (mut client, jobs) = ready(&["history_delete", "history_clear"]);
+        client.view.stale = true;
+        client.dispatch(Intent::ClearHistory);
+        assert!(sent(&jobs).is_empty());
+        assert!(client
+            .view
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("nothing was removed"));
+    }
+
+    #[test]
+    fn deleting_keeps_a_neighbor_selected_and_reports_the_outcome() {
+        let (mut client, jobs) = ready(&["history_delete", "history_clear"]);
+        let [a, b, c] = with_rows(&mut client, 3)[..] else {
+            unreachable!()
+        };
+        client.view.selected = Some(b);
+        client.dispatch(Intent::DeleteEntry(b));
+        assert!(client.view.action_pending);
+        let command = answer(&mut client, &jobs, 2, removed(1, false, 1, 0));
+        assert!(matches!(command, Command::HistoryDelete { id } if id == b));
+        assert!(!client.view.action_pending);
+        assert_eq!(shown(&client), [a, c]);
+        assert_eq!(client.view.selected, Some(c));
+        assert_eq!(
+            client.view.notice.as_deref(),
+            Some("Deleted · sent to 1 connected device")
+        );
+        let follow_up = sent(&jobs);
+        assert!(follow_up
+            .iter()
+            .any(|command| matches!(command, Command::HistoryGet { id } if *id == c)));
+        assert!(follow_up
+            .iter()
+            .any(|command| matches!(command, Command::HistoryList { .. })));
+
+        // The last row falls back to the one above it.
+        client.dispatch(Intent::DeleteEntry(c));
+        answer(&mut client, &jobs, 3, removed(1, true, 0, 0));
+        assert_eq!(shown(&client), [a]);
+        assert_eq!(client.view.selected, Some(a));
+        assert_eq!(
+            client.view.notice.as_deref(),
+            Some("Deleted · clipboard cleared")
+        );
+    }
+
+    #[test]
+    fn deleting_an_unselected_row_leaves_the_selection_alone() {
+        let (mut client, jobs) = ready(&["history_delete"]);
+        let [a, b] = with_rows(&mut client, 2)[..] else {
+            unreachable!()
+        };
+        client.view.selected = Some(a);
+        client.dispatch(Intent::DeleteEntry(b));
+        answer(&mut client, &jobs, 2, removed(0, false, 0, 0));
+        assert_eq!(shown(&client), [a]);
+        assert_eq!(client.view.selected, Some(a));
+        assert_eq!(client.view.notice.as_deref(), Some("Already removed here"));
+    }
+
+    #[test]
+    fn clearing_empties_history_and_reports_partial_results() {
+        let (mut client, jobs) = ready(&["history_clear"]);
+        let ids = with_rows(&mut client, 3);
+        client.view.selected = Some(ids[0]);
+        client.view.detail = Some("copy".into());
+        client.dispatch(Intent::ClearHistory);
+        let command = answer(&mut client, &jobs, 2, removed(3, true, 1, 1));
+        assert!(matches!(command, Command::HistoryClear));
+        assert!(client.view.history.is_empty());
+        assert_eq!(client.view.selected, None);
+        assert_eq!(client.view.detail, None);
+        assert_eq!(
+            client.view.notice.as_deref(),
+            Some("Cleared 3 saved copies · clipboard cleared · sent to 1 connected device · not sent to 1 connected device (older ClipSync or busy)")
+        );
+        assert!(sent(&jobs)
+            .iter()
+            .any(|command| matches!(command, Command::HistoryList { .. })));
+
+        client.dispatch(Intent::ClearHistory);
+        answer(&mut client, &jobs, 3, removed(1, false, 2, 0));
+        assert_eq!(
+            client.view.notice.as_deref(),
+            Some("Cleared 1 saved copy · the clipboard could not be cleared · sent to 2 connected devices")
+        );
+    }
+
+    #[test]
+    fn a_removal_reply_without_a_result_is_an_error() {
+        let (mut client, jobs) = ready(&["history_delete"]);
+        let ids = with_rows(&mut client, 2);
+        client.view.selected = Some(ids[0]);
+        client.dispatch(Intent::DeleteEntry(ids[0]));
+        answer(&mut client, &jobs, 2, Response::base());
+        assert_eq!(client.view.notice, None);
+        assert!(client
+            .view
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("did not confirm the removal"));
+        assert_eq!(shown(&client), ids);
+    }
+
     #[test]
     fn device_names_prefer_authorization_comments_and_survive_disconnects() {
         let fingerprint = "SHA256:Jhs4k2abcdefghijklmnopqrstuvwxyz0123456789AB";
