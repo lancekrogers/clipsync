@@ -51,8 +51,8 @@ cd clipsync-<version>-linux-x86_64
 
 It installs `clipsync` and `clipsync-desktop` to `~/.local/bin` and adds ClipSync
 to your app menu, without root. The archives need glibc 2.35 or newer and
-OpenSSL 3 (`libssl3` on Debian and Ubuntu); they are checked on Ubuntu 22.04,
-Debian 12 and Arch Linux.
+OpenSSL 3 (`libssl3` on Debian and Ubuntu), which Ubuntu 22.04, Debian 12 and
+current Arch Linux meet.
 
 Then open ClipSync (or run `clipsync tui`) on each computer and
 [pair them with a code](docs/COMPANION.md#pair-two-computers). Check a download

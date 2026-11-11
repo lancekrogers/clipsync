@@ -38,26 +38,43 @@ Refuses, without building anything, when:
   for it exists (or the release list cannot be read);
 - fixture or prebuilt binaries are configured (`CLIPSYNC_PACKAGE_FIXTURE_MODE`,
   `CLIPSYNC_PACKAGE_SKIP_BUILD`, `CLIPSYNC_PACKAGE_CLI_BIN`,
-  `CLIPSYNC_PACKAGE_GUI_BIN`);
+  `CLIPSYNC_PACKAGE_GUI_BIN`), or build overrides are set
+  (`CLIPSYNC_PACKAGE_MOCK_BIN`, `CARGO_BUILD_TARGET`, `RUSTFLAGS`,
+  `CARGO_ENCODED_RUSTFLAGS`, `CARGO_BUILD_RUSTFLAGS`);
+- files are marked assume-unchanged or skip-worktree;
+- the version is not plain `x.y.z`, or `CLIPSYNC_RUSTUP_TOOLCHAIN` is not an
+  exact version;
+- `CLIPSYNC_CODESIGN_IDENTITY` is set without complete notary credentials (or
+  the reverse), or is `-`;
 - `dist/release/v<version>` already exists (move or delete it to restage);
 - `cargo +1.95.0 fmt --all -- --check`, `clippy --workspace --all-features --
   -D warnings` or `test --workspace --all-features` fails.
 
-Then it builds into `dist/release/v<version>/`:
+Then it builds into `dist/release/v<version>/` from a `git archive` export of
+HEAD (`work/src`), so files that exist only in this checkout cannot reach a
+release:
 
-- **macOS:** `ClipSync.app` from this checkout, sealed with an ad-hoc signature
-  (or Developer ID signed and notarized), in
-  `ClipSync-<version>-macos-arm64-unsigned.dmg`. The app is checked with
-  `verify.sh` and `codesign --verify --deep --strict`, both in place and from
-  the mounted disk image.
+- **macOS:** `ClipSync.app`, sealed with an ad-hoc signature, in
+  `ClipSync-<version>-macos-arm64-unsigned.dmg`; or Developer ID signed and
+  notarized in `ClipSync-<version>-macos-arm64.dmg`, after which `codesign`,
+  `stapler validate` and `spctl` must confirm the Developer ID signature and
+  the notarization. The app is checked with `verify.sh` and
+  `codesign --verify --deep --strict`, both in place and from the mounted disk
+  image.
 - **Linux:** `clipsync-<version>-linux-x86_64.tar.gz` and `-aarch64.tar.gz`,
   built in Docker (`scripts/package/Dockerfile.release-linux`, Ubuntu 22.04)
-  from a `git archive` export of HEAD. x86_64 is cross-compiled. Each archive
-  is unpacked and checked with `verify.sh`, and its required glibc version is
-  read from the binaries.
+  from the same export. x86_64 is cross-compiled. Each archive is unpacked and
+  checked with `verify.sh`, and its required glibc version is read from the
+  binaries.
 - `assets/SHA256SUMS`, `RELEASE_NOTES.md` (from
   `scripts/package/release-notes.md.in`), `clipsync.rb` (the Homebrew cask) and
   `release.json`, written last; without it the stage counts as incomplete.
+  `release.json` records the checksum of every asset and of the cask.
+
+The stage directory holds a full release build under `work/` (a few GB);
+delete it once the release is out. Docker keeps the build image and the
+`clipsync-release-cargo-registry` volume as caches; staging prints the command
+that removes them.
 
 `--skip-gates` (`just companion-release --skip-gates`) is for iterating on
 packaging. It is recorded in `release.json` and publish refuses the result.
@@ -66,10 +83,11 @@ Read `RELEASE_NOTES.md` before publishing.
 
 ## Draft: `just companion-release-publish`
 
-Refuses unless `release.json` exists, every staged file still matches its
-checksum in `release.json` and `SHA256SUMS`, no unlisted files are in
-`assets/`, gates ran, HEAD is the staged commit and that commit is on
-`origin/main`, and the tag and release still do not exist. It then runs
+Refuses unless `release.json` exists, every staged file and the cask still
+match their checksums in `release.json` and `SHA256SUMS`, no unlisted files are
+in `assets/`, gates ran, HEAD is the staged commit and that commit is on
+`origin/main`, and the tag and release still do not exist. `RELEASE_NOTES.md`
+may be edited after staging. It then runs
 `gh release create v<version> --draft --target <commit>` with the notes and
 assets and prints the draft URL. A draft creates no tag.
 
@@ -81,8 +99,9 @@ tag at the staged commit.
 
 ## Tap: `just companion-release-tap`
 
-Refuses unless the release is published (not a draft) and the disk image
-downloaded from its public URL has the staged checksum. It then commits
+Refuses unless the release is published (not a draft), its tag on origin
+points at the staged commit, the cask is unchanged since staging, and the disk
+image downloaded from its public URL has the staged checksum. It then commits
 `Casks/clipsync.rb` to the tap's `main` branch and pushes, the way the tap is
 maintained. Afterwards `brew install --cask lancekrogers/tap/clipsync` works.
 The tap also holds an older, unbuildable `Formula/clipsync.rb`; always pass
@@ -92,5 +111,7 @@ The tap also holds an older, unbuildable `Formula/clipsync.rb`; always pass
 
 `just companion-package-test` runs the release-command tests in
 `scripts/package/test_release.sh` against a throwaway repository with stub
-`gh`, `cargo`, `docker` and `curl`. They cover every refusal above and check
-the exact `gh release create` arguments; nothing reaches GitHub.
+`gh`, `cargo`, `docker` and `curl`. They cover the refusals above that can be
+reached without a real build or credentials (not the post-signing Developer ID
+checks) and check the exact `gh release create` arguments; nothing reaches
+GitHub.

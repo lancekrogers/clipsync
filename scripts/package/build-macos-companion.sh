@@ -40,8 +40,9 @@ if [[ "$SKIP_BUILD" != "1" ]]; then
   bash "$SCRIPT_DIR/build-binaries.sh" >/dev/null
 fi
 
-CLI_BIN="${CLIPSYNC_PACKAGE_CLI_BIN:-$TARGET_DIR/release/clipsync}"
-GUI_BIN="${CLIPSYNC_PACKAGE_GUI_BIN:-$TARGET_DIR/release/clipsync-desktop}"
+BIN_DIR="$(clipsync_package_release_bin_dir)"
+CLI_BIN="${CLIPSYNC_PACKAGE_CLI_BIN:-$BIN_DIR/clipsync}"
+GUI_BIN="${CLIPSYNC_PACKAGE_GUI_BIN:-$BIN_DIR/clipsync-desktop}"
 [[ -f "$CLI_BIN" ]] || clipsync_package_die "CLI binary missing: $CLI_BIN"
 [[ -f "$GUI_BIN" ]] || clipsync_package_die "GUI binary missing: $GUI_BIN"
 

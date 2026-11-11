@@ -178,6 +178,17 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
     env CLIPSYNC_PACKAGE_FIXTURE_MODE=1 bash "$STAGE_SH"
   expect_refusal "stage refuses prebuilt binaries" "fixture or prebuilt binaries cannot be staged" \
     env CLIPSYNC_PACKAGE_CLI_BIN=/bin/ls bash "$STAGE_SH"
+  expect_refusal "stage refuses a prebuilt GUI" "fixture or prebuilt binaries cannot be staged" \
+    env CLIPSYNC_PACKAGE_GUI_BIN=/bin/ls bash "$STAGE_SH"
+  expect_refusal "stage refuses skipping the build" "fixture or prebuilt binaries cannot be staged" \
+    env CLIPSYNC_PACKAGE_SKIP_BUILD=1 bash "$STAGE_SH"
+  for override in CLIPSYNC_PACKAGE_MOCK_BIN=/tmp CARGO_BUILD_TARGET=x86_64-apple-darwin \
+    RUSTFLAGS=-Ctarget-cpu=native CARGO_ENCODED_RUSTFLAGS=-Copt-level=0 CARGO_BUILD_RUSTFLAGS=-g; do
+    expect_refusal "stage refuses ${override%%=*}" "unset ${override%%=*}: release builds take no" \
+      env "$override" bash "$STAGE_SH"
+  done
+  expect_refusal "stage refuses a floating toolchain channel" "need an exact toolchain version" \
+    env CLIPSYNC_RUSTUP_TOOLCHAIN=stable bash "$STAGE_SH"
   expect_refusal "stage refuses a Linux set without x86_64" "x86_64 Linux archive is required" \
     env CLIPSYNC_RELEASE_LINUX_ARCHES=aarch64 bash "$STAGE_SH"
 
@@ -188,6 +199,15 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
   touch "$REPO/untracked.txt"
   expect_refusal "stage refuses an untracked file" "uncommitted or untracked" bash "$STAGE_SH"
   rm -f "$REPO/untracked.txt"
+
+  git -C "$REPO" update-index --skip-worktree Cargo.toml
+  echo "# hidden" >>"$REPO/Cargo.toml"
+  expect_refusal "stage refuses skip-worktree files" "assume-unchanged or skip-worktree" bash "$STAGE_SH"
+  git -C "$REPO" update-index --no-skip-worktree Cargo.toml
+  git -C "$REPO" checkout -q -- Cargo.toml
+  git -C "$REPO" update-index --assume-unchanged .gitignore
+  expect_refusal "stage refuses assume-unchanged files" "assume-unchanged or skip-worktree" bash "$STAGE_SH"
+  git -C "$REPO" update-index --no-assume-unchanged .gitignore
 
   git -C "$REPO" checkout -q -b feature
   expect_refusal "stage refuses a branch other than main" "not on main (on feature)" bash "$STAGE_SH"
@@ -213,6 +233,14 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
   git -C "$REPO" revert --no-edit HEAD >/dev/null
   git -C "$REPO" push -q origin main
 
+  sed -i.bak 's/^version = "0.1.0"/version = "0.1.0-rc1"/' "$REPO/Cargo.toml" "$REPO/crates/desktop/Cargo.toml"
+  rm -f "$REPO/Cargo.toml.bak" "$REPO/crates/desktop/Cargo.toml.bak"
+  git -C "$REPO" commit -q -am "prerelease"
+  git -C "$REPO" push -q origin main
+  expect_refusal "stage refuses a prerelease version" "is not a release version (x.y.z)" bash "$STAGE_SH"
+  git -C "$REPO" revert --no-edit HEAD >/dev/null
+  git -C "$REPO" push -q origin main
+
   git -C "$REPO" tag v0.1.0
   expect_refusal "stage refuses an existing local tag" "tag v0.1.0 already exists locally" bash "$STAGE_SH"
   git -C "$REPO" push -q origin v0.1.0
@@ -235,6 +263,13 @@ if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "arm64" ]]; then
     env CLIPSYNC_CODESIGN_IDENTITY="Developer ID Application: Test" bash "$STAGE_SH"
   expect_refusal "stage refuses notary credentials without an identity" "set both or neither" \
     env CLIPSYNC_NOTARY_PROFILE=test-profile bash "$STAGE_SH"
+  expect_refusal "stage refuses an ad-hoc signing identity" "is ad-hoc signing" \
+    env CLIPSYNC_CODESIGN_IDENTITY=- CLIPSYNC_NOTARY_PROFILE=test-profile bash "$STAGE_SH"
+
+  for gate in fmt test; do
+    expect_refusal "stage stops when the $gate gate fails" "quality gate failed: $gate" \
+      env STUB_CARGO_FAIL="$gate" bash "$STAGE_SH"
+  done
 
   : >"$LOGS/cargo.log"
   expect_refusal "stage stops when a quality gate fails" "quality gate failed: clippy" \
@@ -287,6 +322,7 @@ make_stage() {
     --field "commit=$(git -C "$REPO" rev-parse HEAD)" --field signing=unsigned \
     --field "quality_gates=$gates" --field rust_toolchain=1.95.0 \
     --field notes=RELEASE_NOTES.md --field cask=clipsync.rb \
+    --field "cask_sha256=$(shasum -a 256 "$stage/clipsync.rb" | awk '{print $1}')" \
     --json-field release_build=true --json-field "fixture_mode=$fixture" --json-field notarized=false \
     --asset "$DMG=macos:arm64" --asset "$X86=linux:x86_64" --asset "$ARM=linux:aarch64" \
     --asset "SHA256SUMS=any:any"
@@ -426,6 +462,15 @@ git -C "$REPO" tag -d v0.1.0 >/dev/null
 publish_refusal "publish refuses a tag on origin" "tag v0.1.0 already exists on origin" bash "$PUBLISH_SH"
 git -C "$REPO" push -q origin :refs/tags/v0.1.0
 
+make_stage
+rm -f "$STAGE/clipsync.rb"
+publish_refusal "publish refuses a stage without the cask" "clipsync.rb (the Homebrew cask) is missing" bash "$PUBLISH_SH"
+
+make_stage
+printf '  # edited\n' >>"$STAGE/clipsync.rb"
+publish_refusal "publish refuses a cask changed after staging" "clipsync.rb changed after staging" bash "$PUBLISH_SH"
+
+make_stage
 publish_refusal "publish refuses an existing release or draft" "already exists in example/clipsync" \
   env STUB_GH_RELEASES=v0.1.0 bash "$PUBLISH_SH"
 
@@ -449,6 +494,12 @@ SEED_COUNT="$(tap_commits)"
 
 expect_refusal "tap refuses a draft release" "still a draft" env STUB_GH_VIEW_DRAFT=true bash "$TAP_SH"
 expect_refusal "tap refuses a missing release" "no GitHub release v0.1.0" bash "$TAP_SH"
+expect_refusal "tap refuses when the release tag is not on origin" "points at 'nothing'" \
+  env STUB_GH_VIEW_DRAFT=false bash "$TAP_SH"
+git -C "$REPO" push -q origin "$(git -C "$REPO" rev-parse HEAD~1):refs/tags/v0.1.0"
+expect_refusal "tap refuses a tag that points at another commit" "not the staged commit" \
+  env STUB_GH_VIEW_DRAFT=false bash "$TAP_SH"
+git -C "$REPO" push -q --force origin "$(git -C "$REPO" rev-parse HEAD):refs/tags/v0.1.0"
 if [[ ! -s "$LOGS/curl.log" ]]; then pass "tap downloads nothing before the release is public"; else fail "tap downloaded while unpublished"; fi
 
 printf 'different bytes\n' >"$TMP/other.dmg"
@@ -459,9 +510,14 @@ expect_refusal "tap refuses when the public DMG cannot be downloaded" "could not
 
 cp "$STAGE/clipsync.rb" "$TMP/cask.backup"
 sed -i.bak 's/sha256 "[0-9a-f]*"/sha256 "0000"/' "$STAGE/clipsync.rb"
-expect_refusal "tap refuses a cask whose sha256 is not the staged DMG" "cask sha256 does not match" \
+expect_refusal "tap refuses a cask whose sha256 line was edited" "staged cask changed after staging" \
   env STUB_GH_VIEW_DRAFT=false bash "$TAP_SH"
 cp "$TMP/cask.backup" "$STAGE/clipsync.rb"
+printf '  postflight_steps do\n    run "/bin/sh", args: ["-c", "true"]\n  end\n' >>"$STAGE/clipsync.rb"
+expect_refusal "tap refuses a cask with added steps" "staged cask changed after staging" \
+  env STUB_GH_VIEW_DRAFT=false bash "$TAP_SH"
+cp "$TMP/cask.backup" "$STAGE/clipsync.rb"
+rm -f "$STAGE/clipsync.rb.bak"
 
 if [[ "$(tap_commits)" == "$SEED_COUNT" ]]; then pass "refused tap runs leave the tap untouched"; else fail "a refused tap run changed the tap"; fi
 
@@ -485,6 +541,7 @@ if [[ "$(tap_commits)" == "$AFTER_COUNT" && "$LAST_OUT" == *"nothing to push"* ]
 else
   fail "tap rerun changed the tap"
 fi
+git -C "$REPO" push -q origin :refs/tags/v0.1.0
 unset CLIPSYNC_TAP_URL STUB_CURL_SOURCE CLIPSYNC_RELEASE_ROOT
 
 # ===================== release-mode packaging guards =====================

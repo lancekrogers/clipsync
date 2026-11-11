@@ -50,10 +50,15 @@ if [[ -n "${CLIPSYNC_PACKAGE_FIXTURE_MODE:-}" || -n "${CLIPSYNC_PACKAGE_SKIP_BUI
    || -n "${CLIPSYNC_PACKAGE_CLI_BIN:-}" || -n "${CLIPSYNC_PACKAGE_GUI_BIN:-}" ]]; then
   clipsync_release_die "fixture or prebuilt binaries cannot be staged; unset CLIPSYNC_PACKAGE_FIXTURE_MODE, CLIPSYNC_PACKAGE_SKIP_BUILD, CLIPSYNC_PACKAGE_CLI_BIN and CLIPSYNC_PACKAGE_GUI_BIN"
 fi
-unset CLIPSYNC_PACKAGE_FORCE CLIPSYNC_PACKAGE_DIST CLIPSYNC_PACKAGE_FIXTURE_PREFIX
+for var in CLIPSYNC_PACKAGE_MOCK_BIN CARGO_BUILD_TARGET RUSTFLAGS CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS; do
+  [[ -z "${!var:-}" ]] || clipsync_release_die "unset $var: release builds take no tool or compiler overrides from the environment"
+done
+unset CLIPSYNC_PACKAGE_FORCE CLIPSYNC_PACKAGE_DIST CLIPSYNC_PACKAGE_FIXTURE_PREFIX \
+  CLIPSYNC_PACKAGE_CARGO_TARGET CLIPSYNC_PACKAGE_ARCH CARGO_TARGET_DIR
 
 TOOLCHAIN="${CLIPSYNC_RUSTUP_TOOLCHAIN-1.95.0}"
-[[ -n "$TOOLCHAIN" ]] || clipsync_release_die "release builds need a pinned toolchain; unset CLIPSYNC_RUSTUP_TOOLCHAIN or set it"
+[[ "$TOOLCHAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || clipsync_release_die "release builds need an exact toolchain version such as 1.95.0 (CLIPSYNC_RUSTUP_TOOLCHAIN='$TOOLCHAIN')"
 export CLIPSYNC_RUSTUP_TOOLCHAIN="$TOOLCHAIN"
 
 read -r -a LINUX_ARCHES <<<"${CLIPSYNC_RELEASE_LINUX_ARCHES:-x86_64 aarch64}"
@@ -90,6 +95,8 @@ notary_any() {
   [[ -n "${CLIPSYNC_NOTARY_PROFILE:-}${CLIPSYNC_NOTARY_APPLE_ID:-}${CLIPSYNC_NOTARY_TEAM_ID:-}${CLIPSYNC_NOTARY_PASSWORD:-}" ]]
 }
 if [[ -n "${CLIPSYNC_CODESIGN_IDENTITY:-}" ]]; then
+  [[ "$CLIPSYNC_CODESIGN_IDENTITY" != "-" ]] \
+    || clipsync_release_die "CLIPSYNC_CODESIGN_IDENTITY=- is ad-hoc signing; unset it to stage an unsigned build"
   notary_complete || clipsync_release_die "CLIPSYNC_CODESIGN_IDENTITY is set but notarization credentials are incomplete; set CLIPSYNC_NOTARY_PROFILE (or Apple ID, team ID and password), or unset the identity to stage an unsigned build"
   SIGNING="developer-id"
 elif notary_any; then
@@ -135,12 +142,16 @@ ASSET_ARGS=()
 
 git -C "$ROOT" archive --format=tar -o "$WORK/source.tar" "$COMMIT"
 
-# --- macOS ---
+# --- macOS (from the same export as Linux, so local-only files cannot leak in) ---
+mkdir -p "$WORK/src"
+tar -xf "$WORK/source.tar" -C "$WORK/src"
 CLIPSYNC_PACKAGE_RELEASE=1 \
 CLIPSYNC_PACKAGE_RELEASE_SIGNING="$SIGNING" \
 CLIPSYNC_PACKAGE_DIST="$WORK" \
 CLIPSYNC_PACKAGE_GIT_COMMIT="$COMMIT" \
-  bash "$SCRIPT_DIR/build-macos-companion.sh"
+CARGO_TARGET_DIR="$WORK/target" \
+CARGO_BUILD_BUILD_DIR="$WORK/target" \
+  bash "$WORK/src/scripts/package/build-macos-companion.sh"
 
 MAC_DIR="$WORK/macos"
 MAC_APP="$MAC_DIR/ClipSync.app"
@@ -153,6 +164,16 @@ if [[ "$SIGNING" == "developer-id" ]]; then
   bash "$SCRIPT_DIR/verify.sh" --acceptance "$MAC_DIR/ACCEPTANCE-ClipSync.json"
   grep -q '"status": "accepted"' "$MAC_DIR/ACCEPTANCE-ClipSync.json" \
     || clipsync_release_die "notarization was not accepted"
+  # Confirm with the system tools rather than trusting ACCEPTANCE alone.
+  SIGN_INFO="$(/usr/bin/codesign -dv --verbose=2 "$MAC_APP" 2>&1)" || SIGN_INFO=""
+  [[ "$SIGN_INFO" == *$'\n'"Authority=Developer ID Application:"* ]] \
+    || clipsync_release_die "the signed app is not signed by a Developer ID Application identity"
+  /usr/bin/xcrun stapler validate "$MAC_APP" >/dev/null \
+    || clipsync_release_die "the signed app has no valid stapled notarization ticket"
+  GK="$(/usr/sbin/spctl --assess --type execute -vv "$MAC_APP" 2>&1)" \
+    || clipsync_release_die "Gatekeeper rejects the signed app"
+  [[ "$GK" == *"source=Notarized Developer ID"* ]] \
+    || clipsync_release_die "Gatekeeper does not report the app as notarized"
   python3 -I - "$MAC_MANIFEST" <<'PY'
 import json, sys
 path = sys.argv[1]
@@ -296,6 +317,7 @@ python3 -I "$SCRIPT_DIR/release_render.py" manifest "$STAGE/release.json" \
   --field "version=$VERSION" --field "tag=$TAG" --field "repo=$SLUG" --field "commit=$COMMIT" \
   --field "signing=$SIGNING" --field "quality_gates=$GATES" --field "rust_toolchain=$TOOLCHAIN" \
   --field "notes=RELEASE_NOTES.md" --field "cask=clipsync.rb" \
+  --field "cask_sha256=$(clipsync_release_sha256 "$STAGE/clipsync.rb")" \
   --json-field "release_build=true" --json-field "fixture_mode=false" \
   --json-field "notarized=$NOTARIZED" \
   --json-field "linux={\"build_image\": \"ubuntu:22.04\", \"glibc_required\": \"$GLIBC_MAX\", \"arches\": $ARCH_JSON}" \

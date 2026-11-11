@@ -55,7 +55,7 @@ clipsync_release_version() {
   [[ -n "$core" && -n "$desktop" ]] || clipsync_release_die "could not read crate versions"
   [[ "$core" == "$desktop" ]] \
     || clipsync_release_die "crate versions disagree: Cargo.toml=$core crates/desktop/Cargo.toml=$desktop"
-  [[ "$core" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] \
+  [[ "$core" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || clipsync_release_die "version '$core' is not a release version (x.y.z)"
   printf '%s' "$core"
 }
@@ -74,11 +74,16 @@ clipsync_release_sha256() {
 }
 
 clipsync_release_require_clean_tree() {
-  local root="$1" status
+  local root="$1" status flags hidden
   status="$(git -C "$root" status --porcelain --untracked-files=all)" \
     || clipsync_release_die "git status failed in $root"
   [[ -z "$status" ]] || clipsync_release_die "working tree has uncommitted or untracked changes:
 $status"
+  # git status does not show files marked assume-unchanged (lowercase) or skip-worktree (S).
+  flags="$(git -C "$root" ls-files -v)" || clipsync_release_die "git ls-files failed in $root"
+  hidden="$(grep -E '^([a-z]|S) ' <<<"$flags" || true)"
+  [[ -z "$hidden" ]] || clipsync_release_die "files are marked assume-unchanged or skip-worktree, so git status cannot vouch for them:
+$hidden"
 }
 
 clipsync_release_require_main_at_origin() {

@@ -50,15 +50,27 @@ DMG_SHA="$(python3 -I -c '
 import json, sys
 print(next(a["sha256"] for a in json.load(open(sys.argv[1]))["assets"] if a["name"] == sys.argv[2]))' "$MANIFEST" "$DMG_NAME" 2>/dev/null || true)"
 [[ -n "$DMG_NAME" && -n "$DMG_SHA" ]] || clipsync_release_die "release.json does not list exactly one disk image"
+[[ "$(clipsync_release_sha256 "$CASK")" == "$(clipsync_release_json_get "$MANIFEST" cask_sha256)" ]] \
+  || clipsync_release_die "staged cask changed after staging (sha256 differs from release.json)"
 grep -qF "version \"$VERSION\"" "$CASK" || clipsync_release_die "staged cask is not for version $VERSION"
 grep -qF "sha256 \"$DMG_SHA\"" "$CASK" || clipsync_release_die "staged cask sha256 does not match the staged disk image"
+COMMIT="$(clipsync_release_json_get "$MANIFEST" commit)"
 
 DRAFT="$(gh release view "$TAG" --repo "$SLUG" --json isDraft --jq '.isDraft')" \
   || clipsync_release_die "no GitHub release $TAG in $SLUG (or GitHub is unreachable); publish the draft first"
 [[ "$DRAFT" == "false" ]] \
   || clipsync_release_die "release $TAG is still a draft; publish it before updating the tap"
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/clipsync-release-tap.XXXXXX")"
+# The published tag must point at the staged commit.
+TAG_REFS="$(git -C "$ROOT" ls-remote origin "refs/tags/$TAG" "refs/tags/$TAG^{}")" \
+  || clipsync_release_die "could not list tags on origin"
+TAG_SHA="$(awk 'END {print $1}' <<<"$TAG_REFS")"
+[[ "$TAG_SHA" == "$COMMIT" ]] \
+  || clipsync_release_die "tag $TAG on origin points at '${TAG_SHA:-nothing}', not the staged commit $COMMIT"
+
+# Download and clone inside the stage so nothing needs cleaning up elsewhere.
+mkdir -p "$STAGE/work"
+WORK="$(mktemp -d "$STAGE/work/tap.XXXXXX")"
 DMG_URL="https://github.com/$SLUG/releases/download/$TAG/$DMG_NAME"
 clipsync_release_log "downloading $DMG_URL"
 curl -fsSL --retry 3 -o "$WORK/$DMG_NAME" "$DMG_URL" \

@@ -99,6 +99,12 @@ if sums_path.is_file():
     if listed != expected:
         problems.append("SHA256SUMS does not match the staged files")
 
+cask = stage / "clipsync.rb"
+if not cask.is_file():
+    problems.append("clipsync.rb (the Homebrew cask) is missing")
+elif sha256(cask) != data.get("cask_sha256"):
+    problems.append("clipsync.rb changed after staging")
+
 notes = stage / str(data.get("notes", "RELEASE_NOTES.md"))
 if not notes.is_file() or not notes.read_text().strip():
     problems.append("RELEASE_NOTES.md is missing or empty")
