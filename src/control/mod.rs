@@ -23,7 +23,7 @@ pub use error_codes::{
     engine_features, FEATURE_DIAGNOSTICS, FEATURE_ENROLLMENT, FEATURE_HISTORY_COPY,
     FEATURE_HISTORY_READ, FEATURE_PAUSE, FEATURE_STATUS_V2,
 };
-pub use history_view::decode_preview_png;
+pub use history_view::{decode_preview_png, preview_chars};
 pub use schema::{
     Command, ControlError, ControlSnapshot, DaemonStatus, DiagnosticError, DiagnosticsReport,
     EnrollmentCandidateView, EnrollmentOutcomeView, EnrollmentSessionView, EnrollmentSnapshot,
