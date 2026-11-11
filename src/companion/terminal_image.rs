@@ -83,6 +83,17 @@ fn probe_graphics() -> Option<Picker> {
     None
 }
 
+/// `CLIPSYNC_TUI_GRAPHICS=off` keeps the character preview for terminals that
+/// report Sixel or Kitty support but cannot show it, such as VHS recordings.
+fn graphics_wanted(color: bool, setting: Option<&str>) -> bool {
+    color
+        && !setting.is_some_and(|value| {
+            ["off", "0", "false"]
+                .iter()
+                .any(|off| value.eq_ignore_ascii_case(off))
+        })
+}
+
 /// Terminal capabilities and image encoding are isolated from the controller.
 pub struct GraphicsPreview {
     picker: Option<Picker>,
@@ -95,7 +106,8 @@ pub struct GraphicsPreview {
 
 impl GraphicsPreview {
     pub fn new(color: bool) -> Self {
-        let picker = if color {
+        let setting = std::env::var("CLIPSYNC_TUI_GRAPHICS").ok();
+        let picker = if graphics_wanted(color, setting.as_deref()) {
             probe_graphics().filter(|picker| picker.protocol_type() != ProtocolType::Halfblocks)
         } else {
             None
@@ -234,5 +246,14 @@ mod tests {
             png: None,
         };
         assert!(lines(&invalid, 80, 40, true).is_empty());
+    }
+
+    #[test]
+    fn graphics_setting_can_force_the_character_preview() {
+        assert!(graphics_wanted(true, None));
+        assert!(graphics_wanted(true, Some("on")));
+        assert!(!graphics_wanted(true, Some("OFF")));
+        assert!(!graphics_wanted(true, Some("0")));
+        assert!(!graphics_wanted(false, None));
     }
 }

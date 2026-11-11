@@ -1,5 +1,6 @@
 import 'just/acceptance.just'
 import 'just/companion.just'
+import 'just/demo.just'
 
 # ClipSync build recipes
 
