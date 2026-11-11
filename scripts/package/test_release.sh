@@ -331,7 +331,9 @@ make_stage() {
 
 # ===================== renderer and cask =====================
 make_stage
-if ruby -c "$STAGE/clipsync.rb" >/dev/null 2>&1; then
+if ! command -v ruby >/dev/null 2>&1; then
+  echo "INFO: ruby not installed; cask syntax check skipped"
+elif ruby -c "$STAGE/clipsync.rb" >/dev/null 2>&1; then
   pass "rendered cask is valid Ruby"
 else
   fail "rendered cask is not valid Ruby"
