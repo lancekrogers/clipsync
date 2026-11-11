@@ -28,6 +28,7 @@ pub enum IoCommand {
 }
 
 impl IoCommand {
+    #[cfg(test)]
     pub fn send(msg: EnrollMessage) -> Self {
         Self::Send { msg, done: None }
     }
@@ -173,11 +174,10 @@ mod tests {
         let (io, mut evt_rx) = SessionIo::spawn_raw(server_r, server_w);
         let session_id = Uuid::new_v4();
         let peer_session_id = Uuid::new_v4();
-        let msg = EnrollMessage::Confirm {
+        let msg = EnrollMessage::PersistAck {
             session_id,
             peer_session_id,
-            binding_hex: "ab".repeat(16),
-            confirmed: true,
+            authorized_fingerprint: "SHA256:peer".into(),
         };
         let payload = serde_json::to_vec(&msg).unwrap();
         let len = (payload.len() as u32).to_be_bytes();
@@ -215,15 +215,15 @@ mod tests {
             .expect("event timeout")
             .expect("channel closed");
         match got {
-            SessionEvent::Message(EnrollMessage::Confirm {
+            SessionEvent::Message(EnrollMessage::PersistAck {
                 session_id: sid,
-                confirmed,
+                peer_session_id: peer,
                 ..
             }) => {
                 assert_eq!(sid, session_id);
-                assert!(confirmed);
+                assert_eq!(peer, peer_session_id);
             }
-            other => panic!("expected Confirm, got {other:?}"),
+            other => panic!("expected PersistAck, got {other:?}"),
         }
         write_task.await.unwrap();
         let _ = io.cmd_tx.send(IoCommand::Shutdown).await;

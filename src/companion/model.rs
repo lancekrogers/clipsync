@@ -337,15 +337,60 @@ mod tests {
 /// User-facing labels shared by both renderers; protocol state names stay stable.
 pub fn enrollment_state_label(state: &str) -> &str {
     match state {
-        "Dialing" => "Connecting securely…",
-        "AwaitingLocalConfirm" => "Compare fingerprints on both computers",
-        "AwaitingPeerConfirm" => "Waiting for the other computer to confirm",
-        "Persisting" => "Saving authorization…",
+        "Dialing" => "Connecting…",
+        "Verifying" => "Checking the code…",
+        "Persisting" => "Saving the pairing…",
         "WaitingPeerAuth" => "Saved here; waiting for the other computer",
-        "Succeeded" => "Device authorized",
-        "Cancelled" => "Connection cancelled",
-        "Expired" => "Verification expired",
-        "Failed" => "Connection could not be completed",
+        "Succeeded" => "Paired",
+        "Cancelled" => "Cancelled",
+        "Expired" => "Timed out",
+        "Failed" => "Not paired",
         _ => state,
+    }
+}
+
+/// `1:52` for a countdown in seconds.
+pub fn countdown(secs: u64) -> String {
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
+/// The pairing code in three-row block digits, for reading across a room.
+pub fn big_digits(digits: &str) -> [String; 3] {
+    const FONT: [[&str; 3]; 10] = [
+        ["┏━┓", "┃ ┃", "┗━┛"],
+        ["╺┓ ", " ┃ ", "╺┻╸"],
+        ["╺━┓", "┏━┛", "┗━╸"],
+        ["╺━┓", " ━┫", "╺━┛"],
+        ["╻ ╻", "┗━┫", "  ╹"],
+        ["┏━╸", "┗━┓", "╺━┛"],
+        ["┏━╸", "┣━┓", "┗━┛"],
+        ["╺━┓", "  ┃", "  ╹"],
+        ["┏━┓", "┣━┫", "┗━┛"],
+        ["┏━┓", "┗━┫", "╺━┛"],
+    ];
+    let mut rows: [String; 3] = Default::default();
+    for (index, digit) in digits.bytes().filter(u8::is_ascii_digit).enumerate() {
+        for (row, line) in rows.iter_mut().enumerate() {
+            if index > 0 {
+                line.push_str(if index == 3 { "   " } else { " " });
+            }
+            line.push_str(FONT[usize::from(digit - b'0')][row]);
+        }
+    }
+    rows
+}
+
+#[cfg(test)]
+mod pairing_tests {
+    use super::*;
+
+    #[test]
+    fn big_digits_keep_columns_aligned_and_group_by_three() {
+        let rows = big_digits("482913");
+        let width = rows[0].chars().count();
+        assert!(rows.iter().all(|row| row.chars().count() == width));
+        assert_eq!(width, 6 * 3 + 4 + 3);
+        assert_eq!(countdown(112), "1:52");
+        assert_eq!(countdown(5), "0:05");
     }
 }

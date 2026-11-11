@@ -1,11 +1,12 @@
-//! Mutual enrollment, then a new `clipsync/2` sync that uses the pins just written.
-//! Revoke on that live sync stops clipboard delivery and reconnect. A replacement
-//! authenticator and enrollment manager see the revoked pin gone and an unrelated
-//! pin kept.
+//! Pairing with a code, then a new `clipsync/2` sync that uses the pins just
+//! written. Revoke on that live sync stops clipboard delivery and reconnect. A
+//! replacement authenticator and enrollment manager see the revoked pin gone
+//! and an unrelated pin kept. Pairings saved before code pairing existed keep
+//! connecting.
 //!
-//! D03: no new protocol, no short codes, no automatic confirm. Enrollment stays on
-//! `clipsync-enroll/1`. Sync stays on the existing pin-checked TLS WebSocket path.
-//! Clipboard fixtures are in-memory (`tests/support`); nothing touches the OS pasteboard.
+//! Sync stays on the existing pin-checked TLS WebSocket path and the
+//! authorized-devices format is unchanged. Clipboard fixtures are in-memory
+//! (`tests/support`); nothing touches the OS pasteboard.
 
 mod support;
 
@@ -35,8 +36,6 @@ async fn enrollment_pair() -> (
     Identity,
     Arc<EnrollmentManager>,
     Arc<EnrollmentManager>,
-    SocketAddr,
-    SocketAddr,
 ) {
     let a = Identity::new().await;
     let b = Identity::new().await;
@@ -56,26 +55,32 @@ async fn enrollment_pair() -> (
 
     let ma = mgr(&a).await;
     let mb = mgr(&b).await;
-    let sa = ma.open().await.unwrap();
-    let sb = mb.open().await.unwrap();
-    let addr_a: SocketAddr = sa.listen_addr.as_ref().unwrap().parse().unwrap();
-    let addr_b: SocketAddr = sb.listen_addr.as_ref().unwrap().parse().unwrap();
-    (a, b, ma, mb, addr_a, addr_b)
+    (a, b, ma, mb)
 }
 
-async fn wait_bound(mgr: &EnrollmentManager, peer_fp: &str) -> uuid::Uuid {
-    for _ in 0..200 {
+/// B allows a device and A types B's code. Returns both session ids.
+async fn pair(ma: &EnrollmentManager, mb: &EnrollmentManager) -> (uuid::Uuid, uuid::Uuid) {
+    let open = mb.open().await.unwrap();
+    let code = open.code.unwrap().code;
+    let sid_a = ma
+        .pair(&open.listen_addr.unwrap(), code, None, None)
+        .await
+        .unwrap()
+        .requested_session_id
+        .unwrap();
+    let sid_b = wait_acceptor(mb).await;
+    (sid_a, sid_b)
+}
+
+async fn wait_acceptor(mgr: &EnrollmentManager) -> uuid::Uuid {
+    for _ in 0..400 {
         let snap = mgr.inspect(None).await.unwrap();
-        if let Some(session) = snap
-            .sessions
-            .iter()
-            .find(|s| s.peer_fingerprint.as_deref() == Some(peer_fp))
-        {
+        if let Some(session) = snap.sessions.iter().find(|s| s.role == "acceptor") {
             return session.session_id;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("session did not bind peer {peer_fp}");
+    panic!("no pairing attempt reached the allowing side");
 }
 
 async fn wait_authorized(auth: &SshAuthenticator, key: &clipsync::auth::PublicKey) {
@@ -196,10 +201,10 @@ fn spawn_proxy(upstream: SocketAddr) -> (SocketAddr, Task<()>, Arc<tokio::sync::
 
 #[tokio::test]
 async fn enrolled_pins_open_sync_revoke_stops_clipboard_and_survives_reload() {
-    let (a, b, ma, mb, addr_a, addr_b) = enrollment_pair().await;
+    let (a, b, ma, mb) = enrollment_pair().await;
     let keep = Identity::new().await;
 
-    // Sync listeners exist before either Confirm. Empty pin files must fail closed.
+    // Sync listeners exist before pairing. Empty pin files must fail closed.
     let ca = Clipboard::default();
     let cb = Clipboard::default();
     let (ea, ta) = sync_side(&a, &ca).await;
@@ -207,46 +212,19 @@ async fn enrolled_pins_open_sync_revoke_stops_clipboard_and_survives_reload() {
     let listener_a = ea.bind_listener().await.unwrap();
     let listener_b = eb.bind_listener().await.unwrap();
     let sync_addr = listener_b.local_addr();
-    assert_ne!(sync_addr, addr_b);
-    assert_ne!(listener_a.local_addr(), addr_a);
     let run_a = ea.clone();
     let run_b = eb.clone();
     let _serve_a = Task(tokio::spawn(async move { run_a.run(listener_a).await }));
     let _serve_b = Task(tokio::spawn(async move { run_b.run(listener_b).await }));
     tokio::time::sleep(Duration::from_millis(30)).await;
 
-    ma.dial(&addr_b.to_string(), None, None).await.unwrap();
-    let sid_a = wait_bound(&ma, &b.key.public_key().fingerprint()).await;
-    let sid_b = wait_bound(&mb, &a.key.public_key().fingerprint()).await;
-    let shown_a = ma.inspect(Some(sid_a)).await.unwrap();
-    let shown_b = mb.inspect(Some(sid_b)).await.unwrap();
-    let fp_a = a.key.public_key().fingerprint();
-    let fp_b = b.key.public_key().fingerprint();
-    let view_a = shown_a
-        .sessions
-        .iter()
-        .find(|s| s.session_id == sid_a)
-        .unwrap();
-    let view_b = shown_b
-        .sessions
-        .iter()
-        .find(|s| s.session_id == sid_b)
-        .unwrap();
-    assert_eq!(view_a.peer_fingerprint.as_deref(), Some(fp_b.as_str()));
-    assert_eq!(view_b.peer_fingerprint.as_deref(), Some(fp_a.as_str()));
-    assert!(view_a
-        .peer_fingerprint
-        .as_ref()
-        .unwrap()
-        .starts_with("SHA256:"));
-
     // Leave both clipboards empty so the 250ms capture loop has nothing new to send.
     let denied = tokio::time::timeout(Duration::from_secs(5), ta.connect_peer(&b.peer(sync_addr)))
         .await
-        .expect("pre-confirm sync dial timed out");
+        .expect("pre-pairing sync dial timed out");
     assert!(
         denied.is_err(),
-        "clipsync/2 before mutual confirm must fail closed: {denied:?}"
+        "clipsync/2 before pairing must fail closed: {denied:?}"
     );
     assert!(!tb.is_connected(a.id()).await);
     assert!(ea.force_sync().await.is_err());
@@ -256,8 +234,7 @@ async fn enrolled_pins_open_sync_revoke_stops_clipboard_and_survives_reload() {
     assert!(!pin_text(&a).await.contains("ssh-ed25519"));
     assert!(!pin_text(&b).await.contains("ssh-ed25519"));
 
-    ma.confirm(sid_a).await.unwrap();
-    mb.confirm(sid_b).await.unwrap();
+    let (sid_a, sid_b) = pair(&ma, &mb).await;
     wait_authorized(&a.auth, &b.key.public_key()).await;
     wait_authorized(&b.auth, &a.key.public_key()).await;
     wait_succeeded(&ma, sid_a).await;
@@ -435,24 +412,20 @@ async fn enrolled_pins_open_sync_revoke_stops_clipboard_and_survives_reload() {
 
 #[tokio::test]
 async fn failed_trust_write_preserves_prior_pins_and_can_be_retried() {
-    let (a, b, ma, mb, _addr_a, addr_b) = enrollment_pair().await;
+    let (a, b, ma, mb) = enrollment_pair().await;
     let keep = Identity::new().await;
     a.auth
         .add_trusted_peer(&keep.key.public_key().to_openssh(), Some("keep".into()))
         .await
         .unwrap();
     let original = pin_text(&a).await;
-    ma.dial(&addr_b.to_string(), None, None).await.unwrap();
-    let sid_a = wait_bound(&ma, &b.key.public_key().fingerprint()).await;
-    let sid_b = wait_bound(&mb, &a.key.public_key().fingerprint()).await;
 
     // A directory at the fixture lock path causes a portable write failure even
     // when the Linux test process is root. The original pin file is untouched.
     let lock = pin_file(&a).with_extension("lock");
     std::fs::remove_file(&lock).unwrap();
     std::fs::create_dir(&lock).unwrap();
-    ma.confirm(sid_a).await.unwrap();
-    mb.confirm(sid_b).await.unwrap();
+    let (sid_a, sid_b) = pair(&ma, &mb).await;
     eventually(|| async {
         ma.inspect(Some(sid_a))
             .await
@@ -472,40 +445,108 @@ async fn failed_trust_write_preserves_prior_pins_and_can_be_retried() {
         .is_some_and(|outcome| outcome.status == "succeeded"));
 
     std::fs::remove_dir(&lock).unwrap();
-    ma.cancel(None).await.unwrap();
     mb.cancel(None).await.unwrap();
-    ma.open().await.unwrap();
-    let addr_b = mb.open().await.unwrap().listen_addr.unwrap();
+    let open = mb.open().await.unwrap();
     let retried = ma
-        .dial(&addr_b, None, None)
+        .pair(
+            &open.listen_addr.unwrap(),
+            open.code.unwrap().code,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .requested_session_id
+        .unwrap();
+    wait_succeeded(&ma, retried).await;
+    eventually(|| async {
+        mb.inspect(None)
+            .await
+            .unwrap()
+            .sessions
+            .iter()
+            .any(|s| s.role == "acceptor" && s.state == "Succeeded")
+    })
+    .await;
+    assert!(a.auth.is_authorized(&keep.key.public_key()).await.unwrap());
+    assert!(a.auth.is_authorized(&b.key.public_key()).await.unwrap());
+    assert!(b.auth.is_authorized(&a.key.public_key()).await.unwrap());
+    assert_mode_600(&pin_file(&a));
+}
+
+#[tokio::test]
+async fn a_pairing_saved_before_code_pairing_still_connects() {
+    let (a, b, _ma, mb) = enrollment_pair().await;
+    // Pins exactly as fingerprint-compare enrollment wrote them.
+    for (id, peer, name) in [(&a, &b, "desk-clipsync"), (&b, &a, "laptop-clipsync")] {
+        let key = peer.key.public_key();
+        id.auth
+            .add_trusted_peer(
+                &key.to_openssh(),
+                Some(format!("{name} {}", key.fingerprint())),
+            )
+            .await
+            .unwrap();
+    }
+    let pins_a = pin_text(&a).await;
+    let pins_b = pin_text(&b).await;
+
+    // B is allowing a new device and a stranger guesses wrong meanwhile.
+    let open = mb.open().await.unwrap();
+    let stranger = Identity::new().await;
+    let mut config = Config::default();
+    config.node_id = stranger.id();
+    config.listen_addr = "127.0.0.1:0".into();
+    config.auth.ssh_key = stranger.dir.path().join("identity");
+    config.auth.authorized_keys = stranger.dir.path().join("authorized_keys");
+    let ms = EnrollmentManager::new(Arc::new(config), stranger.auth.clone()).unwrap();
+    let digits: u32 = open.code.unwrap().code.digits().parse().unwrap();
+    let guess =
+        clipsync::control::PairingCode::parse(&format!("{:06}", (digits + 7) % 1_000_000)).unwrap();
+    let sid = ms
+        .pair(&open.listen_addr.unwrap(), guess, None, None)
         .await
         .unwrap()
         .requested_session_id
         .unwrap();
     eventually(|| async {
-        ma.inspect(Some(retried))
+        ms.inspect(None)
             .await
             .unwrap()
             .sessions
             .iter()
-            .any(|s| s.session_id == retried && s.peer_fingerprint.is_some())
+            .any(|s| s.session_id == sid && s.state == "Failed")
     })
     .await;
-    let peer_id = mb
-        .inspect(None)
+
+    let ca = Clipboard::default();
+    let cb = Clipboard::default();
+    let (ea, ta) = sync_side(&a, &ca).await;
+    let (eb, tb) = sync_side(&b, &cb).await;
+    let listener_b = eb.bind_listener().await.unwrap();
+    let sync_addr = listener_b.local_addr();
+    let run_b = eb.clone();
+    let _serve_b = Task(tokio::spawn(async move { run_b.run(listener_b).await }));
+    let connected =
+        tokio::time::timeout(Duration::from_secs(5), ta.connect_peer(&b.peer(sync_addr)))
+            .await
+            .expect("sync dial timed out");
+    assert!(
+        connected.is_ok(),
+        "existing pins must open clipsync/2: {connected:?}"
+    );
+    eventually(async || tb.is_connected(a.id()).await && ta.is_connected(b.id()).await).await;
+    ca.copy(FROM_PEER).await;
+    assert_eq!(ea.force_sync().await.unwrap(), 1);
+    eventually(async || *cb.text.lock().await == FROM_PEER).await;
+
+    assert_eq!(pin_text(&a).await, pins_a);
+    assert_eq!(pin_text(&b).await, pins_b);
+    assert!(!b
+        .auth
+        .is_authorized(&stranger.key.public_key())
         .await
-        .unwrap()
-        .sessions
-        .iter()
-        .find(|s| s.state == "AwaitingLocalConfirm")
-        .unwrap()
-        .session_id;
-    ma.confirm(retried).await.unwrap();
-    mb.confirm(peer_id).await.unwrap();
-    wait_succeeded(&ma, retried).await;
-    wait_succeeded(&mb, peer_id).await;
-    assert!(a.auth.is_authorized(&keep.key.public_key()).await.unwrap());
-    assert!(a.auth.is_authorized(&b.key.public_key()).await.unwrap());
-    assert!(b.auth.is_authorized(&a.key.public_key()).await.unwrap());
-    assert_mode_600(&pin_file(&a));
+        .unwrap());
+    ea.shutdown().await;
+    eb.shutdown().await;
 }

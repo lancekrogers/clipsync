@@ -1,18 +1,25 @@
-//! Enrollment rate limits and expiry (D03).
+//! Enrollment rate limits and expiry.
 use std::{
     collections::{HashMap, VecDeque},
     time::{Duration, Instant},
 };
 
-pub const SESSION_TTL: Duration = Duration::from_secs(5 * 60);
+/// Deadline for one attempt, from connect to durable save on both computers.
+pub const SESSION_TTL: Duration = Duration::from_secs(60);
+/// How long a code stays on screen before a fresh one replaces it.
+pub const CODE_TTL: Duration = Duration::from_secs(120);
+/// Attempts one allowing window accepts. Each attempt consumes one code, so a
+/// stranger's chance of pairing per window is at most this many in a million.
+pub const MAX_PAIRING_ATTEMPTS: u32 = 5;
+/// An allowing window closes after this long even if no one tries a code, so
+/// timer renewals are bounded too (five code lifetimes).
+pub const WINDOW_TTL: Duration = Duration::from_secs(10 * 60);
 pub const MAX_CONCURRENT_SESSIONS: usize = 3;
 pub const MAX_ACCEPTS_PER_MINUTE: usize = 10;
 pub const MAX_FAILURES_PER_FINGERPRINT: usize = 5;
 pub const FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Bound retained terminal session history (Failed/Cancelled/Expired/…).
 pub const MAX_TERMINAL_SESSIONS: usize = 32;
-/// Bound retained consumed session IDs for replay rejection.
-pub const MAX_CONSUMED_IDS: usize = 128;
 
 #[derive(Debug, Default)]
 pub struct RateLimits {
@@ -74,7 +81,7 @@ impl RateLimits {
 mod tests {
     use super::*;
 
-    /// D03 budgets are independent clocks. The accept cutoff is the inline
+    /// The budgets are independent clocks. The accept cutoff is the inline
     /// `Duration::from_secs(60)` in `prune` (`>`), not `SESSION_TTL`.
     #[test]
     fn accept_and_fingerprint_failure_budgets_expire_independently() {

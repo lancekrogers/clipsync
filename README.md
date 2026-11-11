@@ -76,9 +76,18 @@ to keep the character preview where a terminal reports graphics it cannot show.
 
 The desktop uses native macOS window controls with a blue/teal interface. Both
 clients support setup inspection, user-service controls, pause/resume and device
-authorization. Adding a device uses a temporary LAN enrollment window and full
-fingerprint comparison on **both** computers; it needs no Tailscale or SSH session.
-Discovery alone never authorizes a device.
+pairing. To pair, choose **Allow a new device** on one computer and type the
+six-digit code it shows on the other; it needs no Tailscale or SSH session. Each
+code works once, and neither computer saves anything until the code is verified.
+Discovery alone never authorizes a device. See
+[pairing two computers](docs/COMPANION.md#pair-two-computers) and
+[what a stranger on the same network can and cannot do](docs/SECURITY.md#pairing-a-new-device).
+
+<p align="center">
+  <img src="docs/assets/companion-tui-pairing.gif" width="960" alt="Two ClipSync terminal companions side by side: Studio Mac shows a six-digit pairing code; Travel laptop finds it nearby, types the code, and both list each other under Authorized devices">
+</p>
+
+*Pairing two isolated fixtures in `clipsync tui`. Re-record with `just demo-tui-pairing` (macOS).*
 
 To build an installable macOS app or Linux desktop package from this checkout,
 use Rust 1.95 or newer and `just`:

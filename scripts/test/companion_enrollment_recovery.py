@@ -1,16 +1,19 @@
-"""GUI and TUI rejection of enrollment before any trust write.
+"""Pairing by code in the real TUI (and native GUI when present), with every
+refusal checked before any trust write.
 
-Root already started fixture/app A (CLIPSYNC_UI_SESSION, inspection on 18762).
-This process starts peer B only: a private macOS pasteboard, or the disposable
-Linux guard. B's listener is opened through control. Every dial, cancel, and
-address entry on A is a real GUI event or TUI keypress. No confirm, discovery,
-clipboard, or service action.
+A is the joining computer; peer B is a second isolated fixture that allows a
+device through its own control socket, as its companion would. With
+CLIPSYNC_UI_SESSION set (fixture/app A started by companion-macos.py or
+companion-linux.sh, inspection on 18762) the GUI half runs too. Without it this
+harness starts fixture A itself and drives only the TUI, so it runs on a
+developer Mac: private pasteboards, temporary stores, loopback, no GUI.
+
+Settings is never opened. No discovery, clipboard or service action.
 """
 import fcntl
 import json
 import os
 import pty
-import re
 import select
 import signal
 import socket
@@ -24,37 +27,47 @@ from pathlib import Path
 
 import pyte
 from control_client import request as control
-from inspection_client import Inspection
 
-FULL = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 root = Path(__file__).resolve().parents[2]
 out = Path(sys.argv[1])
 out.mkdir(parents=True, exist_ok=True)
-a_session = json.loads(Path(os.environ["CLIPSYNC_UI_SESSION"]).read_text())
-if sys.platform == "darwin":
-    assert str(a_session.get("pasteboard", "")).startswith("org.clipsync.test.")
-    b_env = os.environ | {"CLIPSYNC_TEST_PASTEBOARD": "org.clipsync.test." + str(uuid.uuid4())}
-elif sys.platform.startswith("linux"):
-    assert os.environ.get("CLIPSYNC_DISPOSABLE_DESKTOP") == "1"
-    b_env = os.environ.copy()
-else:
-    raise SystemExit("Unsupported platform")
-b_env.pop("EGUI_INSPECTION", None)
-b_env.pop("CLIPSYNC_UI_SESSION", None)
+target = Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
+binary = target / "debug" / "clipsync"
+fixture_bin = target / "debug" / "examples" / "companion_fixture"
+gui = bool(os.environ.get("CLIPSYNC_UI_SESSION"))
 
-binary = root / "target" / "debug" / "clipsync"
-fixture_bin = root / "target" / "debug" / "examples" / "companion_fixture"
-peer_log = out.joinpath("peer-fixture.log").open("w")
-b_proc = subprocess.Popen(
-    [str(fixture_bin)], env=b_env, stdout=subprocess.PIPE, stderr=peer_log, text=True,
-)
+base_env = os.environ.copy()
+for name in ("EGUI_INSPECTION", "CLIPSYNC_UI_SESSION", "CLIPSYNC_PEER_FIXTURE"):
+    base_env.pop(name, None)
+if sys.platform.startswith("linux"):
+    assert os.environ.get("CLIPSYNC_DISPOSABLE_DESKTOP") == "1"
+elif sys.platform != "darwin":
+    raise SystemExit("Unsupported platform")
+
+processes = []
+logs = []
+
+
+def start_fixture(name):
+    env = base_env | {"CLIPSYNC_FIXTURE_NAME": name}
+    if sys.platform == "darwin":
+        env["CLIPSYNC_TEST_PASTEBOARD"] = "org.clipsync.test." + str(uuid.uuid4())
+    log = out.joinpath(name.lower().replace(" ", "-") + ".log").open("w")
+    logs.append(log)
+    proc = subprocess.Popen([str(fixture_bin)], env=env, stdout=subprocess.PIPE, stderr=log, text=True)
+    processes.append(proc)
+    if not select.select([proc.stdout], [], [], 15)[0]:
+        raise AssertionError(f"{name} fixture did not start; see {log.name}")
+    return json.loads(proc.stdout.readline())
+
+
 ui = tui = None
 master = slave = None
 raw = bytearray()
-screen = pyte.Screen(100, 30)
+screen = pyte.Screen(110, 44)
 stream = pyte.Stream(screen)
 before = None
-b_session = None
+a_session = b_session = None
 recorded = {}
 
 
@@ -62,7 +75,7 @@ def enroll(session):
     return control(session, {"EnrollmentInspect": {"session_id": None}})["enrollment"]
 
 
-def auth_state(session):
+def pins(session):
     path = Path(session["config"]).parent / "authorized_devices"
     if not path.exists():
         return None
@@ -70,43 +83,10 @@ def auth_state(session):
 
 
 def trusted(session):
-    rows = control(session, "TrustedDevices")["trusted_devices"]
-    return sorted((row.get("fingerprint"), row.get("comment")) for row in rows)
+    return sorted(row["fingerprint"] for row in control(session, "TrustedDevices")["trusted_devices"])
 
 
-def ids(session):
-    return {item["session_id"] for item in enroll(session)["sessions"]}
-
-
-def by_id(session, session_id):
-    for item in enroll(session)["sessions"]:
-        if item["session_id"] == session_id:
-            return item
-    raise AssertionError("missing session " + str(session_id))
-
-
-def full(value, label):
-    assert isinstance(value, str) and FULL.fullmatch(value), label + " " + repr(value)
-    return value
-
-
-def released_loopback():
-    bound = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    bound.bind(("127.0.0.1", 0))
-    port = bound.getsockname()[1]
-    bound.close()
-    probe = socket.socket()
-    probe.settimeout(0.2)
-    try:
-        refused = probe.connect_ex(("127.0.0.1", port))
-    finally:
-        probe.close()
-    if refused == 0:
-        raise AssertionError(f"127.0.0.1:{port} accepted a connection")
-    return f"127.0.0.1:{port}"
-
-
-def until(predicate, message, seconds=12):
+def until(predicate, message, seconds=15):
     deadline = time.monotonic() + seconds
     last = None
     while time.monotonic() < deadline:
@@ -117,25 +97,26 @@ def until(predicate, message, seconds=12):
     raise AssertionError(message + ": " + repr(last))
 
 
-def await_dial(addr, prior, ready):
-    def match():
-        found = [
-            item for item in enroll(a_session)["sessions"]
-            if item["session_id"] not in prior and item.get("dialed_addr") == addr
-        ]
-        return found[-1] if found and ready(found[-1]) else None
-    return until(match, "dial " + addr)
+def released_loopback():
+    bound = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    bound.bind(("127.0.0.1", 0))
+    port = bound.getsockname()[1]
+    bound.close()
+    return f"127.0.0.1:{port}"
 
 
-def peer_for(item, prior):
-    def match():
-        for other in enroll(b_session)["sessions"]:
-            if other["session_id"] in prior:
-                continue
-            if other.get("peer_fingerprint") == item["local_fingerprint"] and other.get("local_fingerprint") == item["peer_fingerprint"]:
-                return other
-        return None
-    return until(match, "peer fingerprint bind")
+def allow(session):
+    snap = control(session, "EnrollmentOpen")["enrollment"]
+    return snap["listen_addr"], snap["code"]["code"]
+
+
+def live_code(session):
+    snap = enroll(session)
+    return snap["code"]["code"] if snap.get("code") else None
+
+
+def wrong(code):
+    return f"{(int(code) + 1) % 1_000_000:06d}"
 
 
 def pump(duration=0.3):
@@ -158,233 +139,172 @@ def terminal():
     return "\n".join(line.rstrip() for line in screen.display).rstrip() + "\n"
 
 
-def focus_tui(marker, seconds=12, absent=()):
-    started = time.monotonic()
-    keys = 0
-    while time.monotonic() < started + seconds:
+def see(marker, seconds=15, absent=()):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
         pump(0.2)
         current = terminal()
         if marker in current and all(item not in current for item in absent):
             return current
-        if keys < 16 and time.monotonic() - started > 3:
-            os.write(master, b"[" if keys < 8 else b"]")
-            keys += 1
     raise AssertionError("TUI missing %r\n%s" % (marker, terminal()))
 
 
-def type_address(address):
+def keys(data, settle=0.25):
+    os.write(master, data)
+    pump(settle)
+
+
+def tui_pair(address, code):
     erase = termios.tcgetattr(slave)[6][termios.VERASE]
     if isinstance(erase, int):
         erase = bytes([erase])
-    os.write(master, b"m" + erase * 48 + address.encode() + b"\r")
-    deadline = time.monotonic() + 6
-    while time.monotonic() < deadline:
-        pump(0.2)
-        if "Esc cancel" not in terminal():
-            return
-    raise AssertionError(terminal())
+    keys(b"m")
+    see("Address of the other computer")
+    keys(erase * 48 + address.encode() + b"\r")
+    see("Code shown on")
+    keys(code.encode())
+    keys(b"\r", settle=0.5)
 
 
-def scroll_click(view, bounds):
-    x, y, right, bottom = bounds
-    if not (y >= 110 and bottom <= 790):
-        delta = -260 if bottom > 790 else 260
-        view.events([
-            {"PointerMoved": [(x + right) / 2, 500]},
-            {"MouseWheel": dict(unit="Point", delta=[0, delta], phase="Move", source="Wheel", modifiers=view.modifiers)},
-        ])
-        time.sleep(0.15)
-        return False
-    position = [(x + right) / 2, (y + bottom) / 2]
-    assert 0 <= position[1] < 800, position
-    view.click_at(position)
-    return True
+def unchanged(a_base, b_base):
+    assert pins(a_session) == a_base, "A authorized_devices changed"
+    assert pins(b_session) == b_base, "B authorized_devices changed"
 
 
-def set_address(view, address):
-    for _ in range(14):
-        field = None
-        for _, node in view.tree()[2][0]:
-            if node and node[0] == "textInput":
-                field = next((value["bounds"] for value in node if isinstance(value, dict) and "bounds" in value), None)
-                if field:
-                    break
-        if not field:
-            raise AssertionError("No address field: " + view.text())
-        if scroll_click(view, field):
-            break
-    else:
-        raise AssertionError("Address field stayed off screen")
-    select_all = dict(view.modifiers, command=True, mac_cmd=sys.platform == "darwin", ctrl=sys.platform != "darwin")
-    for pressed in (True, False):
-        view.events([{"Key": dict(key="A", physical_key=None, pressed=pressed, repeat=False, modifiers=select_all)}])
-    view.events([{"Text": address}])
-
-
-def click_cancel(view, fingerprint):
-    assert fingerprint in view.text()
-    for _ in range(40):
-        choices = []
-        for _, node in view.tree()[2][0]:
-            if node[0] == "button" and not node[3] & (1 << 9):
-                for value in node:
-                    if isinstance(value, dict) and value.get("label") == "Cancel connection":
-                        choices.append(value["bounds"])
-        # This scenario has one live attempt; earlier cancelled cards retain
-        # disabled buttons with the same label and peer fingerprint.
-        assert len(choices) <= 1, "More than one live cancellation target"
-        if choices and scroll_click(view, choices[0]):
-            return
-        time.sleep(0.15)
-    raise AssertionError("Cancel stayed off screen")
-
-
-def unchanged(a_base, b_base, a_trust, b_trust):
-    assert auth_state(a_session) == a_base, "A authorized_devices changed"
-    assert auth_state(b_session) == b_base, "B authorized_devices changed"
-    assert trusted(a_session) == a_trust and trusted(b_session) == b_trust
-
-
-def no_consent(item):
-    assert item["local_confirmed"] is False and item["peer_confirmed"] is False
-    assert item["state"] != "Succeeded"
-
-
-def save_pair(name):
-    ui.screenshot(out / f"{name}.png")
+def save(name):
     out.joinpath(f"{name}.txt").write_text(terminal())
+    if ui:
+        ui.screenshot(out / f"{name}.png")
 
 
-def show_failure(item, name, floor):
-    error = item["error"]
-    assert error and "\n" not in error
-    local = full(item["local_fingerprint"], "local")
-    assert not item.get("peer_fingerprint")
-    focus_tui(error)
-    ui.wait(lambda: ui.text().count("Connection could not be completed") > floor and error in ui.text() and local in ui.text(), "GUI failure", seconds=12)
-    assert "Connection could not be completed" in terminal() and local in terminal()
-    no_consent(by_id(a_session, item["session_id"]))
-    save_pair(name)
-    return error
+def set_field(view, index, text):
+    """Type into the index-th text field (0 = code, 1 = address)."""
+    view.type_into(index, text)
 
 
-def show_fingerprints(item, peer, floor):
-    local, remote = full(item["local_fingerprint"], "local"), full(item["peer_fingerprint"], "peer")
-    assert local != remote
-    assert peer["local_fingerprint"] == remote and peer["peer_fingerprint"] == local
-    no_consent(item)
-    no_consent(peer)
-    visible = focus_tui(remote, absent=("Connection cancelled", "Connection could not be completed"))
-    ui.wait(lambda: ui.text().count("Fingerprints match") > floor and local in ui.text() and remote in ui.text(), "GUI fingerprints", seconds=12)
-    assert local in visible and remote in visible and "fingerprints match, confirm" in visible
-    return local, remote
+def gui_pair(address, code):
+    set_field(ui, 0, code)
+    set_field(ui, 1, address)
+    ui.wait(lambda: ui.enabled("Pair with address"), "GUI pair ready", seconds=12)
+    ui.click("Pair with address")
 
 
 try:
-    if not select.select([b_proc.stdout], [], [], 12)[0]:
-        raise AssertionError("Peer fixture did not start; see peer-fixture.log")
-    b_session = json.loads(b_proc.stdout.readline())
-    a_base, b_base = auth_state(a_session), auth_state(b_session)
-    a_trust, b_trust = trusted(a_session), trusted(b_session)
-    opened = control(b_session, "EnrollmentOpen")["enrollment"]
-    listen = opened.get("listen_addr") or ""
-    assert listen.startswith("127.0.0.1:"), listen
-    ui = Inspection(int(os.environ.get("CLIPSYNC_UI_PORT", "18762")))
+    if gui:
+        a_session = json.loads(Path(os.environ["CLIPSYNC_UI_SESSION"]).read_text())
+    else:
+        a_session = start_fixture("Isolated test Mac")
+    b_session = start_fixture("Peer test Mac")
+    for session in (a_session, b_session):
+        features = control(session, "Status")["features"]
+        if "enrollment_code" not in features:
+            raise SystemExit("These binaries predate code pairing; rebuild before running.")
+    a_base, b_base = pins(a_session), pins(b_session)
+    if gui:
+        from inspection_client import Inspection
+        ui = Inspection(int(os.environ.get("CLIPSYNC_UI_PORT", "18762")))
+        ui.click("Devices")
+        ui.wait(lambda: ui.enabled("Allow a new device"), "pairing actions ready", seconds=12)
+
     master, slave = pty.openpty()
     before = termios.tcgetattr(slave)
-    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 44, 110, 0, 0))
     tui = subprocess.Popen(
         [str(binary), "--config", a_session["config"], "tui"],
         stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
-        env=os.environ | {"TERM": "xterm-256color", "NO_COLOR": "1"},
+        env=base_env | {"TERM": "xterm-256color", "NO_COLOR": "1", "CLIPSYNC_TUI_GRAPHICS": "off"},
     )
-    until(lambda: "Ready to sync" in terminal() or "Your clipboard, everywhere" in terminal(), "TUI ready")
-    os.write(master, b"2")
-    pump(0.5)
-    os.write(master, b"e")
-    ui.click("Devices")
-    ui.wait(lambda: ui.enabled("Allow a new device"), "enrollment action ready", seconds=12)
-    ui.click("Allow a new device")
-    ui.wait(lambda: "Ready for a new device" in ui.text(), "enrollment open", seconds=12)
-    focus_tui("Allowing connections")
+    see("Your clipboard, everywhere")
+    keys(b"2")
+    see("Authorized devices")
+    see("To pair, press e on one computer")
 
-    closed_tui = released_loopback()
-    peer_before = ids(b_session)
-    prior = ids(a_session)
-    fail_cards = ui.text().count("Connection could not be completed")
-    type_address(closed_tui)
-    failed = await_dial(closed_tui, prior, lambda item: item["state"] == "Failed" and item.get("error"))
-    assert ids(b_session) == peer_before, "unreachable dial reached the peer"
-    recorded["tui_unreachable_error"] = show_failure(failed, "unreachable-tui", fail_cards)
-    unchanged(a_base, b_base, a_trust, b_trust)
+    # Nothing is listening at a released port.
+    closed = released_loopback()
+    tui_pair(closed, "123456")
+    see("Nothing is accepting pairing at that address")
+    unchanged(a_base, b_base)
+    save("not-listening-tui")
+    recorded["tui_not_listening"] = closed
 
-    prior = ids(a_session)
-    peer_before = ids(b_session)
-    confirm_cards = ui.text().count("Fingerprints match")
-    type_address(listen)
-    pending = await_dial(listen, prior, lambda item: item["state"] == "AwaitingLocalConfirm" and item.get("peer_fingerprint"))
-    bound = peer_for(pending, peer_before)
-    local_fp, peer_fp = show_fingerprints(pending, bound, confirm_cards)
-    os.write(master, b"c")
-    until(lambda: by_id(a_session, pending["session_id"])["state"] == "Cancelled", "TUI cancel")
-    cancelled = by_id(a_session, pending["session_id"])
-    no_consent(cancelled)
-    focus_tui("Connection cancelled")
-    ui.wait(lambda: "Connection cancelled" in ui.text() and peer_fp in ui.text(), "GUI sees TUI cancel", seconds=12)
-    no_consent(by_id(b_session, bound["session_id"]))
-    save_pair("cancel-tui")
-    unchanged(a_base, b_base, a_trust, b_trust)
-    recorded["tui_cancel"] = {"local": local_fp, "peer": peer_fp, "state": cancelled["state"]}
+    # A wrong code is refused on both computers and the allowing side moves on.
+    listen, code = allow(b_session)
+    assert listen.startswith("127.0.0.1:"), listen
+    tui_pair(listen, wrong(code))
+    see("That code did not match")
+    until(lambda: enroll(b_session)["outcome"] and enroll(b_session)["outcome"]["status"] == "wrong_code", "B saw the wrong code")
+    fresh = until(lambda: live_code(b_session) not in (None, code) and live_code(b_session), "B shows a new code")
+    unchanged(a_base, b_base)
+    save("wrong-code-tui")
+    recorded["tui_wrong_code"] = {"attempt": "refused", "new_code_shown": True}
 
-    closed_gui = released_loopback()
-    peer_before = ids(b_session)
-    prior = ids(a_session)
-    fail_cards = ui.text().count("Connection could not be completed")
-    set_address(ui, closed_gui)
-    ui.wait(lambda: ui.enabled("Connect to address"), "GUI dial ready")
-    ui.click("Connect to address")
-    failed = await_dial(closed_gui, prior, lambda item: item["state"] == "Failed" and item.get("error"))
-    assert ids(b_session) == peer_before, "unreachable GUI dial reached the peer"
-    recorded["gui_unreachable_error"] = show_failure(failed, "unreachable-gui", fail_cards)
-    unchanged(a_base, b_base, a_trust, b_trust)
+    if ui:
+        closed_gui = released_loopback()
+        gui_pair(closed_gui, "123456")
+        ui.wait(lambda: "Nothing is accepting pairing at that address" in ui.text(), "GUI not listening", seconds=15)
+        unchanged(a_base, b_base)
+        save("not-listening-gui")
+        gui_pair(listen, wrong(fresh))
+        ui.wait(lambda: "That code did not match" in ui.text(), "GUI wrong code", seconds=15)
+        fresh = until(lambda: live_code(b_session) not in (None, fresh) and live_code(b_session), "B renews after the GUI attempt")
+        unchanged(a_base, b_base)
+        save("wrong-code-gui")
+        recorded["gui_rejections"] = ["not_listening", "wrong_code"]
 
-    prior = ids(a_session)
-    peer_before = ids(b_session)
-    confirm_cards = ui.text().count("Fingerprints match")
-    set_address(ui, listen)
-    ui.wait(lambda: ui.enabled("Connect to address"), "GUI retry ready")
-    ui.click("Connect to address")
-    pending = await_dial(listen, prior, lambda item: item["state"] == "AwaitingLocalConfirm" and item.get("peer_fingerprint"))
-    bound = peer_for(pending, peer_before)
-    local_fp, peer_fp = show_fingerprints(pending, bound, confirm_cards)
-    click_cancel(ui, peer_fp)
-    until(lambda: by_id(a_session, pending["session_id"])["state"] == "Cancelled", "GUI cancel")
-    cancelled = by_id(a_session, pending["session_id"])
-    no_consent(cancelled)
-    focus_tui("Connection cancelled")
-    ui.wait(lambda: "Connection cancelled" in ui.text() and peer_fp in ui.text(), "GUI cancel visible", seconds=12)
-    no_consent(by_id(b_session, bound["session_id"]))
-    save_pair("cancel-gui")
-    unchanged(a_base, b_base, a_trust, b_trust)
-    recorded["gui_cancel"] = {"local": local_fp, "peer": peer_fp, "state": cancelled["state"]}
+    # While typing a code, digits stay in the field and q does not quit.
+    keys(b"m")
+    see("Address of the other computer")
+    erase = termios.tcgetattr(slave)[6][termios.VERASE]
+    erase = bytes([erase]) if isinstance(erase, int) else erase
+    keys(erase * 48 + listen.encode() + b"\r")
+    see("Code shown on")
+    keys(b"1q34")
+    screen_now = see("1 3 4", absent=("Browse clipboard history",))
+    assert "Code shown on" in screen_now and "type the code" in screen_now, screen_now
+    assert tui.poll() is None, "q quit while typing a code"
+    keys(b"\x1b")
+    see("To pair, press e on one computer", absent=("Code shown on",))
+    unchanged(a_base, b_base)
 
-    os.write(master, b"q")
+    # The right code pairs, and both files gain exactly the other's key.
+    tui_pair(listen, live_code(b_session))
+    see("Paired. Both computers saved the pairing.")
+    see("Peer test Mac")
+    until(lambda: len(trusted(a_session)) == 1 and len(trusted(b_session)) == 1, "both saved")
+    a_key = control(a_session, "TrustedDevices")["trusted_devices"]
+    b_key = control(b_session, "TrustedDevices")["trusted_devices"]
+    assert a_key[0]["comment"].startswith("Peer test Mac SHA256:"), a_key
+    assert b_key[0]["comment"].startswith("Isolated test Mac SHA256:"), b_key
+    assert a_key[0]["fingerprint"] in terminal()
+    for session in (a_session, b_session):
+        path = Path(session["config"]).parent / "authorized_devices"
+        assert path.read_text().count("ssh-ed25519 ") == 1
+        assert path.stat().st_mode & 0o077 == 0
+    assert not enroll(b_session)["listening"], "B keeps allowing after pairing"
+    save("paired-tui")
+    recorded["paired"] = {"a_trusts": a_key[0]["comment"].split()[0:3], "b_trusts": b_key[0]["comment"].split()[0:3]}
+
+    keys(b"q", settle=0.6)
     assert tui.wait(timeout=5) == 0
     pump(0.6)
     assert termios.tcgetattr(slave) == before, "termios not restored"
     assert b"\x1b[?1049l" in raw, "alternate screen not left"
     assert b"\x1b[?25h" in raw, "cursor not restored"
+
+    for session in (a_session, b_session):
+        for row in control(session, "TrustedDevices")["trusted_devices"]:
+            control(session, {"EnrollmentRevoke": {"fingerprint": row["fingerprint"]}})
     result = {
         "passed": [
-            "TUI dial of a released loopback port fails with the inspect error and writes no trust",
-            "TUI cancel before confirm shows both full fingerprints and writes no trust",
-            "GUI dial of a distinct released loopback port fails in both clients and writes no trust",
-            "GUI cancel before confirm shows both full fingerprints and writes no trust",
-            "neither side confirms; both authorized_devices files stay byte-identical",
+            "TUI pairing to a released loopback port says nothing is accepting pairing and writes no trust",
+            "TUI wrong code is refused on both computers, the allowing side shows a new code, no trust written",
+            *(["GUI not-listening and wrong-code refusals write no trust"] if ui else []),
+            "digits and q stay in the code field while typing; Esc returns to Devices",
+            "TUI right code pairs: each authorized_devices gains exactly the other key, mode 0600",
+            "allowing window closes after pairing",
             "terminal modes, cursor, and alternate screen restored",
         ],
-        "closed_ports": [closed_tui, closed_gui],
-        "peer_listen": listen,
+        "gui": bool(ui),
         **recorded,
     }
     out.joinpath("results.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -397,22 +317,25 @@ finally:
         except subprocess.TimeoutExpired:
             tui.kill()
             tui.wait()
-    if b_proc.poll() is None:
-        b_proc.send_signal(signal.SIGINT)
-        try:
-            b_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            b_proc.kill()
-            b_proc.wait()
-    if a_session:
-        try:
-            control(a_session, {"EnrollmentCancel": {"session_id": None}})
-        except Exception:
-            pass
+    for session in (a_session, b_session):
+        if session:
+            try:
+                control(session, {"EnrollmentCancel": {"session_id": None}})
+            except Exception:
+                pass
+    for proc in processes:
+        if proc.poll() is None:
+            proc.send_signal(signal.SIGINT)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
     if ui:
         ui.socket.close()
     if master is not None:
         os.close(master)
     if slave is not None:
         os.close(slave)
-    peer_log.close()
+    for log in logs:
+        log.close()

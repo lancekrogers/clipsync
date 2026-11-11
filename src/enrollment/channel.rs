@@ -1,11 +1,14 @@
 //! Length-prefixed enrollment frames over TLS (split read/write halves).
 use super::{
     protocol::{EnrollMessage, IO_TIMEOUT_SECS, MAX_FRAME_BYTES, PARTIAL_FRAME_TIMEOUT_SECS},
-    tls::{self, ENROLL_ALPN},
+    tls::{self, EnrollVersion, EXPORTER_LABEL},
 };
-use crate::auth::{Authenticator, PublicKey};
+use crate::{
+    auth::{Authenticator, PublicKey},
+    control::PairingFailure,
+};
 use anyhow::{bail, Context, Result};
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf},
     net::TcpStream,
@@ -19,6 +22,9 @@ pub struct EnrollConn {
     stream: TlsTcp,
     pub peer_key: PublicKey,
     pub peer_addr: SocketAddr,
+    pub version: EnrollVersion,
+    /// TLS exporter output shared by exactly the two ends of this connection.
+    pub binding: [u8; 32],
 }
 
 pub struct EnrollReader {
@@ -35,11 +41,10 @@ impl EnrollConn {
     }
 
     pub async fn read_msg(&mut self) -> Result<EnrollMessage> {
-        // Handshake path: bound the whole exchange (no long human idle here).
         read_frame_handshake(&mut self.stream).await
     }
 
-    /// Split into independent halves so confirm/cancel never share a duplex Mutex
+    /// Split into independent halves so persist/cancel never share a duplex Mutex
     /// with a blocking reader.
     pub fn into_split(self) -> (EnrollReader, EnrollWriter, PublicKey, SocketAddr) {
         let (read, write) = tokio::io::split(self.stream);
@@ -49,6 +54,24 @@ impl EnrollConn {
             self.peer_key,
             self.peer_addr,
         )
+    }
+
+    /// Best-effort refusal: send one frame, then close. The dialer writes its
+    /// first frame without waiting, so read (and discard) it before closing;
+    /// closing over unread data would reset the connection and lose the reason.
+    pub async fn refuse(mut self, code: &str, message: &str) {
+        let _ = self
+            .write_msg(&EnrollMessage::Error {
+                code: code.into(),
+                message: message.into(),
+            })
+            .await;
+        let mut sink = [0u8; 1024];
+        let _ = timeout(Duration::from_secs(1), async {
+            while matches!(self.stream.read(&mut sink).await, Ok(n) if n > 0) {}
+        })
+        .await;
+        let _ = timeout(Duration::from_millis(500), self.stream.shutdown()).await;
     }
 }
 
@@ -80,16 +103,14 @@ pub(crate) async fn read_frame_handshake<R: AsyncReadExt + Unpin>(
         .context("Enrollment read timed out")?
 }
 
-/// Established session reads: wait indefinitely for the next frame start so a
-/// human can compare fingerprints for the full enrollment TTL. Once the length
-/// prefix begins arriving, bound the remainder (partial-frame stall).
+/// Established session reads: wait for the next frame start until the session
+/// ends (expiry or shutdown aborts the reader task). Once the length prefix
+/// begins arriving, bound the remainder (partial-frame stall).
 pub(crate) async fn read_frame_session<R: AsyncReadExt + Unpin>(
     read: &mut R,
 ) -> Result<EnrollMessage> {
     let mut len_buf = [0u8; 4];
-    // First byte: idle wait (session expiry / Shutdown aborts the reader task).
     read.read_exact(&mut len_buf[..1]).await?;
-    // Remainder of length + body: short stall bound.
     timeout(Duration::from_secs(PARTIAL_FRAME_TIMEOUT_SECS), async {
         read.read_exact(&mut len_buf[1..]).await?;
         let length = u32::from_be_bytes(len_buf) as usize;
@@ -114,14 +135,41 @@ async fn read_frame_body<R: AsyncReadExt + Unpin>(read: &mut R) -> Result<Enroll
     Ok(serde_json::from_slice(&data)?)
 }
 
-fn peer_key(stream: &TlsTcp) -> Result<PublicKey> {
-    let (_, session) = stream.get_ref();
-    tls::peer_key_from_common(session)
+fn established(stream: TlsTcp, peer_addr: SocketAddr) -> Result<EnrollConn> {
+    let (peer_key, version) = tls::peer_key_from_common(stream.get_ref().1)?;
+    let binding = match &stream {
+        TlsStream::Client(s) => {
+            s.get_ref()
+                .1
+                .export_keying_material([0u8; 32], EXPORTER_LABEL, None)
+        }
+        TlsStream::Server(s) => {
+            s.get_ref()
+                .1
+                .export_keying_material([0u8; 32], EXPORTER_LABEL, None)
+        }
+    }
+    .map_err(|_| anyhow::anyhow!("Enrollment channel binding unavailable"))?;
+    Ok(EnrollConn {
+        stream,
+        peer_key,
+        peer_addr,
+        version,
+        binding,
+    })
 }
 
 pub async fn accept(tcp: TcpStream, auth: Arc<dyn Authenticator>) -> Result<EnrollConn> {
     let peer_addr = tcp.peer_addr()?;
     let (_, server) = tls::enroll_configs(auth.as_ref()).await?;
+    accept_with(tcp, server, peer_addr).await
+}
+
+pub(crate) async fn accept_with(
+    tcp: TcpStream,
+    server: Arc<rustls::ServerConfig>,
+    peer_addr: SocketAddr,
+) -> Result<EnrollConn> {
     let stream = TlsStream::Server(
         timeout(
             Duration::from_secs(IO_TIMEOUT_SECS),
@@ -130,38 +178,78 @@ pub async fn accept(tcp: TcpStream, auth: Arc<dyn Authenticator>) -> Result<Enro
         .await
         .context("Enrollment TLS accept timed out")??,
     );
-    let peer_key = peer_key(&stream)?;
-    Ok(EnrollConn {
-        stream,
-        peer_key,
-        peer_addr,
-    })
+    established(stream, peer_addr)
 }
 
-pub async fn dial(addr: SocketAddr, auth: Arc<dyn Authenticator>) -> Result<EnrollConn> {
-    let tcp = timeout(
+/// Dial and classify why a pairing address did not answer as ClipSync pairing.
+pub async fn dial(
+    addr: SocketAddr,
+    auth: Arc<dyn Authenticator>,
+) -> Result<EnrollConn, PairingFailure> {
+    let (client, _) = tls::enroll_configs(auth.as_ref())
+        .await
+        .map_err(|_| PairingFailure::Protocol)?;
+    dial_with(addr, client).await
+}
+
+pub(crate) async fn dial_with(
+    addr: SocketAddr,
+    client: Arc<rustls::ClientConfig>,
+) -> Result<EnrollConn, PairingFailure> {
+    let tcp = match timeout(
         Duration::from_secs(IO_TIMEOUT_SECS),
         TcpStream::connect(addr),
     )
     .await
-    .context("Enrollment dial timed out")??;
-    let peer_addr = tcp.peer_addr()?;
-    let (client, _) = tls::enroll_configs(auth.as_ref()).await?;
-    let stream = TlsStream::Client(
-        timeout(
-            Duration::from_secs(IO_TIMEOUT_SECS),
-            TlsConnector::from(client).connect("clipsync.local".try_into()?, tcp),
-        )
-        .await
-        .context("Enrollment TLS connect timed out")??,
-    );
-    let peer_key = peer_key(&stream)?;
-    let _ = ENROLL_ALPN;
-    Ok(EnrollConn {
-        stream,
-        peer_key,
-        peer_addr,
+    {
+        Ok(Ok(tcp)) => tcp,
+        Ok(Err(e)) if e.kind() == io::ErrorKind::ConnectionRefused => {
+            return Err(PairingFailure::NotListening)
+        }
+        Ok(Err(e)) => {
+            tracing::debug!("Enrollment dial failed: {e}");
+            return Err(PairingFailure::Unreachable);
+        }
+        Err(_) => return Err(PairingFailure::Unreachable),
+    };
+    let peer_addr = tcp.peer_addr().map_err(|_| PairingFailure::Unreachable)?;
+    let name = "clipsync.local"
+        .try_into()
+        .map_err(|_| PairingFailure::Protocol)?;
+    let stream = match timeout(
+        Duration::from_secs(IO_TIMEOUT_SECS),
+        TlsConnector::from(client).connect(name, tcp),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => TlsStream::Client(stream),
+        Ok(Err(e)) => {
+            tracing::debug!("Enrollment TLS connect failed: {e}");
+            return Err(handshake_failure(&e));
+        }
+        Err(_) => return Err(PairingFailure::NotPairing),
+    };
+    established(stream, peer_addr).map_err(|e| {
+        tracing::debug!("Enrollment negotiation failed: {e}");
+        PairingFailure::NotPairing
     })
+}
+
+/// A TLS-level refusal (alert, garbage) means the address is not ClipSync
+/// pairing. A connection closed before any reply means a pairing listener
+/// dropped it: at capacity, rate limited, or closing its window.
+fn handshake_failure(error: &io::Error) -> PairingFailure {
+    let tls = error
+        .get_ref()
+        .is_some_and(|inner| inner.downcast_ref::<rustls::Error>().is_some());
+    match error.kind() {
+        _ if tls => PairingFailure::NotPairing,
+        io::ErrorKind::UnexpectedEof
+        | io::ErrorKind::ConnectionReset
+        | io::ErrorKind::ConnectionAborted
+        | io::ErrorKind::BrokenPipe => PairingFailure::Busy,
+        _ => PairingFailure::NotPairing,
+    }
 }
 
 #[cfg(test)]

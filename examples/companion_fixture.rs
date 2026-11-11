@@ -118,7 +118,8 @@ async fn main() -> Result<()> {
     let mut config = Config {
         node_id: tls::node_id(&key.public_key()),
         listen_addr: "127.0.0.1:0".into(),
-        advertise_name: "Isolated test Mac".into(),
+        advertise_name: std::env::var("CLIPSYNC_FIXTURE_NAME")
+            .unwrap_or_else(|_| "Isolated test Mac".into()),
         auth: clipsync::config::AuthConfig {
             ssh_key: root.join("identity"),
             authorized_keys: root.join("authorized_devices"),
@@ -243,7 +244,33 @@ async fn main() -> Result<()> {
         Arc::new(config.clone()),
         auth,
     )?);
-    enrollment.set_listen_port_override(0).await;
+    // Recordings pin the pairing port and list the other fixture as nearby,
+    // since loopback fixtures never use mDNS.
+    let enroll_port = std::env::var("CLIPSYNC_FIXTURE_ENROLL_PORT")
+        .ok()
+        .and_then(|port| port.parse().ok())
+        .unwrap_or(0);
+    enrollment.set_listen_port_override(enroll_port).await;
+    if let Some((name, address)) = std::env::var("CLIPSYNC_FIXTURE_NEARBY")
+        .ok()
+        .as_deref()
+        .and_then(|value| value.split_once('@'))
+    {
+        let address: std::net::SocketAddr = address.parse()?;
+        ensure!(
+            address.ip().is_loopback(),
+            "Fixture nearby devices are loopback only"
+        );
+        enrollment
+            .inject_candidate(control::EnrollmentCandidateView {
+                display_name: name.into(),
+                address: address.to_string(),
+                advertised_fingerprint: None,
+                advertised_node_id: None,
+                source: "fixture".into(),
+            })
+            .await;
+    }
     let target = control::EnrollmentTarget::new(engine.clone(), enrollment);
     println!(
         "{}",

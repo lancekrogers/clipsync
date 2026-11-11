@@ -62,6 +62,39 @@ TUI (same daemon/config):
 ~/.local/bin/clipsync tui
 ```
 
+## Pair two computers
+
+1. On one computer, open **Devices** and choose **Allow a new device** (TUI:
+   `2`, then `e`). A six-digit code appears with a countdown.
+2. On the other computer, open **Devices** and pick the first computer under
+   **Nearby** (TUI: `f`, select it, `Enter`), or enter the address shown under
+   the code (TUI: `m`). Then type the code.
+3. Both computers save the pairing and list each other under **Authorized
+   devices** with the device name and key fingerprint.
+
+Each code works once. After a try, or after two minutes, a new code appears.
+One window accepts five tries and closes after ten minutes or once a device has
+paired. Neither computer saves anything until the code is verified, so a
+mistyped code never pairs anything. While a code is being typed in
+the TUI, digits stay in the field and `q` does not quit; `Esc` cancels.
+
+When pairing fails, the computer that typed the code says why:
+
+| Message | What to do |
+|---|---|
+| Nothing is accepting pairing at that address | Choose **Allow a new device** on the other computer. If it is already showing a code, a firewall may be blocking the pairing port (the sync port + 1, 8485 by default); ClipSync does not change firewall rules. |
+| The other computer has no pairing code open | Its window used its last code. Choose **Allow a new device** there again. |
+| That code did not match | The code was wrong, expired or already used. Type the new code now on the other screen. |
+| The other computer runs an older ClipSync | Update ClipSync there. Older versions compared fingerprints and cannot pair by code. |
+| Saved on this computer, but the other computer did not confirm | Remove the device under Authorized devices and pair again. |
+
+Both computers need this version. A companion or service without code pairing
+shows an update message instead of the pairing controls. Devices paired
+before this change keep syncing; their authorization is unchanged.
+
+**Find nearby** listens for mDNS announcements on the local network for two
+minutes; a computer is announced only while it is allowing a device.
+
 ## Upgrade
 
 - Packaging **refuses to overwrite** an existing output directory/archive unless

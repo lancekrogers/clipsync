@@ -3,6 +3,7 @@ use super::{
     app::{Companion, SetupIntent, SetupState},
     client::{Intent, View},
     model::{Connection, Route},
+    terminal_devices::Typing,
     terminal_history::Confirm,
     terminal_theme::{Depth, Theme, Tone},
 };
@@ -378,13 +379,37 @@ fn notices<'a>(app: &Companion, theme: &Theme, confirm: &Confirm) -> Vec<Line<'a
     lines
 }
 
-fn hints(app: &Companion, search: bool, confirm: &Confirm) -> Vec<(&'static str, &'static str)> {
+fn hints(
+    app: &Companion,
+    search: bool,
+    confirm: &Confirm,
+    typing: Option<Typing>,
+) -> Vec<(&'static str, &'static str)> {
     let pause = match &app.client {
         Some(client) if client.view.connection == Connection::Paused => ("p", "resume"),
         _ => ("p", "pause"),
     };
     if let Some(removal) = confirm.pending() {
         return vec![("y", removal.verb()), ("other keys", "cancel")];
+    }
+    match typing {
+        Some(Typing::Code) => {
+            return vec![
+                ("0-9", "type the code"),
+                ("Enter", "pair"),
+                ("Esc", "cancel"),
+                ("Ctrl-C", "quit"),
+            ]
+        }
+        Some(Typing::Address) => {
+            return vec![
+                ("type", "address:port"),
+                ("Enter", "next"),
+                ("Esc", "cancel"),
+                ("Ctrl-C", "quit"),
+            ]
+        }
+        None => {}
     }
     if search {
         return vec![
@@ -449,7 +474,8 @@ fn render(
     let area = frame.area();
     let mut footer = notices(app, theme, confirm);
     let notice_rows = rows(&footer, area.width).min(3);
-    footer.push(theme.hints(&hints(app, search, confirm), area.width));
+    let typing = devices.typing().filter(|_| app.route == Route::Devices);
+    footer.push(theme.hints(&hints(app, search, confirm, typing), area.width));
     let sections = Layout::vertical([
         Constraint::Length(if area.height >= 24 { 3 } else { 2 }),
         Constraint::Min(4),

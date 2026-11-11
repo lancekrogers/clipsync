@@ -109,6 +109,7 @@ async fn devices_poll_while_enrollment_closed_stays_quiet() {
     let mut client = Controller::connect(config).unwrap();
     wait(&mut client, |c| c.view.can_act()).await;
     assert!(client.view.enrollment_supported);
+    assert!(client.view.pairing_supported);
     client.dispatch(Intent::Navigate(Route::Devices));
     wait(&mut client, |c| c.view.enrollment.is_some()).await;
     assert!(!client.view.enrollment.as_ref().unwrap().listening);
@@ -329,15 +330,24 @@ async fn a_new_pairing_attempt_selects_its_own_result_after_failure() {
     drop(reserved);
     let mut previous = None;
     for attempt in 1..=2 {
-        client.dispatch(Intent::DialEnrollment {
+        client.dispatch(Intent::PairingCode("123 456".into()));
+        client.dispatch(Intent::Pair {
             address: address.clone(),
             expected_fingerprint: None,
             expected_node_id: None,
         });
+        assert!(
+            client.view.pairing_code.is_empty(),
+            "a code is good for one attempt"
+        );
         wait(&mut client, |c| {
             !c.view.action_pending
                 && c.view.enrollment.as_ref().is_some_and(|s| {
-                    s.sessions.len() == attempt && s.sessions.iter().all(|s| s.state == "Failed")
+                    s.sessions.iter().filter(|s| s.role == "initiator").count() == attempt
+                        && s.sessions
+                            .iter()
+                            .filter(|s| s.role == "initiator")
+                            .all(|s| s.state == "Failed")
                 })
         })
         .await;

@@ -7,7 +7,7 @@ use crate::{
             ControlSnapshot, DaemonStatus, DiagnosticsReport, HistoryEntryDetail, HistoryPage,
             HistoryRemovalView,
         },
-        FEATURE_ENROLLMENT,
+        FEATURE_ENROLLMENT_CODE,
     },
     enrollment::EnrollmentManager,
     sync::{HistoryRemoval, SyncEngine, TrustAwareSyncEngine},
@@ -113,15 +113,15 @@ impl Target for EnrollmentTarget {
     }
     async fn control_snapshot(&self) -> Result<ControlSnapshot> {
         let mut snap = self.inner.control_snapshot().await?;
-        if !snap.features.iter().any(|f| f == FEATURE_ENROLLMENT) {
-            snap.features.push(FEATURE_ENROLLMENT.into());
+        if !snap.features.iter().any(|f| f == FEATURE_ENROLLMENT_CODE) {
+            snap.features.push(FEATURE_ENROLLMENT_CODE.into());
         }
         Ok(snap)
     }
     async fn set_pause(&self, paused: bool) -> Result<ControlSnapshot> {
         let mut snap = self.inner.set_pause(paused).await?;
-        if !snap.features.iter().any(|f| f == FEATURE_ENROLLMENT) {
-            snap.features.push(FEATURE_ENROLLMENT.into());
+        if !snap.features.iter().any(|f| f == FEATURE_ENROLLMENT_CODE) {
+            snap.features.push(FEATURE_ENROLLMENT_CODE.into());
         }
         Ok(snap)
     }

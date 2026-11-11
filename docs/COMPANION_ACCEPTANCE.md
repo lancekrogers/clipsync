@@ -41,14 +41,16 @@ test pasteboards.
 | Terminal | Shared routes, search, copy, pause, narrow terminal, NO_COLOR, terminal restoration |
 | Setup | Explicit/legacy/conflicting configurations, no-clobber identity creation, private permissions, repeat/interrupted setup, existing history key preservation |
 | Service | Per-user unit rendering, selected-config matching, startup preference, failure propagation and rollback with injected command hosts |
-| Authorization | Concurrent real CLI updates, immediate add/revoke visibility, malicious comment rejection, mutual full-fingerprint confirmation |
+| Authorization | Concurrent real CLI updates, immediate add/revoke visibility, malicious comment rejection, pairing by one-time code |
 | Packaging | Matching CLI/GUI, manifests and hashes, Linux desktop argument escaping, pair replacement rollback, explicit unsigned state, mocked notarization ordering |
 
-Enrollment uses a separate TLS 1.3 raw-public-key endpoint. Discovery is only a
-connection hint. Both users must confirm the full key fingerprints before trust
-is saved. The regressions cover refusal before confirmation, reflection and
-fingerprint mismatch, cancellation, bounded frames, fragmented concurrent I/O,
-expiry and acknowledgment of durable authorization.
+Pairing uses a separate TLS 1.3 raw-public-key endpoint. Discovery is only a
+connection hint. The joining computer must prove the one-time code the allowing
+computer shows (SPAKE2 plus key confirmation bound to the TLS session) before
+either saves trust. The regressions cover wrong, expired and already-used codes,
+a relay with its own keys, older peers in both directions, reflection, nearby
+fingerprint mismatch, concurrent attempts, bounded attempts per window,
+fragmented concurrent I/O and acknowledgment of durable authorization.
 
 ## Release gates still open
 
@@ -152,6 +154,31 @@ drives unreachable addresses and cancellation through both the real GUI and PTY,
 compares full fingerprints, checks both trust files remain byte-identical, and
 verifies terminal restoration. All network targets and clipboard data are isolated.
 Physical two-device and packaged lifecycle acceptance remain separate gates.
+
+## Code pairing (2026-11-11)
+
+Fingerprint comparison is replaced by a one-time code: the allowing computer
+shows six digits and the joining computer types them. Enrollment moves to ALPN
+`clipsync-enroll/2`; `clipsync-enroll/1` is negotiated only to answer "update".
+The control API replaces `EnrollmentDial`/`EnrollmentConfirm` with
+`EnrollmentPair`, and daemons advertise `enrollment_code` instead of
+`enrollment`. Sync, `clipsync/2` and the authorized-devices format are unchanged.
+
+`tests/companion_enrollment.rs` asserts after every refusal that neither
+authorized-devices file changed byte for byte: wrong code, a code burned by an
+earlier connection, an expired code, a relay presenting its own keys, an older
+allowing or joining peer, a peer presenting this computer's own key, and
+concurrent attempts with the same code (exactly one pairs). The happy path checks
+that each file gained exactly the other key. `tests/companion_pairing_privacy.rs`
+captures tracing at TRACE during a wrong and a right attempt and checks the codes
+never appear there, in the diagnostics export, in errors or in `Debug` output.
+`a_pairing_saved_before_code_pairing_still_connects` keeps existing pins working.
+
+`just companion-test-pairing-tui` drives the real TUI against two private
+loopback fixtures with no GUI: nothing listening, wrong code, input-mode keys,
+then a successful pairing. With a GUI session the same harness also drives the
+desktop; `companion_enrollment_ui.py` has one window show a code and the other
+type it. `just demo-tui-pairing` records both terminals side by side.
 
 ## Desktop activation acceptance
 

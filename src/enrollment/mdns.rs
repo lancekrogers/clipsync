@@ -14,6 +14,9 @@ use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 pub const ENROLL_SERVICE_TYPE: &str = "_clipsync-enroll._tcp.local.";
+/// Bounds what announcements on a busy or hostile network can add to every snapshot.
+const MAX_NEARBY_DEVICES: usize = 32;
+const MAX_ADDRESSES_PER_DEVICE: usize = 4;
 
 pub struct EnrollMdns {
     daemon: Arc<Mutex<Option<ServiceDaemon>>>,
@@ -34,38 +37,62 @@ impl EnrollMdns {
         }
     }
 
-    pub async fn start_and_advertise(
-        &self,
-        display_name: &str,
-        listen: SocketAddr,
-        fingerprint: &str,
-    ) -> Result<()> {
-        self.stop().await;
-        // Loopback / fixture binds must never open a host mDNS daemon (LAN leak).
-        // Real advertise requires a non-loopback listen (e.g. disposable Linux wildcard).
-        if listen.ip().is_loopback() {
-            tracing::debug!("Enrollment mDNS skipped for loopback listen {}", listen);
+    async fn ensure_daemon(&self) -> Result<()> {
+        let mut daemon = self.daemon.lock().await;
+        if daemon.is_none() {
+            *daemon = Some(ServiceDaemon::new().context("Enrollment mDNS daemon")?);
+        }
+        Ok(())
+    }
+
+    /// Collect nearby allowing computers. Callers gate this on a LAN-facing
+    /// configuration; loopback fixtures must never touch host mDNS.
+    pub async fn browse(&self) -> Result<()> {
+        let mut handle = self.browse_handle.lock().await;
+        if handle.as_ref().is_some_and(|h| !h.is_finished()) {
             return Ok(());
         }
-        let daemon = ServiceDaemon::new().context("Enrollment mDNS daemon")?;
-        let receiver = daemon.browse(ENROLL_SERVICE_TYPE)?;
+        self.ensure_daemon().await?;
+        let receiver = {
+            let daemon = self.daemon.lock().await;
+            daemon
+                .as_ref()
+                .ok_or_else(|| anyhow!("Enrollment mDNS daemon"))?
+                .browse(ENROLL_SERVICE_TYPE)?
+        };
         let candidates = self.candidates.clone();
         let our_id = self.our_id;
-        let handle = tokio::spawn(async move {
+        *handle = Some(tokio::spawn(async move {
             while let Ok(event) = receiver.recv_async().await {
                 if let Err(e) = handle_event(event, &candidates, our_id).await {
                     tracing::debug!("Enrollment mDNS event: {e}");
                 }
             }
-        });
-        *self.browse_handle.lock().await = Some(handle);
+        }));
+        Ok(())
+    }
 
-        let mut properties = HashMap::new();
-        properties.insert("enroll".into(), "1".into());
-        properties.insert("id".into(), self.our_id.to_string());
-        properties.insert("ssh_fp".into(), fingerprint.to_string());
-        properties.insert("name".into(), display_name.to_string());
+    pub async fn is_browsing(&self) -> bool {
+        self.browse_handle
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|h| !h.is_finished())
+    }
 
+    /// Announce this computer while it allows a device. The TXT record carries
+    /// address hints only, never the pairing code.
+    pub async fn advertise(
+        &self,
+        display_name: &str,
+        listen: SocketAddr,
+        fingerprint: &str,
+    ) -> Result<()> {
+        // Loopback / fixture binds must never open a host mDNS daemon (LAN leak).
+        if listen.ip().is_loopback() {
+            tracing::debug!("Enrollment mDNS skipped for loopback listen {}", listen);
+            return Ok(());
+        }
         let addresses = local_addresses_for(listen)?;
         let hostname = format!("{}.local.", sanitize_hostname(display_name));
         let instance = format!("ClipSync-Enroll-{}", self.our_id);
@@ -75,13 +102,24 @@ impl EnrollMdns {
             &hostname,
             addresses.as_slice(),
             listen.port(),
-            Some(properties),
+            Some(txt_properties(self.our_id, fingerprint, display_name)),
         )?;
         let fullname = info.get_fullname().to_string();
-        daemon.register(info)?;
+        self.ensure_daemon().await?;
+        if let Some(daemon) = self.daemon.lock().await.as_ref() {
+            daemon.register(info)?;
+        }
         *self.service_fullname.lock().await = Some(fullname);
-        *self.daemon.lock().await = Some(daemon);
         Ok(())
+    }
+
+    /// Withdraw the announcement but keep browsing.
+    pub async fn unadvertise(&self) {
+        if let Some(fullname) = self.service_fullname.lock().await.take() {
+            if let Some(daemon) = self.daemon.lock().await.as_ref() {
+                let _ = daemon.unregister(&fullname);
+            }
+        }
     }
 
     pub async fn snapshot_candidates(&self) -> Vec<EnrollmentCandidateView> {
@@ -129,6 +167,17 @@ impl Drop for EnrollMdns {
     }
 }
 
+/// `enroll=1` marks a pairing listener for every ClipSync version; older
+/// joiners that dial it are told to update.
+fn txt_properties(id: Uuid, fingerprint: &str, display_name: &str) -> HashMap<String, String> {
+    HashMap::from([
+        ("enroll".to_string(), "1".to_string()),
+        ("id".to_string(), id.to_string()),
+        ("ssh_fp".to_string(), fingerprint.to_string()),
+        ("name".to_string(), display_name.to_string()),
+    ])
+}
+
 async fn handle_event(
     event: ServiceEvent,
     candidates: &Arc<RwLock<Vec<EnrollmentCandidateView>>>,
@@ -164,7 +213,7 @@ async fn handle_event(
                 .unwrap_or_else(|| info.get_hostname().to_string());
             let port = info.get_port();
             let mut views = Vec::new();
-            for addr in info.get_addresses() {
+            for addr in info.get_addresses().iter().take(MAX_ADDRESSES_PER_DEVICE) {
                 views.push(EnrollmentCandidateView {
                     display_name: name.clone(),
                     address: SocketAddr::new(*addr, port).to_string(),
@@ -178,6 +227,11 @@ async fn handle_event(
             }
             let mut guard = candidates.write().await;
             guard.retain(|c| c.advertised_node_id != Some(node_id));
+            let mut devices: Vec<_> = guard.iter().map(|c| c.advertised_node_id).collect();
+            devices.dedup();
+            if devices.len() >= MAX_NEARBY_DEVICES {
+                return Ok(());
+            }
             guard.extend(views);
             Ok(())
         }
@@ -250,6 +304,16 @@ fn bail_loopback() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn txt_record_carries_only_address_hints() {
+        let id = Uuid::new_v4();
+        let props = txt_properties(id, "SHA256:fp", "Desk");
+        let mut keys: Vec<_> = props.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["enroll", "id", "name", "ssh_fp"]);
+        assert_eq!(props["id"], id.to_string());
+    }
 
     #[test]
     fn extract_enroll_id_parses() {

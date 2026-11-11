@@ -1,7 +1,7 @@
 #![deny(warnings, clippy::all)]
 //! Per-user daemon control. The socket directory and peer credentials protect both ends.
 //!
-//! Protocol version 1 with additive D04 commands and D03 enrollment IPC.
+//! Protocol version 1 with additive commands, including device pairing.
 //! One request is read per connection. The handler is dropped if that client
 //! disconnects or the 3s deadline expires, so a stalled peer cannot keep the
 //! accept loop busy past the bound. Same-user processes remain inside the
@@ -23,17 +23,18 @@ mod schema;
 mod target;
 
 pub use error_codes::{
-    engine_features, FEATURE_DIAGNOSTICS, FEATURE_ENROLLMENT, FEATURE_HISTORY_CLEAR,
-    FEATURE_HISTORY_COPY, FEATURE_HISTORY_DELETE, FEATURE_HISTORY_READ, FEATURE_PAUSE,
-    FEATURE_STATUS_V2,
+    engine_features, FEATURE_DIAGNOSTICS, FEATURE_ENROLLMENT, FEATURE_ENROLLMENT_CODE,
+    FEATURE_HISTORY_CLEAR, FEATURE_HISTORY_COPY, FEATURE_HISTORY_DELETE, FEATURE_HISTORY_READ,
+    FEATURE_PAUSE, FEATURE_STATUS_V2,
 };
 pub use history_view::{decode_preview_png, preview_chars};
 pub use schema::{
     Command, ControlError, ControlSnapshot, DaemonStatus, DiagnosticError, DiagnosticsReport,
     EnrollmentCandidateView, EnrollmentOutcomeView, EnrollmentSessionView, EnrollmentSnapshot,
-    HistoryEntryDetail, HistoryEntryView, HistoryPage, HistoryRemovalView, ImagePreview, Request,
-    Response, TrustedDeviceView, HISTORY_PAGE_FRAME_MIN, HISTORY_PAGE_MAX, HISTORY_PREVIEW_CHARS,
-    HISTORY_QUERY_MAX_BYTES, PROTOCOL_VERSION,
+    HistoryEntryDetail, HistoryEntryView, HistoryPage, HistoryRemovalView, ImagePreview,
+    PairingCode, PairingCodeView, PairingFailure, Request, Response, TrustedDeviceView,
+    HISTORY_PAGE_FRAME_MIN, HISTORY_PAGE_MAX, HISTORY_PREVIEW_CHARS, HISTORY_QUERY_MAX_BYTES,
+    PROTOCOL_VERSION,
 };
 pub use target::{EnrollmentTarget, Target};
 
@@ -216,6 +217,10 @@ fn enrollment_error_code(message: &str) -> Option<&'static str> {
         (
             "Enrollment unauthorized",
             error_codes::ENROLLMENT_UNAUTHORIZED,
+        ),
+        (
+            "Enrollment address invalid",
+            error_codes::ENROLLMENT_ADDRESS_INVALID,
         ),
     ];
     MAP.iter()
@@ -548,9 +553,8 @@ async fn dispatch(
         },
         Command::EnrollmentOpen
         | Command::EnrollmentDiscover
-        | Command::EnrollmentDial { .. }
+        | Command::EnrollmentPair { .. }
         | Command::EnrollmentInspect { .. }
-        | Command::EnrollmentConfirm { .. }
         | Command::EnrollmentCancel { .. }
         | Command::EnrollmentRevoke { .. }
         | Command::TrustedDevices => {
@@ -592,23 +596,19 @@ async fn dispatch_enrollment(target: &dyn Target, command: Command, response: &m
         Command::EnrollmentDiscover => manager.discover().await.map(|snap| {
             response.enrollment = Some(snap);
         }),
-        Command::EnrollmentDial {
+        Command::EnrollmentPair {
             address,
+            code,
             expected_fingerprint,
             expected_node_id,
         } => manager
-            .dial(&address, expected_fingerprint, expected_node_id)
+            .pair(&address, code, expected_fingerprint, expected_node_id)
             .await
             .map(|snap| {
                 response.enrollment = Some(snap);
             }),
         Command::EnrollmentInspect { session_id } => {
             manager.inspect(session_id).await.map(|snap| {
-                response.enrollment = Some(snap);
-            })
-        }
-        Command::EnrollmentConfirm { session_id } => {
-            manager.confirm(session_id).await.map(|snap| {
                 response.enrollment = Some(snap);
             })
         }

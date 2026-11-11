@@ -42,6 +42,8 @@ rand = "0.9"
 sha2 = "0.11"
 hex = "0.4"
 ring = "0.17"
+# Pairing-code PAKE (RustCrypto; not independently audited — see docs/SECURITY.md)
+spake2 = "0.4"
 base64 = "0.22"
 
 # Configuration and serialization
