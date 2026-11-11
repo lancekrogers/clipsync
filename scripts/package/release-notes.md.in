@@ -1,0 +1,119 @@
+ClipSync syncs text and image clipboards between trusted macOS and Linux
+computers on your local network. It comes with a desktop app, a terminal UI
+(`clipsync tui`) and a command-line tool. Computers connect to each other
+directly over mutually authenticated TLS 1.3; there is no cloud service and no
+account.
+
+> **Experimental.** Text sync works between macOS and Arch Linux. Broader
+> desktop coverage, sleep/wake and login/logout recovery are still being
+> validated. Install the same release on every computer: older versions cannot
+> pair by code.
+
+## Downloads
+
+| File | For |
+|---|---|
+@ASSET_TABLE@
+
+`SHA256SUMS` has a checksum for each file.
+
+## Install on macOS (Apple Silicon)
+
+**With Homebrew (recommended):**
+
+```sh
+brew install --cask @TAP@/clipsync
+```
+
+The cask installs ClipSync to `/Applications`, puts `clipsync` on your PATH
+@IF_UNSIGNED@and clears the download quarantine flag, so the app opens without a
+Gatekeeper prompt.@END_UNSIGNED@@IF_SIGNED@and opens like any notarized app.@END_SIGNED@
+`brew uninstall --cask clipsync` removes the app but keeps your settings, paired
+devices and history. `brew uninstall --zap --cask clipsync` removes those too.
+
+**From the disk image:**
+
+1. Download `@DMG@` and open it.
+2. Drag **ClipSync** onto **Applications**.
+@IF_UNSIGNED@3. Open ClipSync from Applications. This build is not notarized by Apple, so
+   macOS says it cannot verify that ClipSync is free of malware. Click **Done**.
+4. Open **System Settings → Privacy & Security**, scroll down to **Security**,
+   and click **Open Anyway** next to the message about ClipSync. Confirm with
+   your password or Touch ID, then click **Open**. You only do this once.
+
+Or, before the first launch, clear the quarantine flag in Terminal:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/ClipSync.app
+```
+@END_UNSIGNED@@IF_SIGNED@3. Open ClipSync from Applications. The app is signed with a Developer ID and
+   notarized by Apple.
+@END_SIGNED@
+The command-line tool is inside the app at
+`/Applications/ClipSync.app/Contents/MacOS/clipsync`.
+
+## Install on Linux
+
+```sh
+tar -xzf clipsync-@VERSION@-linux-x86_64.tar.gz
+cd clipsync-@VERSION@-linux-x86_64
+./install-user.sh
+```
+
+@IF_AARCH64@Use the `aarch64` archive on 64-bit Arm. @END_AARCH64@`install-user.sh` copies `clipsync`
+and `clipsync-desktop` to `~/.local/bin` and adds ClipSync to your app menu. It
+needs no root and starts nothing; the app sets up its background service when
+you finish setup. Instead of the terminal, you can open the extracted folder in
+your file manager and run **ClipSync-Install.desktop**. Add `~/.local/bin` to
+your PATH to use the `clipsync` command.
+
+Requirements: glibc @GLIBC@ or newer and OpenSSL 3. The archives are built on
+Ubuntu 22.04, so Ubuntu 22.04, Debian 12, Fedora 36 and current Arch Linux or
+newer all qualify. The binaries link: @NEEDED@. The desktop app needs an X11 or
+Wayland session; on X11 it also needs libxkbcommon-x11 (`libxkbcommon-x11-0` on
+Debian and Ubuntu). Wayland clipboard sync needs a compositor that supports the
+data-control protocol.
+
+## Pair two computers
+
+Install ClipSync on both computers and finish setup in the app or in
+`clipsync tui`.
+
+1. On the first computer, open **Devices** and choose **Allow a new device**
+   (TUI: `2`, then `e`). A six-digit code appears.
+2. On the second computer, open **Devices** and pick the first computer under
+   **Nearby** (TUI: `f`, select it, `Enter`), or enter the address shown under
+   the code (TUI: `m`). Then type the code.
+
+Both computers then list each other under **Authorized devices**. Each code
+works once, and nothing is saved until the code is verified. Pairing uses TCP
+port 8485 and sync uses 8484 by default; ClipSync does not change firewall
+rules.
+
+## Check your download
+
+In the folder that holds the download and `SHA256SUMS`:
+
+```sh
+shasum -a 256 -c SHA256SUMS --ignore-missing   # macOS
+sha256sum -c SHA256SUMS --ignore-missing       # Linux
+```
+
+## Security
+
+- ClipSync has not had an independent security or cryptographic review.
+- Code pairing uses the `spake2` crate (RustCrypto 0.4), which has never had an
+  independent audit. The key confirmation and transcript binding around it are
+  ClipSync's own code, tested but not externally reviewed.
+- Anyone who can see the code while it is on screen and connects first can
+  pair, so only allow a device when you are about to type the code.
+@IF_UNSIGNED@- The macOS app is not signed with an Apple Developer ID or notarized; it has
+  only an ad-hoc signature. The Linux archives are not signed. Use `SHA256SUMS`
+  to check what you downloaded.
+@END_UNSIGNED@@IF_SIGNED@- The macOS app is signed with a Developer ID and notarized by Apple. The Linux
+  archives are not signed; use `SHA256SUMS` to check them.
+@END_SIGNED@
+See [SECURITY.md](https://github.com/@REPO@/blob/@TAG@/docs/SECURITY.md) for
+the full security model.
+
+Built from @COMMIT@ with Rust @TOOLCHAIN@.

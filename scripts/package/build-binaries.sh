@@ -17,15 +17,21 @@ clipsync_package_log "CARGO_TARGET_DIR=$TARGET_DIR"
 cd "$ROOT"
 export CARGO_TARGET_DIR="$TARGET_DIR"
 
+TARGET_ARGS=()
+if [[ -n "${CLIPSYNC_PACKAGE_CARGO_TARGET:-}" ]]; then
+  TARGET_ARGS=(--target "$CLIPSYNC_PACKAGE_CARGO_TARGET")
+fi
+
 # CLI/daemon + TUI entrypoint. Explicitly omit integration-tests. --locked for reproducible builds.
-clipsync_package_cargo build --locked --release -p clipsync --features tui --bin clipsync
+clipsync_package_cargo build --locked --release ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} -p clipsync --features tui --bin clipsync
 
 # Desktop GUI. Explicitly omit ui-test (no eframe inspection server).
 # Separate invocation so GUI root deps without tui do not rebuild away the CLI binary.
-clipsync_package_cargo build --locked --release -p clipsync-desktop --bin clipsync-desktop
+clipsync_package_cargo build --locked --release ${TARGET_ARGS[@]+"${TARGET_ARGS[@]}"} -p clipsync-desktop --bin clipsync-desktop
 
-CLI_BIN="$TARGET_DIR/release/clipsync"
-GUI_BIN="$TARGET_DIR/release/clipsync-desktop"
+BIN_DIR="$(clipsync_package_release_bin_dir)"
+CLI_BIN="$BIN_DIR/clipsync"
+GUI_BIN="$BIN_DIR/clipsync-desktop"
 
 [[ -x "$CLI_BIN" ]] || clipsync_package_die "missing CLI binary: $CLI_BIN"
 [[ -x "$GUI_BIN" ]] || clipsync_package_die "missing GUI binary: $GUI_BIN"

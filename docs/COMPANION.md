@@ -1,7 +1,10 @@
 # ClipSync companion (desktop GUI + TUI)
 
-User-facing guide for the **packaged** companion. This is not a public notarized
-release guide: local development packages are labeled **UNSIGNED-DEVELOPMENT**.
+User-facing guide for the **packaged** companion. Release downloads and their
+install steps are on [GitHub Releases](https://github.com/lancekrogers/clipsync/releases)
+(see the README's Install section). Packages you build locally with
+`just companion-package` are labeled **UNSIGNED-DEVELOPMENT** and installed as
+described below.
 
 ## What you get
 
@@ -187,6 +190,11 @@ Unsigned local artifacts must not be labeled notarized or public-release-ready (
 | `UNSIGNED-DEVELOPMENT` | Local/dev build; not Developer ID signed; not notarized |
 | `public_release_ready: false` | Must stay false until signed+notarized acceptance exists |
 | `fixture_mode: true` | Override/script binaries used for packaging tests — not release proof |
+| `release_build: true` | Staged by `just companion-release` from a fresh build; never a fixture build |
+| `signing: unsigned` | Release build without Developer ID: ad-hoc sealed macOS app, `-unsigned` DMG name, `notarized: false` |
+| `signing: developer-id` | Release build signed and notarized through `sign-macos.sh` |
+
+Release cutting is described in [the release checklist](RELEASE_CHECKLIST.md).
 
 ## Verification
 

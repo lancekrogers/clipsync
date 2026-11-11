@@ -38,6 +38,21 @@ if [[ -z "$MACOS_APP" && -z "$LINUX_BUNDLE" && -z "$MANIFEST" && -z "$ACCEPTANCE
   clipsync_package_die "$USAGE"
 fi
 
+# Release provenance/manifests: fresh build, honest signing label, no dev labels.
+verify_release_json() {
+  local file="$1" what="$2"
+  grep -q '"fixture_mode": false' "$file" || fail "$what: release builds cannot be fixture builds"
+  grep -q 'DEVELOPMENT' "$file" && fail "$what: release metadata must not carry a DEVELOPMENT label"
+  if grep -q '"signing": "unsigned"' "$file"; then
+    if grep -q '"notarized": true\|"public_release_ready": true' "$file"; then
+      fail "$what: unsigned release cannot claim notarization or Gatekeeper readiness"
+    fi
+  elif ! grep -q '"signing": "developer-id"' "$file"; then
+    fail "$what: release signing must be unsigned or developer-id"
+  fi
+  ok "$what: release build labels"
+}
+
 verify_macos() {
   local app="$1"
   [[ -d "$app" ]] || { fail "macOS app missing: $app"; return; }
@@ -62,8 +77,14 @@ verify_macos() {
   else
     ok "no AppIcon.icns (optional when converters unavailable)"
   fi
+  local release_app=0
   if [[ -f "$app/Contents/Resources/PROVENANCE.json" ]]; then
-    if grep -q '"fixture_mode": true' "$app/Contents/Resources/PROVENANCE.json"; then
+    if grep -q '"release_build": true' "$app/Contents/Resources/PROVENANCE.json"; then
+      release_app=1
+      verify_release_json "$app/Contents/Resources/PROVENANCE.json" "macOS provenance"
+    elif grep -q '"signing": "Developer-ID"' "$app/Contents/Resources/PROVENANCE.json"; then
+      ok "provenance records Developer ID signing (notarization recorded in ACCEPTANCE)"
+    elif grep -q '"fixture_mode": true' "$app/Contents/Resources/PROVENANCE.json"; then
       ok "provenance records fixture_mode=true (features not verified)"
       grep -q '"verified": false' "$app/Contents/Resources/PROVENANCE.json" \
         || fail "fixture provenance must set features.verified=false"
@@ -83,10 +104,21 @@ verify_macos() {
   kind="$(clipsync_package_binary_kind "$exe")"
   if [[ "$kind" == "macho" ]]; then
     ok "GUI is Mach-O"
+  elif [[ "$kind" == "script" && "$release_app" -eq 1 ]]; then
+    fail "release app contains a script instead of a Mach-O GUI"
   elif [[ "$kind" == "script" ]]; then
     ok "GUI is fixture script (not release proof)"
   else
     fail "unexpected GUI binary kind: $kind"
+  fi
+  if [[ "$release_app" -eq 1 ]]; then
+    if ! command -v codesign >/dev/null 2>&1; then
+      fail "codesign unavailable; cannot check the release bundle seal"
+    elif codesign --verify --deep --strict "$app" 2>/dev/null; then
+      ok "bundle signature seal verifies (codesign --verify --deep --strict)"
+    else
+      fail "release bundle signature does not verify; a downloaded copy would be reported as damaged"
+    fi
   fi
   ok "macOS layout $app"
 }
@@ -149,8 +181,12 @@ verify_linux() {
     fi
   done
 
+  local release_bundle=0
   if [[ -f "$bundle/share/doc/clipsync/PROVENANCE.json" ]]; then
-    if grep -q '"fixture_mode": true' "$bundle/share/doc/clipsync/PROVENANCE.json"; then
+    if grep -q '"release_build": true' "$bundle/share/doc/clipsync/PROVENANCE.json"; then
+      release_bundle=1
+      verify_release_json "$bundle/share/doc/clipsync/PROVENANCE.json" "linux provenance"
+    elif grep -q '"fixture_mode": true' "$bundle/share/doc/clipsync/PROVENANCE.json"; then
       ok "linux provenance fixture_mode=true"
     else
       grep -q 'UNSIGNED-DEVELOPMENT' "$bundle/share/doc/clipsync/PROVENANCE.json" \
@@ -165,7 +201,13 @@ verify_linux() {
   kind="$(clipsync_package_binary_kind "$bundle/bin/clipsync")"
   case "$kind" in
     elf) ok "CLI is ELF" ;;
-    script) ok "CLI is fixture script (not Linux release proof)" ;;
+    script)
+      if [[ "$release_bundle" -eq 1 ]]; then
+        fail "release archive contains a script instead of an ELF CLI"
+      else
+        ok "CLI is fixture script (not Linux release proof)"
+      fi
+      ;;
     macho) fail "CLI is Mach-O inside a Linux archive (host mixup)" ;;
     *) fail "unexpected CLI kind: $kind" ;;
   esac
@@ -175,6 +217,15 @@ verify_linux() {
 verify_manifest() {
   local file="$1"
   [[ -f "$file" ]] || { fail "manifest missing: $file"; return; }
+  if grep -q '"release_build": true' "$file"; then
+    verify_release_json "$file" "release manifest"
+    grep -q '"features_verified": true' "$file" || fail "release manifest must set features_verified=true"
+    if grep -q '"signing": "developer-id"' "$file"; then
+      grep -q '"notarized": true' "$file" || fail "developer-id release manifest must record notarized=true"
+    fi
+    ok "manifest $file"
+    return
+  fi
   grep -q '"public_release_ready": false' "$file" || fail "manifest must set public_release_ready=false"
   if grep -q '"fixture_mode": true' "$file"; then
     ok "manifest fixture_mode recorded"

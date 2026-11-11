@@ -8,6 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/common.sh"
 
 [[ "$(uname -s)" == "Darwin" ]] || clipsync_package_die "build-macos-companion.sh requires macOS"
+clipsync_package_require_release_inputs
 
 ROOT="$(clipsync_package_project_root)"
 VERSION="$(clipsync_package_version)"
@@ -20,6 +21,16 @@ SKIP_BUILD="${CLIPSYNC_PACKAGE_SKIP_BUILD:-0}"
 APP_NAME="ClipSync.app"
 APP_PATH="$DIST/$APP_NAME"
 DMG_NAME="ClipSync-${VERSION}-${ARCH}-${LABEL}.dmg"
+RELEASE_SIGNING=""
+if clipsync_package_release_mode; then
+  RELEASE_SIGNING="$(clipsync_package_release_signing)"
+  LABEL="$RELEASE_SIGNING"
+  if [[ "$RELEASE_SIGNING" == "unsigned" ]]; then
+    DMG_NAME="ClipSync-${VERSION}-macos-${ARCH}-unsigned.dmg"
+  else
+    DMG_NAME="ClipSync-${VERSION}-macos-${ARCH}.dmg"
+  fi
+fi
 DMG_PATH="$DIST/$DMG_NAME"
 STAGE="$DIST/dmg-stage"
 
@@ -95,6 +106,10 @@ fi
 
 VERSION_PLIST="$(clipsync_plist_escape "$VERSION")"
 LABEL_PLIST="$(clipsync_plist_escape "$LABEL")"
+GET_INFO="ClipSync ${VERSION_PLIST} (${LABEL_PLIST}). Not notarized. Local development only."
+if clipsync_package_release_mode; then
+  GET_INFO="ClipSync ${VERSION_PLIST}"
+fi
 
 # No bundled SF fonts — runtime uses local system typography only (D01).
 cat >"$APP_PATH/Contents/Info.plist" <<EOF
@@ -127,7 +142,7 @@ cat >"$APP_PATH/Contents/Info.plist" <<EOF
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
 	<key>CFBundleGetInfoString</key>
-	<string>ClipSync ${VERSION_PLIST} (${LABEL_PLIST}). Not notarized. Local development only.</string>
+	<string>${GET_INFO}</string>
 EOF
 
 if [[ -n "$ICON_FILE_KEY" ]]; then
@@ -144,6 +159,7 @@ EOF
 
 clipsync_package_write_provenance "$APP_PATH/Contents/Resources/PROVENANCE.json" "macos-app"
 
+if ! clipsync_package_release_mode; then
 cat >"$RESOURCES_DIR/README-UNSIGNED.txt" <<EOF
 ClipSync companion — ${LABEL}
 
@@ -162,6 +178,17 @@ MacOS directory (see clipsync::companion default_daemon_binary).
 Uninstall: move ClipSync.app to Trash. User config, identity, trust cache,
 authorized peers, history database and history key are NOT removed.
 EOF
+fi
+
+# Nothing may be written into the bundle after this point: the signature seals it.
+# Without a sealed bundle a downloaded arm64 app is reported as damaged; with an
+# ad-hoc seal Gatekeeper offers Open Anyway in Privacy & Security instead.
+if [[ "$RELEASE_SIGNING" == "unsigned" ]]; then
+  clipsync_package_log "ad-hoc signing $APP_PATH (no Developer ID)"
+  codesign --force --deep --sign - "$APP_PATH"
+  codesign --verify --deep --strict "$APP_PATH" \
+    || clipsync_package_die "ad-hoc signature does not verify: $APP_PATH"
+fi
 
 # DMG stage
 clipsync_package_refuse_overwrite "$STAGE"
@@ -169,6 +196,26 @@ rm -rf "$STAGE"
 mkdir -p "$STAGE"
 cp -R "$APP_PATH" "$STAGE/"
 
+if clipsync_package_release_mode; then
+VOLNAME="ClipSync ${VERSION}"
+cat >"$STAGE/README.txt" <<EOF
+ClipSync ${VERSION} for macOS (${ARCH})
+
+Install: drag ClipSync.app to Applications, then open it.
+Command line: ClipSync.app/Contents/MacOS/clipsync
+
+Release notes and checksums: https://github.com/lancekrogers/clipsync/releases
+EOF
+if [[ "$RELEASE_SIGNING" == "unsigned" ]]; then
+cat >>"$STAGE/README.txt" <<EOF
+
+This build is not notarized by Apple. The first time you open it, macOS says it
+cannot verify ClipSync. Click Done, then open System Settings > Privacy & Security,
+find "ClipSync was blocked" and click Open Anyway. You only need to do this once.
+EOF
+fi
+else
+VOLNAME="ClipSync ${VERSION} ${LABEL}"
 cat >"$STAGE/README-${LABEL}.txt" <<EOF
 ClipSync ${VERSION} (${ARCH}) — ${LABEL}
 
@@ -183,12 +230,13 @@ Install (development):
 
 Do not claim this DMG is notarized or release-ready.
 EOF
+fi
 
 ln -s /Applications "$STAGE/Applications"
 
 clipsync_package_log "creating DMG $DMG_PATH"
 hdiutil create \
-  -volname "ClipSync ${VERSION} ${LABEL}" \
+  -volname "$VOLNAME" \
   -srcfolder "$STAGE" \
   -ov -format UDZO \
   "$DMG_PATH"
@@ -211,6 +259,30 @@ if [[ -n "$ICON_FILE_KEY" ]]; then
 fi
 
 MANIFEST="$DIST/MANIFEST-${VERSION}-${ARCH}.json"
+if clipsync_package_release_mode; then
+cat >"$MANIFEST" <<EOF
+{
+  "release_build": true,
+  "version": "$VERSION_SAFE",
+  "os": "macos",
+  "arch": "$ARCH_SAFE",
+  "git": "$(clipsync_json_escape "$(clipsync_package_git_commit)")",
+  "signing": "$RELEASE_SIGNING",
+  "codesign": "$([[ "$RELEASE_SIGNING" == "unsigned" ]] && echo ad-hoc || echo developer-id)",
+  "notarized": false,
+  "public_release_ready": false,
+  "fixture_mode": false,
+  "features_verified": true,
+  "app": "$(clipsync_json_escape "$APP_NAME")",
+  "dmg": "$(clipsync_json_escape "$DMG_NAME")",
+  "macos_layout": {
+    "executable": "Contents/MacOS/clipsync-desktop",
+    "sibling_cli": "Contents/MacOS/clipsync",
+    "icon": $ICON_JSON
+  }
+}
+EOF
+else
 cat >"$MANIFEST" <<EOF
 {
   "version": "$VERSION_SAFE",
@@ -229,8 +301,13 @@ cat >"$MANIFEST" <<EOF
   }
 }
 EOF
+fi
 
-clipsync_package_log "macOS package complete (unsigned development)"
+if clipsync_package_release_mode; then
+  clipsync_package_log "macOS release package complete (signing: $RELEASE_SIGNING)"
+else
+  clipsync_package_log "macOS package complete (unsigned development)"
+fi
 clipsync_package_log "  app: $APP_PATH"
 clipsync_package_log "  dmg: $DMG_PATH"
 clipsync_package_log "  manifest: $MANIFEST"

@@ -1,0 +1,32 @@
+cask "clipsync" do
+  version "@VERSION@"
+  sha256 "@DMG_SHA256@"
+
+  url "https://github.com/@REPO@/releases/download/v#{version}/@DMG_URL_NAME@"
+  name "ClipSync"
+  desc "Clipboard sync between trusted Mac and Linux computers"
+  homepage "https://github.com/@REPO@"
+
+  depends_on arch: :arm64
+
+  app "ClipSync.app"
+  binary "#{appdir}/ClipSync.app/Contents/MacOS/clipsync"
+@IF_UNSIGNED@
+  # Not notarized; the bundle carries an ad-hoc signature.
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-dr", "com.apple.quarantine", "#{appdir}/ClipSync.app"]
+  end
+@END_UNSIGNED@
+  # The background service runs from the app, so uninstall only quits the GUI
+  # and leaves settings, paired devices, history and the LaunchAgent in place.
+  uninstall quit: "com.clipsync.desktop"
+
+  zap launchctl: "com.clipsync",
+      trash:     [
+        "~/.config/clipsync",
+        "~/.local/share/clipsync",
+        "~/Library/Application Support/clipsync",
+        "~/Library/LaunchAgents/com.clipsync.plist",
+      ]
+end

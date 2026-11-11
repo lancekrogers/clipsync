@@ -18,6 +18,10 @@ Commands:
   verify       Static layout/manifest checks (pass-through args)
   test         Isolated package tests (tempdirs; no host service changes)
   sign-macos   Developer ID + notarize (hard-gated on credentials; usually blocked)
+  release      Stage a public release of the Cargo version into dist/release/v<version>
+  release-publish  Upload the staged release as a draft GitHub release
+  release-tap  Push the staged Homebrew cask once the release is published
+  release-test Isolated release command tests (stub gh/cargo/docker; no network writes)
 
 Environment:
   CLIPSYNC_RUSTUP_TOOLCHAIN   default 1.95.0; set empty to use active toolchain
@@ -43,8 +47,12 @@ case "$cmd" in
   linux) exec bash "$PKG/build-linux-companion.sh" "$@" ;;
   all) exec bash "$PKG/build-all-companion.sh" "$@" ;;
   verify) exec bash "$PKG/verify.sh" "$@" ;;
-  test) exec bash "$PKG/test_package.sh" "$@" ;;
+  test) bash "$PKG/test_package.sh" "$@" && exec bash "$PKG/test_release.sh" ;;
   sign-macos) exec bash "$PKG/sign-macos.sh" "$@" ;;
+  release) exec bash "$PKG/release-stage.sh" "$@" ;;
+  release-publish) exec bash "$PKG/release-publish.sh" "$@" ;;
+  release-tap) exec bash "$PKG/release-tap.sh" "$@" ;;
+  release-test) exec bash "$PKG/test_release.sh" "$@" ;;
   -h|--help|help|"") usage; exit 0 ;;
   *)
     echo "unknown command: $cmd" >&2

@@ -1,0 +1,31 @@
+# Linux release build image; build it with --platform linux/arm64. Ubuntu 22.04
+# sets the glibc and OpenSSL 3 floor of the published archives. aarch64 builds
+# natively; x86_64 is cross-compiled because gcc crashes under QEMU emulation.
+FROM ubuntu:22.04
+
+ARG RUST_TOOLCHAIN=1.95.0
+ENV DEBIAN_FRONTEND=noninteractive \
+    RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+RUN set -eux; \
+    sed -i 's/^deb /deb [arch=arm64] /' /etc/apt/sources.list; \
+    printf '%s\n' \
+      'deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy main universe' \
+      'deb [arch=amd64] http://archive.ubuntu.com/ubuntu jammy-updates main universe' \
+      'deb [arch=amd64] http://security.ubuntu.com/ubuntu jammy-security main universe' \
+      >/etc/apt/sources.list.d/amd64.list; \
+    dpkg --add-architecture amd64; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      ca-certificates curl build-essential pkg-config libssl-dev file binutils \
+      gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross libssl-dev:amd64; \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+      | sh -s -- -y --no-modify-path --profile minimal --default-toolchain "$RUST_TOOLCHAIN" \
+ && rustup target add --toolchain "$RUST_TOOLCHAIN" x86_64-unknown-linux-gnu \
+ && rustc --version
+
+WORKDIR /work
