@@ -1,7 +1,10 @@
 //! Real history, read and copied by the daemon through the shared controller.
 use crate::theme;
 use clipsync::companion::client::{Controller, Intent, View};
+use clipsync::control::{ImagePreview, decode_preview_png};
 use eframe::egui::{self, RichText};
+use std::sync::{Arc, OnceLock};
+use uuid::Uuid;
 
 pub fn show(ui: &mut egui::Ui, controller: &mut Controller) {
     let view = &controller.view;
@@ -144,8 +147,15 @@ fn detail(ui: &mut egui::Ui, view: &View, actions: &mut Vec<Intent>) {
         if let Some(entry) = selected {
             ui.weak(format!("{} · {}", entry.source, entry.timestamp));
             ui.add_space(16.0);
-            if view.detail_loading {
+            let texture = view
+                .image_preview
+                .as_ref()
+                .filter(|_| !view.detail_loading)
+                .map(|preview| preview_texture(ui.ctx(), entry.id, preview));
+            if view.detail_loading || texture.as_ref().is_some_and(Option::is_none) {
                 ui.spinner();
+            } else if let Some(Some(Some(texture))) = &texture {
+                image_preview(ui, texture);
             } else if let Some(text) = view.visible_detail() {
                 egui::ScrollArea::vertical()
                     .id_salt("copy_detail")
@@ -208,4 +218,82 @@ fn detail(ui: &mut egui::Ui, view: &View, actions: &mut Vec<Intent>) {
             ui.weak("Choose a saved copy to read it and copy it again.");
         }
     });
+}
+
+fn image_preview(ui: &mut egui::Ui, texture: &egui::TextureHandle) {
+    let [width, height] = texture.size();
+    // Never enlarge past native pixels, except the 64px fallback thumbnail.
+    let scale = if width.max(height) <= 64 {
+        4.0
+    } else {
+        1.0 / ui.pixels_per_point()
+    };
+    ui.add(
+        egui::Image::new(texture)
+            .fit_to_original_size(scale)
+            .max_size(egui::vec2(ui.available_width(), 360.0))
+            .corner_radius(8)
+            .alt_text(format!("Copied image preview, {width} by {height} pixels")),
+    );
+}
+
+#[derive(Clone)]
+struct CachedPreview {
+    key: (Uuid, u32, u32, usize),
+    texture: Arc<OnceLock<Option<egui::TextureHandle>>>,
+}
+
+/// Decode a selection's preview off the UI thread, once per selection.
+/// `None` while decoding; `Some(None)` when no preview can be shown.
+fn preview_texture(
+    ctx: &egui::Context,
+    id: Uuid,
+    preview: &ImagePreview,
+) -> Option<Option<egui::TextureHandle>> {
+    let key = (
+        id,
+        preview.width,
+        preview.height,
+        preview.png.as_ref().map_or(0, String::len),
+    );
+    let slot = egui::Id::unique("history_image_preview");
+    if let Some(cached) = ctx.data(|data| data.get_temp::<CachedPreview>(slot))
+        && cached.key == key
+    {
+        return cached.texture.get().cloned();
+    }
+    let texture = Arc::new(OnceLock::new());
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            slot,
+            CachedPreview {
+                key,
+                texture: texture.clone(),
+            },
+        )
+    });
+    let (ctx, preview) = (ctx.clone(), preview.clone());
+    std::thread::spawn(move || {
+        let image = match decode_preview_png(&preview) {
+            Some(png) => Some(egui::ColorImage::from_rgba_unmultiplied(
+                [png.width as usize, png.height as usize],
+                &png.rgba,
+            )),
+            None => preview.is_valid().then(|| {
+                egui::ColorImage::from_rgb(
+                    [preview.width as usize, preview.height as usize],
+                    &preview.rgb,
+                )
+            }),
+        };
+        let options = egui::TextureOptions {
+            mipmap_mode: Some(egui::TextureFilter::Linear),
+            ..egui::TextureOptions::LINEAR
+        };
+        let _ = texture.set(
+            image.map(|image| ctx.load_texture(format!("history-image-{id}"), image, options)),
+        );
+        ctx.request_repaint();
+    });
+    None
 }

@@ -77,6 +77,33 @@ pub fn to_detail(entry: &ClipboardEntry, max_bytes: usize) -> Result<HistoryEntr
     })
 }
 
+/// Largest side of the high-resolution preview PNG.
+pub const PREVIEW_PNG_MAX_DIMENSION: u32 = 1600;
+/// Encoded size cap for the high-resolution preview PNG.
+pub const PREVIEW_PNG_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// Decode the high-resolution preview PNG for display, within the bounds the
+/// daemon encodes to. Returns `None` when absent or out of bounds.
+pub fn decode_preview_png(
+    preview: &super::schema::ImagePreview,
+) -> Option<crate::clipboard::png::DecodedPng> {
+    use base64::Engine;
+    let encoded = preview.png.as_ref()?;
+    if encoded.len() > PREVIEW_PNG_MAX_BYTES.div_ceil(3) * 4 {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    let limits = crate::transport::image_capability::ImageLimits {
+        max_bytes: PREVIEW_PNG_MAX_BYTES,
+        max_width: PREVIEW_PNG_MAX_DIMENSION,
+        max_height: PREVIEW_PNG_MAX_DIMENSION,
+        max_pixels: u64::from(PREVIEW_PNG_MAX_DIMENSION).pow(2),
+    };
+    crate::clipboard::png::decode(&bytes, limits, 64 * 1024 * 1024).ok()
+}
+
 /// Decode under the same admission limits as sync, then send bounded previews
 /// over the protected local control socket. The small RGB fallback composites
 /// transparent pixels against the terminal preview's dark background.
@@ -96,7 +123,7 @@ pub fn image_preview(
     // Leave enough frame space for the fallback RGB thumbnail and metadata.
     let image = DynamicImage::ImageRgba8(image);
     let mut png = None;
-    for size in [1600, 1024, 768, 512, 256] {
+    for size in [PREVIEW_PNG_MAX_DIMENSION, 1024, 768, 512, 256] {
         let high = if image.width() <= size && image.height() <= size {
             image.clone()
         } else {
@@ -192,6 +219,9 @@ mod image_tests {
         };
         let result = image_preview(&bytes, limits, 64 * 1024 * 1024, 2 * 1024 * 1024).unwrap();
         assert!(result.is_valid());
+        let decoded = decode_preview_png(&result).unwrap();
+        assert_eq!((decoded.width, decoded.height), (640, 400));
+        assert_eq!(&decoded.rgba[..4], &[0, 0, 0, 255]);
         let png = base64::engine::general_purpose::STANDARD
             .decode(result.png.unwrap())
             .unwrap();
@@ -200,5 +230,23 @@ mod image_tests {
         let limited = image_preview(&bytes, limits, 64 * 1024 * 1024, 1).unwrap();
         assert!(limited.png.is_none());
         assert!(limited.is_valid());
+        assert!(decode_preview_png(&limited).is_none());
+    }
+
+    #[test]
+    fn preview_decode_rejects_oversized_or_invalid_png() {
+        let preview = |png: &[u8]| super::super::schema::ImagePreview {
+            width: 1,
+            height: 1,
+            rgb: vec![0; 3],
+            png: Some(base64::engine::general_purpose::STANDARD.encode(png)),
+        };
+        assert!(decode_preview_png(&preview(b"not a png")).is_none());
+        let wide = RgbaImage::from_pixel(PREVIEW_PNG_MAX_DIMENSION + 1, 1, Rgba([1, 2, 3, 255]));
+        let mut png = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(wide)
+            .write_to(&mut png, ImageFormat::Png)
+            .unwrap();
+        assert!(decode_preview_png(&preview(&png.into_inner())).is_none());
     }
 }

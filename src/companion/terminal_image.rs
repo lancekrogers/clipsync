@@ -5,7 +5,6 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use base64::Engine;
 use ratatui_image::{
     picker::{
         cap_parser::{Parser, QueryStdioOptions, Response},
@@ -135,28 +134,17 @@ impl GraphicsPreview {
         self.has_preview = available.is_some();
         self.ready = false;
         self.state.empty_protocol();
-        if let (Some(picker), Some(encoded)) = (&self.picker, available) {
-            if encoded.len() <= 2_796_204 {
-                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) {
-                    let limits = crate::transport::image_capability::ImageLimits {
-                        max_bytes: 2 * 1024 * 1024,
-                        max_width: 1600,
-                        max_height: 1600,
-                        max_pixels: 1600 * 1600,
-                    };
-                    if let Ok(decoded) =
-                        crate::clipboard::png::decode(&bytes, limits, 64 * 1024 * 1024)
-                    {
-                        if let Some(image) =
-                            image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.rgba)
-                        {
-                            self.state.replace_protocol(
-                                picker.new_resize_protocol(image::DynamicImage::ImageRgba8(image)),
-                            );
-                            self.ready = true;
-                        }
-                    }
-                }
+        if let (Some(picker), Some(decoded)) = (
+            &self.picker,
+            preview.and_then(crate::control::decode_preview_png),
+        ) {
+            if let Some(image) =
+                image::RgbaImage::from_raw(decoded.width, decoded.height, decoded.rgba)
+            {
+                self.state.replace_protocol(
+                    picker.new_resize_protocol(image::DynamicImage::ImageRgba8(image)),
+                );
+                self.ready = true;
             }
         }
         clear
