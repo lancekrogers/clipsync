@@ -142,6 +142,11 @@ async fn main() -> Result<()> {
         })
         .await?,
     );
+    let peers = if fresh && std::env::var("CLIPSYNC_PEER_FIXTURE").as_deref() == Ok("1") {
+        Some(PeerFixture::new(&key, &auth).await?)
+    } else {
+        None
+    };
     let transport = Arc::new(TransportManager::with_auth(
         TransportConfig::default(),
         auth.clone(),
@@ -227,6 +232,13 @@ async fn main() -> Result<()> {
             )?;
         }
     }
+    let _connected_peer = match &peers {
+        Some(peers) => {
+            peers.seed_history(&history).await?;
+            Some(peers.connect(config.node_id, listener.local_addr()))
+        }
+        None => None,
+    };
     let enrollment = Arc::new(clipsync::enrollment::EnrollmentManager::new(
         Arc::new(config.clone()),
         auth,
@@ -244,4 +256,100 @@ async fn main() -> Result<()> {
     }
     engine.shutdown().await;
     Ok(())
+}
+
+/// Opt-in remote devices for UI captures: one authorized peer that connects
+/// over loopback and one authorized device that stays offline, each with
+/// retained history so renderers show remote origins and device names.
+struct PeerFixture {
+    _dir: tempfile::TempDir,
+    key: KeyPair,
+    auth: Arc<SshAuthenticator>,
+    offline: uuid::Uuid,
+}
+
+impl PeerFixture {
+    async fn new(local: &KeyPair, local_auth: &SshAuthenticator) -> Result<Self> {
+        let dir = tempfile::tempdir()?;
+        let key = KeyPair::generate(KeyType::Ed25519)?;
+        key.save_to_file(&dir.path().join("identity")).await?;
+        let auth = Arc::new(
+            SshAuthenticator::new(AuthConfig {
+                private_key_path: dir.path().join("identity"),
+                authorized_keys_path: dir.path().join("authorized_devices"),
+                generate_if_missing: false,
+            })
+            .await?,
+        );
+        auth.add_trusted_peer(&local.public_key().to_openssh(), None)
+            .await?;
+        // Enrollment and `clipsync setup` write these two comment formats.
+        let public = key.public_key();
+        local_auth
+            .add_trusted_peer(
+                &public.to_openssh(),
+                Some(format!("archdtop-clipsync {}", public.fingerprint())),
+            )
+            .await?;
+        let offline = KeyPair::generate(KeyType::Ed25519)?.public_key();
+        local_auth
+            .add_trusted_peer(&offline.to_openssh(), Some("clipsync-studio".into()))
+            .await?;
+        Ok(Self {
+            _dir: dir,
+            key,
+            auth,
+            offline: tls::node_id(&offline),
+        })
+    }
+
+    async fn seed_history(&self, history: &HistoryManager) -> Result<()> {
+        let peer = tls::node_id(&self.key.public_key());
+        let now = chrono::Utc::now();
+        for (text, source, age) in [
+            ("────────────────────────", peer, 3),
+            ("journalctl --user -u clipsync -n 50 --no-pager", peer, 47),
+            ("Lunch at 12:30? The usual place.", self.offline, 26 * 60),
+        ] {
+            history
+                .add_entry(&clipsync::adapters::ClipboardEntry {
+                    id: uuid::Uuid::new_v4(),
+                    checksum: clipsync::history::encryption::Encryptor::compute_checksum(
+                        text.as_bytes(),
+                    ),
+                    content: clipsync::adapters::ClipboardData::Text(text.into()),
+                    timestamp: now - chrono::Duration::minutes(age),
+                    source,
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// The returned manager owns the session; dropping it disconnects the peer.
+    fn connect(&self, local: uuid::Uuid, addr: std::net::SocketAddr) -> Arc<TransportManager> {
+        let transport = Arc::new(TransportManager::with_auth(
+            TransportConfig::default(),
+            self.auth.clone(),
+            tls::node_id(&self.key.public_key()),
+        ));
+        let dialer = transport.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let target = clipsync::discovery::types::PeerInfo {
+                id: local,
+                name: "fixture".into(),
+                addresses: vec![addr],
+                port: addr.port(),
+                version: clipsync::transport::protocol::PROTOCOL_VERSION.into(),
+                platform: "test".into(),
+                metadata: Default::default(),
+                last_seen: 0,
+            };
+            if let Err(error) = dialer.connect_peer(&target).await {
+                eprintln!("Peer fixture could not connect: {error}");
+            }
+        });
+        transport
+    }
 }

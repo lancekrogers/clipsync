@@ -1,6 +1,7 @@
 //! A bounded background IPC worker shared by the GUI and TUI.
 use super::model::{
-    display_text, Connection, Domain, Reconciliation, Route, SnapshotOrder, Ticket,
+    display_text, friendly_device_name, Connection, Domain, Reconciliation, Route, SnapshotOrder,
+    Ticket,
 };
 use crate::{
     config::Config,
@@ -10,7 +11,7 @@ use crate::{
     },
 };
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     sync::mpsc::{self, TrySendError},
     time::{Duration, Instant},
 };
@@ -26,6 +27,9 @@ pub struct HistoryRow {
     pub source: String,
     pub characters: u32,
     pub content_type: String,
+    /// Renderers resolve names and relative times from these at draw time.
+    pub origin: Uuid,
+    pub copied_at: Option<chrono::DateTime<chrono::Local>>,
 }
 #[derive(Clone, Debug)]
 pub struct DeviceRow {
@@ -58,6 +62,9 @@ pub struct View {
     pub action_pending: bool,
     pub history_loading: bool,
     pub detail_loading: bool,
+    /// Peer names (TLS fingerprints) seen connected this session, by node id,
+    /// so history from a device that dropped off keeps its name.
+    pub seen_peers: HashMap<Uuid, String>,
 }
 impl Default for View {
     fn default() -> Self {
@@ -85,6 +92,7 @@ impl Default for View {
             action_pending: false,
             history_loading: false,
             detail_loading: false,
+            seen_peers: HashMap::new(),
         }
     }
 }
@@ -115,6 +123,47 @@ impl View {
                 self.connection,
                 Connection::Ready | Connection::Connected(_) | Connection::Paused
             )
+    }
+    pub fn is_local(&self, id: Uuid) -> bool {
+        !self.node_id.is_empty() && id.to_string() == self.node_id
+    }
+    /// The friendliest known name: the authorization comment for the peer's
+    /// fingerprint, then its advertised name, then a short identifier.
+    pub fn device_name(&self, id: Uuid) -> String {
+        if self.is_local(id) {
+            return "This computer".into();
+        }
+        let advertised = || {
+            self.enrollment.as_ref().and_then(|snapshot| {
+                snapshot
+                    .candidates
+                    .iter()
+                    .find(|candidate| candidate.advertised_node_id == Some(id))
+                    .and_then(|candidate| friendly_device_name(&candidate.display_name))
+            })
+        };
+        let peer = self
+            .devices
+            .iter()
+            .find(|device| device.id == id)
+            .map(|device| device.name.as_str())
+            .or_else(|| self.seen_peers.get(&id).map(String::as_str));
+        let Some(peer) = peer else {
+            return advertised().unwrap_or_else(|| format!("Device {}", &id.to_string()[..8]));
+        };
+        if let Some(fingerprint) = peer.strip_prefix("SHA256:") {
+            self.trusted_devices
+                .iter()
+                .find(|device| device.fingerprint == peer)
+                .and_then(|device| device.comment.as_deref())
+                .and_then(friendly_device_name)
+                .or_else(advertised)
+                .unwrap_or_else(|| {
+                    format!("Device {}", fingerprint.chars().take(8).collect::<String>())
+                })
+        } else {
+            friendly_device_name(peer).unwrap_or_else(|| peer.to_owned())
+        }
     }
     pub fn pause_caption(&self) -> &'static str {
         if self.connection == Connection::Paused {
@@ -385,6 +434,8 @@ pub struct Controller {
     enrollment_pending: bool,
     devices_pending: bool,
     history_generation: Option<(Uuid, u64)>,
+    /// Connected peer names when trusted devices were last read for naming.
+    trusted_checked: Option<Vec<String>>,
     /// Generation that produced the current success notice. A newer status clears it.
     notice_generation: Option<u64>,
     /// Read requests that could not be queued. At most one job per read domain,
@@ -448,6 +499,7 @@ impl Controller {
             enrollment_pending: false,
             devices_pending: false,
             history_generation: None,
+            trusted_checked: None,
             notice_generation: None,
             retries: VecDeque::new(),
         };
@@ -692,6 +744,28 @@ impl Controller {
             self.devices_pending = self.arm(Domain::Devices, sent);
         }
     }
+    /// Authorization comments name connected peers on every screen. Read them
+    /// again only when the set of connected peers changes.
+    fn refresh_trusted(&mut self) {
+        if !self.view.enrollment_supported || self.devices_pending {
+            return;
+        }
+        let mut peers = self
+            .view
+            .devices
+            .iter()
+            .map(|device| device.name.clone())
+            .collect::<Vec<_>>();
+        peers.sort();
+        if self.trusted_checked.as_ref() == Some(&peers) {
+            return;
+        }
+        let sent = self.send(Domain::Devices, Command::TrustedDevices);
+        self.devices_pending = self.arm(Domain::Devices, sent);
+        if sent {
+            self.trusted_checked = Some(peers);
+        }
+    }
     fn refresh(&mut self) {
         if !self.status_pending {
             let sent = self.send(Domain::Status, Command::Status);
@@ -851,6 +925,7 @@ impl Controller {
                     self.devices_pending = false;
                     self.view.enrollment = None;
                     self.view.trusted_devices.clear();
+                    self.trusted_checked = None;
                     self.view.selected_session = None;
                     self.view.history.clear();
                     self.view.selected = None;
@@ -877,6 +952,8 @@ impl Controller {
                 self.apply_live_status(status, response.peers);
                 if self.view.route == Route::Devices {
                     self.refresh_devices();
+                } else {
+                    self.refresh_trusted();
                 }
                 // Refresh history on status polls while keeping typed search and selection.
                 if self.view.route == Route::History
@@ -892,30 +969,36 @@ impl Controller {
                     self.view.history = page
                         .entries
                         .into_iter()
-                        .map(|entry| HistoryRow {
-                            id: entry.id,
-                            preview: display_text(&entry.preview, false),
-                            timestamp: chrono::DateTime::parse_from_rfc3339(&entry.timestamp)
-                                .map(|at| {
-                                    at.with_timezone(&chrono::Local)
-                                        .format("%b %-d · %-I:%M %p")
-                                        .to_string()
-                                })
-                                .unwrap_or_else(|_| show_label(&entry.timestamp)),
-                            source: if entry.origin_node.to_string() == self.view.node_id {
-                                "This computer".into()
-                            } else {
-                                self.view
-                                    .devices
-                                    .iter()
-                                    .find(|peer| peer.id == entry.origin_node)
-                                    .map(|peer| peer.name.clone())
-                                    .unwrap_or_else(|| {
-                                        format!("Device {}", &entry.origin_node.to_string()[..8])
-                                    })
-                            },
-                            characters: entry.content_chars,
-                            content_type: entry.content_type,
+                        .map(|entry| {
+                            let copied_at = chrono::DateTime::parse_from_rfc3339(&entry.timestamp)
+                                .ok()
+                                .map(|at| at.with_timezone(&chrono::Local));
+                            HistoryRow {
+                                id: entry.id,
+                                preview: display_text(&entry.preview, false),
+                                timestamp: copied_at
+                                    .map(|at| at.format("%b %-d · %-I:%M %p").to_string())
+                                    .unwrap_or_else(|| show_label(&entry.timestamp)),
+                                source: if entry.origin_node.to_string() == self.view.node_id {
+                                    "This computer".into()
+                                } else {
+                                    self.view
+                                        .devices
+                                        .iter()
+                                        .find(|peer| peer.id == entry.origin_node)
+                                        .map(|peer| peer.name.clone())
+                                        .unwrap_or_else(|| {
+                                            format!(
+                                                "Device {}",
+                                                &entry.origin_node.to_string()[..8]
+                                            )
+                                        })
+                                },
+                                characters: entry.content_chars,
+                                content_type: entry.content_type,
+                                origin: entry.origin_node,
+                                copied_at,
+                            }
                         })
                         .collect();
                     if self
@@ -1034,6 +1117,9 @@ impl Controller {
                 address: show_label(&peer.address),
             })
             .collect();
+        for device in &self.view.devices {
+            self.view.seen_peers.insert(device.id, device.name.clone());
+        }
         self.reconciliation.mark_fresh(Instant::now());
     }
     fn apply_trusted(&mut self, mut devices: Vec<TrustedDeviceView>) {
@@ -1104,6 +1190,32 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn device_names_prefer_authorization_comments_and_survive_disconnects() {
+        let fingerprint = "SHA256:Jhs4k2abcdefghijklmnopqrstuvwxyz0123456789AB";
+        let local = Uuid::from_u128(1);
+        let peer = Uuid::from_u128(0xabcdef01 << 96);
+        let mut view = View {
+            node_id: local.to_string(),
+            devices: vec![DeviceRow {
+                id: peer,
+                name: fingerprint.into(),
+                address: "10.0.0.2:8484".into(),
+            }],
+            ..View::default()
+        };
+        assert_eq!(view.device_name(local), "This computer");
+        assert_eq!(view.device_name(peer), "Device Jhs4k2ab");
+        view.trusted_devices = vec![TrustedDeviceView {
+            fingerprint: fingerprint.into(),
+            comment: Some(format!("archdtop-clipsync {fingerprint}")),
+        }];
+        assert_eq!(view.device_name(peer), "archdtop");
+        view.seen_peers.insert(peer, fingerprint.into());
+        view.devices.clear();
+        assert_eq!(view.device_name(peer), "archdtop");
+        assert_eq!(view.device_name(Uuid::from_u128(7)), "Device 00000000");
+    }
     #[test]
     fn large_unicode_detail_pages_preserve_every_character() {
         let original = "a🙂é漢\n".repeat(4_000);
