@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Padding, Paragraph, Wrap},
+    widgets::{Block, Padding, Paragraph, Wrap},
     Terminal,
 };
 use std::{
@@ -197,10 +197,14 @@ pub fn run(config: Option<PathBuf>, daemon_binary: Option<PathBuf>) -> Result<()
                     client.dispatch(Intent::Diagnostics);
                 }
             }
-            KeyCode::PageDown if matches!(app.route, Route::History | Route::Devices) => {
+            KeyCode::PageDown
+                if matches!(app.route, Route::History | Route::Devices | Route::Settings) =>
+            {
                 detail_scroll = detail_scroll.saturating_add(8)
             }
-            KeyCode::PageUp if matches!(app.route, Route::History | Route::Devices) => {
+            KeyCode::PageUp
+                if matches!(app.route, Route::History | Route::Devices | Route::Settings) =>
+            {
                 detail_scroll = detail_scroll.saturating_sub(8)
             }
             KeyCode::Up | KeyCode::Down | KeyCode::Enter => {
@@ -372,7 +376,7 @@ fn hints(app: &Companion, search: bool) -> Vec<(&'static str, &'static str)> {
             ("1-4", "sections"),
             ("q", "quit app"),
         ],
-        Route::Devices => vec![
+        Route::Devices | Route::Settings => vec![
             ("1-4", "sections"),
             ("Tab", "next"),
             ("PgUp/PgDn", "scroll"),
@@ -380,7 +384,7 @@ fn hints(app: &Companion, search: bool) -> Vec<(&'static str, &'static str)> {
             ("r", "refresh"),
             ("q", "quit app"),
         ],
-        Route::Overview | Route::Settings => vec![
+        Route::Overview => vec![
             ("1-4", "sections"),
             ("Tab", "next"),
             pause,
@@ -458,8 +462,29 @@ fn render(
             color: theme.color(),
         }
         .render(frame, body, graphics),
-        Route::Settings => settings(frame, body, app, view, theme),
+        Route::Settings => settings(frame, body, app, view, theme, detail_scroll),
     }
+}
+
+/// Draw a single-pane screen. Spacer lines and top padding go first when the
+/// content would otherwise be cut off in a small terminal.
+fn panel(frame: &mut ratatui::Frame, area: Rect, block: Block, lines: Vec<Line>, scroll: u16) {
+    let (width, height) = (area.width.saturating_sub(4), area.height.saturating_sub(2));
+    let (lines, top) = if rows(&lines, width) < height {
+        (lines, 1)
+    } else {
+        (
+            lines.into_iter().filter(|line| line.width() > 0).collect(),
+            0,
+        )
+    };
+    frame.render_widget(
+        Paragraph::new(lines)
+            .scroll((scroll, 0))
+            .wrap(Wrap { trim: false })
+            .block(block.padding(Padding::new(1, 1, top, 0))),
+        area,
+    );
 }
 
 fn section<'a>(theme: &Theme, title: &str) -> [Line<'a>; 2] {
@@ -501,7 +526,6 @@ fn overview(frame: &mut ratatui::Frame, area: Rect, view: &View, theme: &Theme) 
         "●"
     };
     let mut lines = vec![
-        Line::default(),
         Line::from(vec![
             Span::styled(format!("{icon} "), theme.tone(tone)),
             Span::styled(view.connection.label(), theme.tone(tone)),
@@ -542,14 +566,7 @@ fn overview(frame: &mut ratatui::Frame, area: Rect, view: &View, theme: &Theme) 
     } else {
         Line::styled("Status is current.", theme.muted())
     });
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            theme
-                .block(" Overview ", false)
-                .padding(Padding::horizontal(1)),
-        ),
-        area,
-    );
+    panel(frame, area, theme.block(" Overview ", false), lines, 0);
 }
 
 fn field<'a>(theme: &Theme, label: &str, value: Vec<Span<'a>>) -> Line<'a> {
@@ -585,7 +602,14 @@ fn fit_path(path: &str, width: usize) -> String {
     }
 }
 
-fn settings(frame: &mut ratatui::Frame, area: Rect, app: &Companion, view: &View, theme: &Theme) {
+fn settings(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    app: &Companion,
+    view: &View,
+    theme: &Theme,
+    scroll: u16,
+) {
     let setup = &app.setup;
     let room = usize::from(area.width.saturating_sub(15));
     let path = |path: Option<&std::path::Path>| {
@@ -624,12 +648,12 @@ fn settings(frame: &mut ratatui::Frame, area: Rect, app: &Companion, view: &View
         key("x"),
         Span::raw(" stop   "),
         key("R"),
-        Span::raw(" restart   "),
-        key("a"),
-        Span::raw(" login startup"),
+        Span::raw(" restart"),
     ]));
     lines.push(Line::from(vec![
         Span::raw("  "),
+        key("a"),
+        Span::raw(" login startup   "),
         key("d"),
         Span::raw(" show redacted diagnostics"),
     ]));
@@ -641,14 +665,7 @@ fn settings(frame: &mut ratatui::Frame, area: Rect, app: &Companion, view: &View
         lines.extend(section(theme, "Diagnostics"));
         lines.extend(report.lines().map(|line| Line::from(format!("  {line}"))));
     }
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            theme
-                .block(" Settings ", false)
-                .padding(Padding::new(1, 1, 1, 0)),
-        ),
-        area,
-    );
+    panel(frame, area, theme.block(" Settings ", false), lines, scroll);
 }
 
 fn setup(frame: &mut ratatui::Frame, area: Rect, app: &Companion, choice: usize, theme: &Theme) {
@@ -683,14 +700,7 @@ fn setup(frame: &mut ratatui::Frame, area: Rect, app: &Companion, choice: usize,
             Span::styled(" use configuration", theme.muted()),
         ]));
     }
-    frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            theme
-                .block(" Setup ", true)
-                .padding(Padding::new(1, 1, 1, 0)),
-        ),
-        area,
-    );
+    panel(frame, area, theme.block(" Setup ", true), lines, 0);
 }
 
 #[cfg(test)]
