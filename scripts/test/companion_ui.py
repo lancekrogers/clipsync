@@ -106,7 +106,8 @@ if os.environ.get('CLIPSYNC_IMAGE_FIXTURE') == '1' and sys.platform == 'darwin':
     click(find_copy('[Image]'))
     wait_for(lambda:'Copy image' in text(), 'image detail loads')
     wait_for(lambda:'Copied image preview' in text(), 'image preview renders')
-    assert not any(isinstance(v,dict) and str(v.get('label','')).strip()=='[Image]' for _,node in nodes() for v in node), 'preview replaces the [Image] placeholder'
+    # Static text carries `value`; widgets carry `label`. List rows contain more than "[Image]".
+    assert not any(isinstance(v,dict) and '[Image]' in (str(v.get('label','')).strip(),str(v.get('value','')).strip()) for _,node in nodes() for v in node), 'preview replaces the [Image] placeholder'
     shot('history-image-selected')
     click('Copy image')
     if os.environ.get('CLIPSYNC_IMAGE_FAILURE_FIXTURE') == '1':
