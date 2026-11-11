@@ -26,6 +26,8 @@ const CODE_SPACE: u32 = 1_000_000;
 /// Largest multiple of `CODE_SPACE` that fits in a u32; draws at or above it are
 /// discarded so every code is equally likely.
 const UNBIASED_LIMIT: u32 = u32::MAX - (u32::MAX % CODE_SPACE);
+const _: () =
+    assert!(UNBIASED_LIMIT.is_multiple_of(CODE_SPACE) && u32::MAX - UNBIASED_LIMIT < CODE_SPACE);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -229,8 +231,6 @@ mod tests {
             leading[usize::from(code.digits().as_bytes()[0] - b'0')] = true;
         }
         assert!(leading.iter().all(|seen| *seen), "{leading:?}");
-        assert_eq!(UNBIASED_LIMIT % CODE_SPACE, 0);
-        assert!(u32::MAX - UNBIASED_LIMIT < CODE_SPACE);
     }
 
     #[test]

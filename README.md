@@ -78,7 +78,7 @@ The desktop uses native macOS window controls with a blue/teal interface. Both
 clients support setup inspection, user-service controls, pause/resume and device
 pairing. To pair, choose **Allow a new device** on one computer and type the
 six-digit code it shows on the other; it needs no Tailscale or SSH session. Each
-code works once, and nothing is saved until both computers have checked it.
+code works once, and neither computer saves anything until the code is verified.
 Discovery alone never authorizes a device. See
 [pairing two computers](docs/COMPANION.md#pair-two-computers) and
 [what a stranger on the same network can and cannot do](docs/SECURITY.md#pairing-a-new-device).

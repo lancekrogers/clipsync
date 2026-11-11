@@ -74,8 +74,8 @@ TUI (same daemon/config):
 
 Each code works once. After a try, or after two minutes, a new code appears.
 One window accepts five tries and closes after ten minutes or once a device has
-paired. Nothing is saved until both computers have checked the code, so a
-mistyped code never pairs the wrong computer. While a code is being typed in
+paired. Neither computer saves anything until the code is verified, so a
+mistyped code never pairs anything. While a code is being typed in
 the TUI, digits stay in the field and `q` does not quit; `Esc` cancels.
 
 When pairing fails, the computer that typed the code says why:
