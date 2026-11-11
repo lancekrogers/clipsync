@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
-/// Bound for handshake and write stalls (not human verify idle).
+/// Bound for each handshake read/write; nobody waits on a person after the code is typed.
 pub const IO_TIMEOUT_SECS: u64 = 15;
 /// Once a session frame length byte arrives, bound the remainder.
 pub const PARTIAL_FRAME_TIMEOUT_SECS: u64 = 15;
@@ -11,6 +11,22 @@ pub const PARTIAL_FRAME_TIMEOUT_SECS: u64 = 15;
 pub const PERSIST_ACK_TIMEOUT_SECS: u64 = 10;
 pub const MAX_DISPLAY_NAME_CHARS: usize = 64;
 
+/// Stable `Error.code` values the allowing side sends before closing.
+pub mod refusal {
+    pub const NO_CODE: &str = "no_code";
+    pub const WRONG_CODE: &str = "wrong_code";
+    pub const BUSY: &str = "busy";
+    pub const RATE_LIMITED: &str = "rate_limited";
+    pub const REFLECTION: &str = "reflection";
+    pub const CLOSED: &str = "closed";
+    pub const PROTOCOL: &str = "protocol";
+    /// Sent on `clipsync-enroll/1`; older dialers show `message` as the session error.
+    pub const UPDATE_REQUIRED: &str = "update_required";
+}
+
+/// `clipsync-enroll/2` frames. Joining sends Hello and the first KeyConfirm; the
+/// allowing side answers only after it has consumed its code. Fingerprints are
+/// never sent: each side reads the other's key from the TLS session.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EnrollMessage {
@@ -18,22 +34,23 @@ pub enum EnrollMessage {
         session_id: Uuid,
         /// 32-byte nonce, hex-encoded
         nonce_hex: String,
-        local_fingerprint: String,
         display_name: String,
+        /// SPAKE2 message from the joining side.
+        pake_hex: String,
     },
     HelloAck {
         session_id: Uuid,
         peer_session_id: Uuid,
         nonce_hex: String,
-        local_fingerprint: String,
         display_name: String,
+        /// SPAKE2 message from the allowing side.
+        pake_hex: String,
     },
-    Confirm {
+    /// HMAC under the PAKE key over the transcript; joining sends first.
+    KeyConfirm {
         session_id: Uuid,
         peer_session_id: Uuid,
-        /// Bind: local nonce || peer nonce || both fingerprints
-        binding_hex: String,
-        confirmed: bool,
+        mac_hex: String,
     },
     /// Honest durable-commit signal: sender persisted the peer's key.
     PersistAck {
@@ -49,16 +66,6 @@ pub enum EnrollMessage {
         code: String,
         message: String,
     },
-}
-
-pub fn binding_hex(local_nonce: &[u8], peer_nonce: &[u8], local_fp: &str, peer_fp: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(local_nonce);
-    hasher.update(peer_nonce);
-    hasher.update(local_fp.as_bytes());
-    hasher.update(peer_fp.as_bytes());
-    hex::encode(hasher.finalize())
 }
 
 pub fn random_nonce() -> [u8; 32] {

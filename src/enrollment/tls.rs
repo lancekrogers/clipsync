@@ -3,6 +3,10 @@
 //! `UnknownKeyVerifier` accepts any well-formed Ed25519 RPK after rustls verifies
 //! the TLS 1.3 CertificateVerify signature. It must **never** be used for
 //! production `clipsync/2` sync — that path continues to pin via `tls::configs`.
+//!
+//! Both ends also offer the retired `clipsync-enroll/1` so an older peer is
+//! recognised and told to update. Nothing is exchanged on it; a downgrade can
+//! only end the attempt.
 
 use crate::{
     auth::{Authenticator, PublicKey},
@@ -20,7 +24,17 @@ use rustls::{
 };
 use std::sync::Arc;
 
-pub const ENROLL_ALPN: &[u8] = b"clipsync-enroll/1";
+pub const ENROLL_ALPN: &[u8] = b"clipsync-enroll/2";
+/// Fingerprint-compare enrollment. Only negotiated to refuse it.
+pub const LEGACY_ENROLL_ALPN: &[u8] = b"clipsync-enroll/1";
+/// RFC 8446 exporter label: only the two ends of one TLS connection agree on its output.
+pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-clipsync-enroll/2 key confirmation";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrollVersion {
+    Current,
+    Legacy,
+}
 
 #[derive(Debug)]
 struct UnknownKeyVerifier;
@@ -123,9 +137,17 @@ impl ClientCertVerifier for UnknownKeyVerifier {
     }
 }
 
-/// Build enrollment client/server rustls configs (ALPN `clipsync-enroll/1`).
+/// Build enrollment client/server rustls configs offering [`ENROLL_ALPN`] first.
 pub async fn enroll_configs(
     auth: &dyn Authenticator,
+) -> Result<(Arc<rustls::ClientConfig>, Arc<rustls::ServerConfig>)> {
+    enroll_configs_with(auth, &[ENROLL_ALPN, LEGACY_ENROLL_ALPN]).await
+}
+
+/// Configs with an explicit ALPN list (tests stand in for older peers with it).
+pub async fn enroll_configs_with(
+    auth: &dyn Authenticator,
+    alpn: &[&[u8]],
 ) -> Result<(Arc<rustls::ClientConfig>, Arc<rustls::ServerConfig>)> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let private = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(auth.identity_pkcs8().await?));
@@ -144,7 +166,7 @@ pub async fn enroll_configs(
             rustls::client::AlwaysResolvesClientRawPublicKeys::new(identity.clone()),
         ));
     client.resumption = rustls::client::Resumption::disabled();
-    client.alpn_protocols = vec![ENROLL_ALPN.to_vec()];
+    client.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     let mut server = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(verifier)
@@ -153,17 +175,20 @@ pub async fn enroll_configs(
         ));
     server.send_tls13_tickets = 0;
     server.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
-    server.alpn_protocols = vec![ENROLL_ALPN.to_vec()];
+    server.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     Ok((Arc::new(client), Arc::new(server)))
 }
 
-pub fn peer_key_from_common(common: &rustls::CommonState) -> Result<PublicKey> {
-    if common.alpn_protocol() != Some(ENROLL_ALPN) {
-        bail!("Missing enrollment protocol negotiation");
-    }
+/// The TLS-authenticated peer key and which enrollment protocol was agreed.
+pub fn peer_key_from_common(common: &rustls::CommonState) -> Result<(PublicKey, EnrollVersion)> {
+    let version = match common.alpn_protocol() {
+        Some(p) if p == ENROLL_ALPN => EnrollVersion::Current,
+        Some(p) if p == LEGACY_ENROLL_ALPN => EnrollVersion::Legacy,
+        _ => bail!("Missing enrollment protocol negotiation"),
+    };
     let cert = common
         .peer_certificates()
         .and_then(|c| c.first())
         .ok_or_else(|| anyhow::anyhow!("Missing peer identity"))?;
-    tls::public_key(cert.as_ref())
+    Ok((tls::public_key(cert.as_ref())?, version))
 }

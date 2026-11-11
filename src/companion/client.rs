@@ -7,7 +7,8 @@ use crate::{
     config::Config,
     control::{
         self, error_codes, Command, ControlError, DaemonStatus, DiagnosticError, DiagnosticsReport,
-        EnrollmentSnapshot, HistoryRemovalView, ImagePreview, Response, TrustedDeviceView,
+        EnrollmentSnapshot, HistoryRemovalView, ImagePreview, PairingCode, Response,
+        TrustedDeviceView,
     },
 };
 use std::{
@@ -37,6 +38,29 @@ pub struct DeviceRow {
     pub name: String,
     pub address: String,
 }
+/// Digits typed toward a pairing code. `Debug` hides them.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct CodeEntry(String);
+impl CodeEntry {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+    pub fn is_complete(&self) -> bool {
+        self.0.len() == PairingCode::DIGITS
+    }
+}
+impl std::fmt::Debug for CodeEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "CodeEntry({} digits)", self.0.len())
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct View {
     pub route: Route,
@@ -44,12 +68,16 @@ pub struct View {
     pub stale: bool,
     pub devices: Vec<DeviceRow>,
     pub node_id: String,
+    /// Trusted devices and revoke (either enrollment feature).
     pub enrollment_supported: bool,
+    /// Pairing with a code (`enrollment_code`).
+    pub pairing_supported: bool,
     pub history_delete_supported: bool,
     pub history_clear_supported: bool,
     pub enrollment: Option<EnrollmentSnapshot>,
     pub trusted_devices: Vec<TrustedDeviceView>,
     pub device_address: String,
+    pub pairing_code: CodeEntry,
     pub selected_session: Option<Uuid>,
     pub history: Vec<HistoryRow>,
     pub query: String,
@@ -77,11 +105,13 @@ impl Default for View {
             devices: Vec::new(),
             node_id: String::new(),
             enrollment_supported: false,
+            pairing_supported: false,
             history_delete_supported: false,
             history_clear_supported: false,
             enrollment: None,
             trusted_devices: Vec::new(),
             device_address: String::new(),
+            pairing_code: CodeEntry::default(),
             selected_session: None,
             history: Vec::new(),
             query: String::new(),
@@ -218,27 +248,30 @@ fn user_facing_error(error: &ControlError) -> (Option<String>, String) {
         }
         Some(error_codes::FRAME_TOO_LARGE) => "The service rejected an oversized request.",
         Some(error_codes::DAEMON_PAUSED) => "Sync is paused. Copies stay on this computer.",
-        Some(error_codes::ENROLLMENT_CLOSED) => "Enrollment is not open. Allow a device, then try again.",
-        Some(error_codes::ENROLLMENT_EXPIRED) => "Verification expired. Start the connection again.",
-        Some(error_codes::ENROLLMENT_CANCELLED) => "The connection was cancelled.",
+        Some(error_codes::ENROLLMENT_CLOSED) => "This computer is not allowing a device right now.",
+        Some(error_codes::ENROLLMENT_EXPIRED) => "Pairing took too long and stopped. Try again.",
+        Some(error_codes::ENROLLMENT_CANCELLED) => "Pairing was cancelled.",
         Some(error_codes::ENROLLMENT_RATE_LIMITED) => {
-            "Too many connection attempts. Wait and try again."
+            "Too many pairing attempts. Wait a minute and try again."
         }
         Some(error_codes::ENROLLMENT_MISMATCH) => {
-            "These computers could not verify each other. No device was authorized."
+            "These computers could not verify each other. Nothing was paired."
         }
         Some(error_codes::ENROLLMENT_REFLECTION) | Some(error_codes::ENROLLMENT_REPLAY) => {
-            "That connection was refused. No device was authorized."
+            "That connection was refused. Nothing was paired."
         }
         Some(error_codes::ENROLLMENT_OVERSIZE) => {
             "The connection was refused because the message was too large."
         }
-        Some(error_codes::ENROLLMENT_BUSY) => "A connection is already in progress.",
-        Some(error_codes::ENROLLMENT_NOT_FOUND) => "That connection is no longer available.",
+        Some(error_codes::ENROLLMENT_BUSY) => "Another pairing attempt is in progress. Try again in a moment.",
+        Some(error_codes::ENROLLMENT_NOT_FOUND) => "That pairing attempt is no longer available.",
         Some(error_codes::ENROLLMENT_INCOMPLETE) => {
-            "Authorization is not finished on both computers."
+            "Pairing is not finished on both computers."
         }
         Some(error_codes::ENROLLMENT_UNAUTHORIZED) => "The service rejected that device action.",
+        Some(error_codes::ENROLLMENT_ADDRESS_INVALID) => {
+            "Type the address with its port, like 192.168.1.20:8485."
+        }
         Some(_) => "The service could not complete that action. Try again.",
         None if error.message.to_ascii_lowercase().contains("timed out") => {
             "The service did not answer in time. Check that it is running, then try again."
@@ -447,13 +480,16 @@ pub enum Intent {
     OpenEnrollment,
     DiscoverEnrollment,
     DeviceAddress(String),
+    /// Digits typed so far; anything else is dropped and input stops at six.
+    PairingCode(String),
     SelectSession(Uuid),
-    DialEnrollment {
+    /// Dial `address` with the typed code. The code is cleared once sent:
+    /// each code is good for one attempt.
+    Pair {
         address: String,
         expected_fingerprint: Option<String>,
         expected_node_id: Option<Uuid>,
     },
-    ConfirmEnrollment(Uuid),
     CancelEnrollment(Option<Uuid>),
     RevokeDevice(String),
 }
@@ -673,43 +709,43 @@ impl Controller {
             Intent::DiscoverEnrollment if self.can_enroll() => {
                 self.view.action_pending = self.send(Domain::Action, Command::EnrollmentDiscover);
             }
-            Intent::DialEnrollment {
+            Intent::PairingCode(text) => {
+                self.view.pairing_code = CodeEntry(
+                    text.chars()
+                        .filter(char::is_ascii_digit)
+                        .take(PairingCode::DIGITS)
+                        .collect(),
+                );
+            }
+            Intent::Pair {
                 address,
                 expected_fingerprint,
                 expected_node_id,
             } if self.can_enroll() => {
+                let Some(code) = PairingCode::parse(self.view.pairing_code.as_str()) else {
+                    self.view.error =
+                        Some("Type the 6-digit code shown on the other computer.".into());
+                    self.view.error_code = None;
+                    return;
+                };
+                self.view.pairing_code = CodeEntry::default();
                 self.view.action_pending = self.send(
                     Domain::Action,
-                    Command::EnrollmentDial {
+                    Command::EnrollmentPair {
                         address,
+                        code,
                         expected_fingerprint,
                         expected_node_id,
                     },
                 );
             }
-            Intent::ConfirmEnrollment(session_id) if self.can_enroll() => {
-                let verified = self.view.enrollment.as_ref().is_some_and(|snapshot| {
-                    snapshot.sessions.iter().any(|session| {
-                        session.session_id == session_id
-                            && session.peer_fingerprint.is_some()
-                            && matches!(
-                                session.state.as_str(),
-                                "AwaitingLocalConfirm" | "AwaitingPeerConfirm"
-                            )
-                            && !session.local_confirmed
-                            && session.remaining_secs > 0
-                    })
-                });
-                if verified {
-                    self.view.action_pending =
-                        self.send(Domain::Action, Command::EnrollmentConfirm { session_id });
-                }
-            }
             Intent::CancelEnrollment(session_id) if self.can_enroll() => {
                 self.view.action_pending =
                     self.send(Domain::Action, Command::EnrollmentCancel { session_id });
             }
-            Intent::RevokeDevice(fingerprint) if self.can_enroll() => {
+            Intent::RevokeDevice(fingerprint)
+                if self.view.can_act() && self.view.enrollment_supported =>
+            {
                 self.view.action_pending =
                     self.send(Domain::Action, Command::EnrollmentRevoke { fingerprint });
             }
@@ -849,14 +885,16 @@ impl Controller {
             }
         }
     }
+    /// Pairing actions need a service with code pairing; an older service is
+    /// never sent a command it would parse as the removed fingerprint flow.
     pub fn can_enroll(&self) -> bool {
-        self.view.can_act() && self.view.enrollment_supported
+        self.view.can_act() && self.view.pairing_supported
     }
     fn refresh_devices(&mut self) {
         if !self.view.enrollment_supported {
             return;
         }
-        if !self.enrollment_pending {
+        if self.view.pairing_supported && !self.enrollment_pending {
             let sent = self.send(
                 Domain::Enrollment,
                 Command::EnrollmentInspect { session_id: None },
@@ -1015,7 +1053,9 @@ impl Controller {
                         .as_ref()
                         .is_some_and(|features| features.iter().any(|feature| feature == name))
                 };
-                self.view.enrollment_supported = supports(control::FEATURE_ENROLLMENT);
+                self.view.pairing_supported = supports(control::FEATURE_ENROLLMENT_CODE);
+                self.view.enrollment_supported =
+                    self.view.pairing_supported || supports(control::FEATURE_ENROLLMENT);
                 self.view.history_delete_supported = supports(control::FEATURE_HISTORY_DELETE);
                 self.view.history_clear_supported = supports(control::FEATURE_HISTORY_CLEAR);
                 let compatible = response.features.as_ref().is_some_and(|features| {
@@ -1276,6 +1316,9 @@ impl Controller {
     }
     fn apply_enrollment(&mut self, mut snapshot: EnrollmentSnapshot) {
         snapshot.listen_addr = snapshot.listen_addr.take().map(|addr| show_label(&addr));
+        for hint in &mut snapshot.listen_hints {
+            *hint = show_label(hint);
+        }
         if let Some(outcome) = snapshot.outcome.as_mut() {
             outcome.status = show_label(&outcome.status);
             outcome.detail = outcome.detail.take().map(|detail| show_label(&detail));
@@ -1297,7 +1340,20 @@ impl Controller {
                 .peer_display_name
                 .take()
                 .map(|name| show_label(&name));
-            session.error = session.error.take().map(|error| show_label(&error));
+            // Fixed text for known reasons; raw daemon text is never shown.
+            session.error = session
+                .failure
+                .as_deref()
+                .map(|failure| match control::PairingFailure::parse(failure) {
+                    Some(known) => known.message().to_string(),
+                    None => "Pairing could not be completed.".to_string(),
+                })
+                .or_else(|| {
+                    session
+                        .error
+                        .take()
+                        .map(|_| "Pairing could not be completed.".into())
+                });
         }
         for candidate in &mut snapshot.candidates {
             candidate.display_name = show_label(&candidate.display_name);
@@ -1425,6 +1481,124 @@ mod tests {
 
     fn sent(jobs: &mpsc::Receiver<Job>) -> Vec<Command> {
         jobs.try_iter().map(|job| job.command).collect()
+    }
+
+    fn is_pairing(command: &Command) -> bool {
+        matches!(
+            command,
+            Command::EnrollmentOpen
+                | Command::EnrollmentDiscover
+                | Command::EnrollmentPair { .. }
+                | Command::EnrollmentInspect { .. }
+                | Command::EnrollmentCancel { .. }
+        )
+    }
+
+    #[test]
+    fn a_service_without_code_pairing_is_never_sent_a_pairing_command() {
+        // A fingerprint-compare service would parse an extra field and run the
+        // old flow, so nothing about pairing reaches it.
+        let (mut client, jobs) = ready(&["enrollment"]);
+        assert!(client.view.enrollment_supported);
+        assert!(!client.view.pairing_supported);
+        client.dispatch(Intent::Navigate(Route::Devices));
+        client.dispatch(Intent::OpenEnrollment);
+        client.dispatch(Intent::DiscoverEnrollment);
+        client.dispatch(Intent::PairingCode("123456".into()));
+        client.dispatch(Intent::Pair {
+            address: "127.0.0.1:8485".into(),
+            expected_fingerprint: None,
+            expected_node_id: None,
+        });
+        client.dispatch(Intent::CancelEnrollment(None));
+        let sent = sent(&jobs);
+        assert!(!sent.iter().any(is_pairing), "{sent:?}");
+        assert!(sent.iter().any(|c| matches!(c, Command::TrustedDevices)));
+    }
+
+    #[test]
+    fn a_typed_code_is_sent_once_and_never_shown_in_debug() {
+        let (mut client, jobs) = ready(&["enrollment_code"]);
+        assert!(client.view.pairing_supported && client.view.enrollment_supported);
+        client.dispatch(Intent::PairingCode("48a2 9-13 77".into()));
+        assert_eq!(client.view.pairing_code.as_str(), "482913");
+        assert!(!format!("{:?}", client.view).contains("482913"));
+        let pair = Intent::Pair {
+            address: "127.0.0.1:8485".into(),
+            expected_fingerprint: None,
+            expected_node_id: None,
+        };
+        client.dispatch(pair);
+        assert!(client.view.pairing_code.is_empty());
+        let pairs: Vec<_> = sent(&jobs).into_iter().filter(is_pairing).collect();
+        match pairs.as_slice() {
+            [Command::EnrollmentPair { code, address, .. }] => {
+                assert_eq!(code.digits(), "482913");
+                assert_eq!(address, "127.0.0.1:8485");
+            }
+            other => panic!("{other:?}"),
+        }
+        client.view.action_pending = false;
+        client.dispatch(Intent::Pair {
+            address: "127.0.0.1:8485".into(),
+            expected_fingerprint: None,
+            expected_node_id: None,
+        });
+        assert!(
+            !sent(&jobs).iter().any(is_pairing),
+            "an empty code is not sent"
+        );
+        assert!(client
+            .view
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("6-digit code"));
+    }
+
+    #[test]
+    fn session_errors_are_fixed_text_for_their_reason() {
+        let (mut client, _jobs) = ready(&["enrollment_code"]);
+        let session = |failure: Option<&str>, error: Option<&str>| control::EnrollmentSessionView {
+            session_id: Uuid::new_v4(),
+            role: "initiator".into(),
+            state: "Failed".into(),
+            peer_display_name: None,
+            local_fingerprint: "SHA256:local".into(),
+            peer_fingerprint: None,
+            peer_node_id: None,
+            dialed_addr: None,
+            remaining_secs: 0,
+            error: error.map(str::to_owned),
+            failure: failure.map(str::to_owned),
+        };
+        client.apply_enrollment(EnrollmentSnapshot {
+            requested_session_id: None,
+            listening: false,
+            listen_addr: None,
+            listen_hints: vec![],
+            expires_at: None,
+            sessions: vec![
+                session(Some("wrong_code"), Some("raw /Users/someone/path")),
+                session(Some("not_a_reason"), None),
+                session(None, Some("raw /Users/someone/path")),
+            ],
+            candidates: vec![],
+            outcome: None,
+            code: None,
+        });
+        let errors: Vec<_> = client
+            .view
+            .enrollment
+            .as_ref()
+            .unwrap()
+            .sessions
+            .iter()
+            .map(|s| s.error.clone().unwrap())
+            .collect();
+        assert_eq!(errors[0], control::PairingFailure::WrongCode.message());
+        assert_eq!(errors[1], "Pairing could not be completed.");
+        assert_eq!(errors[2], "Pairing could not be completed.");
     }
 
     #[test]

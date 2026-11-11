@@ -32,6 +32,7 @@ pub const ENROLLMENT_BUSY: &str = "enrollment_busy";
 pub const ENROLLMENT_NOT_FOUND: &str = "enrollment_not_found";
 pub const ENROLLMENT_INCOMPLETE: &str = "enrollment_incomplete";
 pub const ENROLLMENT_UNAUTHORIZED: &str = "enrollment_unauthorized";
+pub const ENROLLMENT_ADDRESS_INVALID: &str = "enrollment_address_invalid";
 
 /// Ring-only. Handler failures that have no contract `error_code`.
 pub const CONTROL_FAILED: &str = "control_failed";
@@ -104,13 +105,10 @@ fn diagnostic_entry(code: &str) -> Option<(&'static str, &'static str)> {
             "Sync is paused. Copies stay on this computer.",
         ),
         (ENROLLMENT_CLOSED, "Enrollment is not open."),
-        (ENROLLMENT_EXPIRED, "Enrollment verification expired."),
+        (ENROLLMENT_EXPIRED, "Enrollment expired."),
         (ENROLLMENT_CANCELLED, "Enrollment was cancelled."),
         (ENROLLMENT_RATE_LIMITED, "Enrollment is rate limited."),
-        (
-            ENROLLMENT_MISMATCH,
-            "Enrollment verification did not match.",
-        ),
+        (ENROLLMENT_MISMATCH, "Enrollment did not match."),
         (ENROLLMENT_REFLECTION, "Enrollment was refused."),
         (ENROLLMENT_REPLAY, "Enrollment was refused."),
         (
@@ -124,6 +122,10 @@ fn diagnostic_entry(code: &str) -> Option<(&'static str, &'static str)> {
         ),
         (ENROLLMENT_INCOMPLETE, "Enrollment is not finished."),
         (ENROLLMENT_UNAUTHORIZED, "Enrollment was not authorized."),
+        (
+            ENROLLMENT_ADDRESS_INVALID,
+            "The pairing address is not an address and port.",
+        ),
         (CONTROL_TIMEOUT, "The control request timed out."),
         (CONTROL_PROTOCOL, "The control request was rejected."),
         (CONTROL_FAILED, GENERIC_DIAGNOSTIC_MESSAGE),
@@ -140,7 +142,11 @@ pub const FEATURE_HISTORY_READ: &str = "history_read";
 pub const FEATURE_HISTORY_COPY: &str = "history_copy";
 pub const FEATURE_DIAGNOSTICS: &str = "diagnostics";
 pub const FEATURE_STATUS_V2: &str = "status_v2";
+/// Fingerprint-compare pairing. Daemons with code pairing no longer advertise it,
+/// so older companions offer an update instead of the removed confirm step.
 pub const FEATURE_ENROLLMENT: &str = "enrollment";
+/// Pairing with a one-time code (`EnrollmentPair`), plus trusted devices and revoke.
+pub const FEATURE_ENROLLMENT_CODE: &str = "enrollment_code";
 pub const FEATURE_HISTORY_DELETE: &str = "history_delete";
 pub const FEATURE_HISTORY_CLEAR: &str = "history_clear";
 

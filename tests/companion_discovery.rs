@@ -1,4 +1,4 @@
-//! Real mDNS enrollment discovery + dial mutual-trust regression (disposable Linux only).
+//! Real mDNS discovery + code pairing regression (disposable Linux only).
 //!
 //! Scope limit: two enrollment managers / processes in the **same** disposable
 //! container with real sockets and multicast — **not** a physical two-host LAN proof.
@@ -51,10 +51,7 @@ async fn reserve_ephemeral_all_ifaces_port() -> u16 {
     port
 }
 
-async fn open_manager_on_all_ifaces(
-    id: &Identity,
-    label: &str,
-) -> (Arc<EnrollmentManager>, SocketAddr) {
+async fn manager_on_all_ifaces(id: &Identity, label: &str) -> (Arc<EnrollmentManager>, u16) {
     let port = reserve_ephemeral_all_ifaces_port().await;
     let mut config = Config::default();
     config.node_id = id.id();
@@ -67,22 +64,7 @@ async fn open_manager_on_all_ifaces(
     let manager = Arc::new(EnrollmentManager::new(Arc::new(config), id.auth.clone()).unwrap());
     // Non-zero override preserves unspecified IP; override 0 would force localhost.
     manager.set_listen_port_override(port).await;
-    let snap = manager.open().await.expect("enrollment open");
-    assert!(snap.listening, "{label}: expected listening after open");
-    let addr: SocketAddr = snap
-        .listen_addr
-        .as_ref()
-        .unwrap_or_else(|| panic!("{label}: missing listen_addr"))
-        .parse()
-        .unwrap_or_else(|e| panic!("{label}: parse listen_addr: {e}"));
-    assert!(
-        addr.ip().is_unspecified(),
-        "{label}: expected bind 0.0.0.0 (unspecified), got {addr} — \
-         if override was 0, see resolve_listen_addr localhost remap in \
-         src/enrollment/manager.rs"
-    );
-    assert_eq!(addr.port(), port, "{label}: ephemeral port mismatch");
-    (manager, addr)
+    (manager, port)
 }
 
 async fn wait_mdns_peer(
@@ -111,21 +93,6 @@ async fn wait_mdns_peer(
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-}
-
-async fn wait_bound(mgr: &EnrollmentManager, peer_fp: &str) -> uuid::Uuid {
-    for _ in 0..200 {
-        let snap = mgr.inspect(None).await.unwrap();
-        if let Some(s) = snap
-            .sessions
-            .iter()
-            .find(|s| s.peer_fingerprint.as_deref() == Some(peer_fp))
-        {
-            return s.session_id;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    panic!("session did not bind peer {peer_fp}");
 }
 
 async fn wait_succeeded(mgr: &EnrollmentManager, session_id: uuid::Uuid) {
@@ -157,20 +124,12 @@ async fn wait_authorized(auth: &clipsync::auth::SshAuthenticator, key: &clipsync
     panic!("peer was not authorized in time");
 }
 
-fn dialing_session_id(snap: &clipsync::control::EnrollmentSnapshot) -> uuid::Uuid {
-    snap.sessions
-        .iter()
-        .find(|s| s.state == "Dialing")
-        .map(|s| s.session_id)
-        .expect("dial snapshot should include Dialing session")
-}
-
-/// Two managers advertise `_clipsync-enroll._tcp` on 0.0.0.0 ephemeral ports,
-/// discover each other via real mDNS (no inject), dial with advertised TLS
-/// fingerprint hint, mutual confirm → both Succeeded + durable pins.
+/// B allows a device and advertises `_clipsync-enroll._tcp` on 0.0.0.0. A,
+/// with no window of its own, finds B over real mDNS (no inject), types B's
+/// code with the advertised fingerprint hint → both Succeeded + durable pins.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "disposable Linux only: CLIPSYNC_DISPOSABLE_DESKTOP=1 + real mDNS multicast"]
-async fn mdns_discovery_and_mutual_trust_regression() {
+async fn mdns_discovery_and_code_pairing_regression() {
     require_disposable_linux();
 
     let a = Identity::new().await;
@@ -180,28 +139,30 @@ async fn mdns_discovery_and_mutual_trust_regression() {
     assert_ne!(a.id(), b.id(), "identities must be distinct");
     assert_ne!(fp_a, fp_b, "fingerprints must be distinct");
 
-    let (ma, addr_a) = open_manager_on_all_ifaces(&a, "manager-a").await;
-    let (mb, addr_b) = open_manager_on_all_ifaces(&b, "manager-b").await;
-    assert_ne!(addr_a.port(), addr_b.port(), "ephemeral ports must differ");
+    let (ma, _) = manager_on_all_ifaces(&a, "manager-a").await;
+    let (mb, port_b) = manager_on_all_ifaces(&b, "manager-b").await;
+    let open = mb.open().await.expect("enrollment open");
+    let addr_b: SocketAddr = open.listen_addr.as_ref().unwrap().parse().unwrap();
+    assert!(
+        addr_b.ip().is_unspecified(),
+        "expected 0.0.0.0, got {addr_b}"
+    );
+    assert_eq!(addr_b.port(), port_b);
+    let code = open.code.expect("an open window shows a code").code;
+    assert!(
+        !open.listen_hints.is_empty(),
+        "a wildcard bind must offer LAN addresses to type"
+    );
 
-    // Real mDNS: each must see the other as source=mdns with correct TLS fp hint.
+    // Real mDNS, browse only: A never opens a window.
     let cand_for_b = wait_mdns_peer(&ma, b.id(), &fp_b, "manager-a→b").await;
-    let cand_for_a = wait_mdns_peer(&mb, a.id(), &fp_a, "manager-b→a").await;
-
     assert_eq!(cand_for_b.source, "mdns");
-    assert_eq!(cand_for_a.source, "mdns");
+    assert!(!ma.inspect(None).await.unwrap().listening);
     assert_eq!(
         cand_for_b.advertised_fingerprint.as_deref(),
         Some(fp_b.as_str()),
         "mDNS ssh_fp hint must match B TLS fingerprint"
     );
-    assert_eq!(
-        cand_for_a.advertised_fingerprint.as_deref(),
-        Some(fp_a.as_str()),
-        "mDNS ssh_fp hint must match A TLS fingerprint"
-    );
-
-    // Dial address must be reachable; prefer discovered address, require correct port.
     let dial_addr: SocketAddr = cand_for_b.address.parse().expect("candidate address parse");
     assert_eq!(
         dial_addr.port(),
@@ -209,55 +170,41 @@ async fn mdns_discovery_and_mutual_trust_regression() {
         "discovered candidate port must match B listen port"
     );
 
-    // No trust before mutual confirmation.
-    assert!(
-        !a.auth.is_authorized(&b.key.public_key()).await.unwrap(),
-        "A must not trust B before confirm"
-    );
-    assert!(
-        !b.auth.is_authorized(&a.key.public_key()).await.unwrap(),
-        "B must not trust A before confirm"
-    );
-    assert!(
-        AuthorizedKeys::load_from_file(&a.dir.path().join("authorized_keys"))
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        AuthorizedKeys::load_from_file(&b.dir.path().join("authorized_keys"))
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    for id in [&a, &b] {
+        assert!(
+            AuthorizedKeys::load_from_file(&id.dir.path().join("authorized_keys"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
 
-    // Dial with advertised fingerprint hint (mismatch would fail bind).
-    let dial_snap = ma
-        .dial(
+    let sid_a = ma
+        .pair(
             &cand_for_b.address,
+            code,
             cand_for_b.advertised_fingerprint.clone(),
             cand_for_b.advertised_node_id,
         )
         .await
-        .expect("dial");
-    let _dialing = dialing_session_id(&dial_snap);
-
-    let sid_a = wait_bound(&ma, &fp_b).await;
-    let sid_b = wait_bound(&mb, &fp_a).await;
-
-    // Still no durable trust until both confirm.
-    assert!(!a.auth.is_authorized(&b.key.public_key()).await.unwrap());
-    assert!(!b.auth.is_authorized(&a.key.public_key()).await.unwrap());
-
-    ma.confirm(sid_a).await.expect("confirm A");
-    mb.confirm(sid_b).await.expect("confirm B");
+        .expect("pair")
+        .requested_session_id
+        .unwrap();
 
     wait_authorized(&a.auth, &b.key.public_key()).await;
     wait_authorized(&b.auth, &a.key.public_key()).await;
     wait_succeeded(&ma, sid_a).await;
+    let sid_b = mb
+        .inspect(None)
+        .await
+        .unwrap()
+        .sessions
+        .iter()
+        .find(|s| s.role == "acceptor")
+        .expect("allowing side session")
+        .session_id;
     wait_succeeded(&mb, sid_b).await;
 
-    // Durable pins on disk.
     let keys_a = AuthorizedKeys::load_from_file(&a.dir.path().join("authorized_keys"))
         .await
         .unwrap();
@@ -273,7 +220,6 @@ async fn mdns_discovery_and_mutual_trust_regression() {
         "B authorized_keys missing A pin"
     );
 
-    // Clean manager cancellation (stop listeners / mDNS / sessions).
     let _ = ma.cancel(None).await;
     let _ = mb.cancel(None).await;
 }

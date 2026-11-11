@@ -22,33 +22,25 @@ async fn waiting_session() -> (tempfile::TempDir, EnrollmentManager, Uuid, Uuid,
     let peer_session_id = Uuid::new_v4();
     let gate = Arc::new(CommitGate::new());
     gate.finish_commit();
-    manager.inner.write().await.sessions.insert(
+    let mut session = LiveSession::new(
         session_id,
-        LiveSession {
-            session_id,
-            role: Role::Initiator,
-            state: SessionState::WaitingPeerAuth,
-            local_fp: local_fp.clone(),
-            local_nonce: [1; 32],
-            peer_session_id: Some(peer_session_id),
-            peer_fp: Some("peer".into()),
-            peer_key: None,
-            peer_nonce: Some([2; 32]),
-            peer_node_id: None,
-            peer_display_name: None,
-            dialed_addr: None,
-            local_confirmed: true,
-            peer_confirmed: true,
-            local_persisted: true,
-            local_ack_flushed: false,
-            peer_persisted_ack: false,
-            commit_gate: gate,
-            expires_at: Instant::now() + Duration::from_secs(30),
-            error: None,
-            io: None,
-            event_task: Some(tokio::spawn(std::future::pending())),
-        },
+        Role::Initiator,
+        SessionState::WaitingPeerAuth,
+        local_fp.clone(),
     );
+    session.peer_session_id = Some(peer_session_id);
+    session.peer_fp = Some("peer".into());
+    session.verified = true;
+    session.local_persisted = true;
+    session.commit_gate = gate;
+    session.expires_at = Instant::now() + Duration::from_secs(30);
+    session.event_task = Some(tokio::spawn(std::future::pending()));
+    manager
+        .inner
+        .write()
+        .await
+        .sessions
+        .insert(session_id, session);
     (dir, manager, session_id, peer_session_id, local_fp)
 }
 
@@ -88,4 +80,37 @@ async fn failed_local_ack_is_incomplete_even_when_peer_ack_arrived() {
     assert!(guard.sessions[&sid].local_persisted);
     assert!(!guard.sessions[&sid].local_ack_flushed);
     assert_eq!(guard.last_outcome.as_ref().unwrap().status, "incomplete");
+}
+
+/// Each take consumes the code on screen and shows a fresh one; the window's
+/// budget bounds how many codes are ever handed out.
+#[tokio::test]
+async fn every_burn_hands_out_a_distinct_code_until_the_budget_is_spent() {
+    let (_dir, manager, _, _, _) = waiting_session().await;
+    let mut g = manager.inner.write().await;
+    g.listening = true;
+    g.window_expires = Some(Instant::now() + Duration::from_secs(60));
+    g.attempts_used = 0;
+    EnrollmentManager::issue_code_locked(&mut g, None);
+    let mut taken = Vec::new();
+    for _ in 0..MAX_PAIRING_ATTEMPTS {
+        let shown = g.code.as_ref().map(|live| live.code.digits().to_string());
+        let code = EnrollmentManager::take_code_locked(&mut g).unwrap();
+        assert_eq!(Some(code.digits().to_string()), shown);
+        taken.push(code.digits().to_string());
+        if let Some(next) = g.code.as_ref() {
+            assert_ne!(next.code.digits(), code.digits());
+        }
+    }
+    assert_eq!(taken.len() as u32, MAX_PAIRING_ATTEMPTS);
+    assert!(g.code.is_none());
+    assert!(matches!(
+        EnrollmentManager::take_code_locked(&mut g),
+        Err(PairingFailure::NoCode)
+    ));
+    g.listening = false;
+    assert!(matches!(
+        EnrollmentManager::take_code_locked(&mut g),
+        Err(PairingFailure::NotListening)
+    ));
 }
