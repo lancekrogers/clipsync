@@ -106,7 +106,14 @@ impl ClipboardProvider for WaylandClipboard {
         }
         let clipboard = self.clipboard.clone();
         let text = tokio::task::spawn_blocking(move || {
-            clipboard.lock().map_err(error)?.get_text().map_err(error)
+            clipboard
+                .lock()
+                .map_err(error)?
+                .get_text()
+                .map_err(|e| match e {
+                    arboard::Error::ContentNotAvailable => ClipboardError::NoContent,
+                    e => error(e),
+                })
         })
         .await
         .map_err(error)??;

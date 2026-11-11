@@ -123,6 +123,9 @@ pub enum MessageType {
 
     /// Status update
     Status,
+
+    /// Delete or clear synced history; sent only to peers advertising history ops
+    HistoryOperation,
 }
 
 /// Message payload variants
@@ -155,6 +158,18 @@ pub enum MessagePayload {
 
     /// Status payload
     Status(StatusPayload),
+
+    /// History removal payload
+    History(HistoryOperation),
+}
+
+/// History removal applied on every device that holds the same entry ids.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum HistoryOperation {
+    /// Remove one entry by the id it carries on every device
+    Delete { id: Uuid },
+    /// Remove every entry
+    Clear,
 }
 
 /// Handshake message payload
@@ -543,6 +558,7 @@ impl fmt::Display for MessageType {
             MessageType::Error => write!(f, "ERROR"),
             MessageType::Capabilities => write!(f, "CAPABILITIES"),
             MessageType::Status => write!(f, "STATUS"),
+            MessageType::HistoryOperation => write!(f, "HISTORY_OPERATION"),
         }
     }
 }

@@ -141,6 +141,8 @@ pub const FEATURE_HISTORY_COPY: &str = "history_copy";
 pub const FEATURE_DIAGNOSTICS: &str = "diagnostics";
 pub const FEATURE_STATUS_V2: &str = "status_v2";
 pub const FEATURE_ENROLLMENT: &str = "enrollment";
+pub const FEATURE_HISTORY_DELETE: &str = "history_delete";
+pub const FEATURE_HISTORY_CLEAR: &str = "history_clear";
 
 pub fn engine_features() -> Vec<String> {
     vec![
@@ -149,5 +151,7 @@ pub fn engine_features() -> Vec<String> {
         FEATURE_HISTORY_COPY.into(),
         FEATURE_DIAGNOSTICS.into(),
         FEATURE_STATUS_V2.into(),
+        FEATURE_HISTORY_DELETE.into(),
+        FEATURE_HISTORY_CLEAR.into(),
     ]
 }

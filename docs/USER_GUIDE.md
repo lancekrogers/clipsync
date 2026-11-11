@@ -217,6 +217,26 @@ clipsync history --search "important note"
 
 ```
 
+### Removing History
+
+```bash
+# Show entry ids
+clipsync history --ids
+
+# Delete one entry here and on connected devices
+clipsync history delete <id>
+
+# Clear all history and the clipboard here and on connected devices
+clipsync history clear
+clipsync history clear --yes   # skip the confirmation prompt
+```
+
+Removals go to the trusted devices connected at that moment, including while
+sync is paused. A device whose clipboard still holds a deleted entry has its
+clipboard cleared; `clear` empties the clipboard on every connected device.
+Devices that are offline, or run a ClipSync version without this support,
+keep their copy; delete it there directly.
+
 ## ⌨️ Global Hotkeys
 
 ClipSync provides system-wide hotkeys for quick access:

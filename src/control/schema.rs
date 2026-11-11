@@ -44,6 +44,12 @@ pub enum Command {
     HistoryCopy {
         id: Uuid,
     },
+    /// Requires feature `history_delete`; older daemons cannot parse it.
+    HistoryDelete {
+        id: Uuid,
+    },
+    /// Requires feature `history_clear`; older daemons cannot parse it.
+    HistoryClear,
     DiagnosticsExport,
     EnrollmentOpen,
     EnrollmentDiscover,
@@ -96,6 +102,8 @@ pub struct Response {
     pub enrollment: Option<EnrollmentSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_devices: Option<Vec<TrustedDeviceView>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_removal: Option<HistoryRemovalView>,
 }
 
 impl Response {
@@ -117,6 +125,7 @@ impl Response {
             error_code: None,
             enrollment: None,
             trusted_devices: None,
+            history_removal: None,
         }
     }
 
@@ -172,6 +181,19 @@ pub struct HistoryPage {
     pub total_returned: u32,
     pub truncated: bool,
     pub entries: Vec<HistoryEntryView>,
+}
+
+/// Result of HistoryDelete / HistoryClear on this daemon.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HistoryRemovalView {
+    /// Rows removed locally; 0 for a delete whose id was already gone.
+    pub removed: u32,
+    /// Whether this device's system clipboard was cleared.
+    pub clipboard_cleared: bool,
+    /// Connected peers the removal was queued to. Queued, not acknowledged.
+    pub peers_notified: u32,
+    /// Connected peers not sent the removal (older version or full queue).
+    pub peers_skipped: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

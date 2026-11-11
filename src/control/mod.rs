@@ -12,6 +12,9 @@
 //! transport cannot be recalled; there is no transport cancellation API here.
 //! Dropping an in-flight control call stops at the current `.await`. Clipboard
 //! or history writes that already completed are not rolled back.
+//!
+//! HistoryDelete / HistoryClear are not copies: they are sent to and applied
+//! from peers while paused. Peers offline at the time are not told later.
 
 mod diagnostics;
 pub mod error_codes;
@@ -20,15 +23,16 @@ mod schema;
 mod target;
 
 pub use error_codes::{
-    engine_features, FEATURE_DIAGNOSTICS, FEATURE_ENROLLMENT, FEATURE_HISTORY_COPY,
-    FEATURE_HISTORY_READ, FEATURE_PAUSE, FEATURE_STATUS_V2,
+    engine_features, FEATURE_DIAGNOSTICS, FEATURE_ENROLLMENT, FEATURE_HISTORY_CLEAR,
+    FEATURE_HISTORY_COPY, FEATURE_HISTORY_DELETE, FEATURE_HISTORY_READ, FEATURE_PAUSE,
+    FEATURE_STATUS_V2,
 };
 pub use history_view::{decode_preview_png, preview_chars};
 pub use schema::{
     Command, ControlError, ControlSnapshot, DaemonStatus, DiagnosticError, DiagnosticsReport,
     EnrollmentCandidateView, EnrollmentOutcomeView, EnrollmentSessionView, EnrollmentSnapshot,
-    HistoryEntryDetail, HistoryEntryView, HistoryPage, ImagePreview, Request, Response,
-    TrustedDeviceView, HISTORY_PAGE_FRAME_MIN, HISTORY_PAGE_MAX, HISTORY_PREVIEW_CHARS,
+    HistoryEntryDetail, HistoryEntryView, HistoryPage, HistoryRemovalView, ImagePreview, Request,
+    Response, TrustedDeviceView, HISTORY_PAGE_FRAME_MIN, HISTORY_PAGE_MAX, HISTORY_PREVIEW_CHARS,
     HISTORY_QUERY_MAX_BYTES, PROTOCOL_VERSION,
 };
 pub use target::{EnrollmentTarget, Target};
@@ -530,6 +534,14 @@ async fn dispatch(
             }
             Err(e) => map_handler_error(response, e),
         },
+        Command::HistoryDelete { id } => {
+            let result = target.history_delete(id).await;
+            apply_history_removal(target, response, result).await;
+        }
+        Command::HistoryClear => {
+            let result = target.history_clear().await;
+            apply_history_removal(target, response, result).await;
+        }
         Command::DiagnosticsExport => match target.diagnostics_export().await {
             Ok(report) => response.diagnostics = Some(report),
             Err(e) => map_handler_error(response, e),
@@ -544,6 +556,24 @@ async fn dispatch(
         | Command::TrustedDevices => {
             dispatch_enrollment(target, command, response).await;
         }
+    }
+}
+
+async fn apply_history_removal(
+    target: &dyn Target,
+    response: &mut Response,
+    result: Result<HistoryRemovalView>,
+) {
+    match result {
+        Ok(removal) => {
+            response.history_removal = Some(removal);
+            if let Ok(snap) = target.control_snapshot().await {
+                response.instance_id = Some(snap.instance_id);
+                response.state_generation = Some(snap.state_generation);
+                response.status = Some(snap.status);
+            }
+        }
+        Err(e) => map_handler_error(response, e),
     }
 }
 

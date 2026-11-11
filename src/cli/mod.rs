@@ -21,6 +21,7 @@ use crate::transport::{TransportConfig, TransportManager};
 
 pub mod commands;
 pub mod history_picker;
+mod history_removal;
 mod service;
 
 #[derive(Parser)]
@@ -61,8 +62,14 @@ pub enum Commands {
     #[command(about = "Get the status of ClipSync")]
     Status,
 
-    #[command(about = "Show clipboard history")]
+    #[command(
+        about = "Show clipboard history",
+        args_conflicts_with_subcommands = true
+    )]
     History {
+        #[command(subcommand)]
+        action: Option<HistoryAction>,
+
         #[arg(short, long, default_value = "10")]
         limit: usize,
 
@@ -71,6 +78,10 @@ pub enum Commands {
 
         #[arg(long)]
         search: Option<String>,
+
+        /// Show each entry's id, for `history delete`
+        #[arg(long)]
+        ids: bool,
     },
 
     #[command(about = "Force synchronization with peers")]
@@ -129,6 +140,22 @@ pub enum Commands {
         /// Pin the user service to this absolute configuration path.
         #[arg(long)]
         config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum HistoryAction {
+    #[command(about = "Delete one entry here and on connected devices")]
+    Delete {
+        /// Entry id, as shown by `clipsync history --ids`
+        id: uuid::Uuid,
+    },
+
+    #[command(about = "Clear history and the clipboard here and on connected devices")]
+    Clear {
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -263,16 +290,26 @@ impl CliHandler {
             Commands::Stop => self.stop_daemon().await,
             Commands::Status => self.show_status().await,
             Commands::History {
+                action: Some(HistoryAction::Delete { id }),
+                ..
+            } => history_removal::delete(&self.config, id).await,
+            Commands::History {
+                action: Some(HistoryAction::Clear { yes }),
+                ..
+            } => history_removal::clear(&self.config, yes).await,
+            Commands::History {
+                action: None,
                 limit,
                 interactive,
                 search,
+                ids,
             } => {
                 if interactive {
                     self.show_interactive_history().await
                 } else if let Some(search_term) = search {
-                    self.search_history(&search_term, limit).await
+                    self.search_history(&search_term, limit, ids).await
                 } else {
-                    self.show_history(limit).await
+                    self.show_history(limit, ids).await
                 }
             }
             Commands::Sync => self.force_sync().await,
@@ -505,7 +542,7 @@ impl CliHandler {
         Ok(())
     }
 
-    async fn show_history(&mut self, limit: usize) -> Result<()> {
+    async fn show_history(&mut self, limit: usize, ids: bool) -> Result<()> {
         let history = self.ensure_history().await?;
         let entries = history.get_recent_entries(limit).await?;
 
@@ -515,18 +552,7 @@ impl CliHandler {
         }
 
         println!("Clipboard History (showing {} entries):", entries.len());
-        for (i, entry) in entries.iter().enumerate() {
-            println!(
-                "{}. [{}] {}",
-                i + 1,
-                entry.timestamp.format("%Y-%m-%d %H:%M:%S"),
-                match &entry.content {
-                    crate::adapters::ClipboardData::Text(text) => list_preview(text, 50),
-                    crate::adapters::ClipboardData::Image(_) => "[Image]".to_string(),
-                }
-            );
-        }
-
+        print_entries(&entries, ids);
         Ok(())
     }
 
@@ -658,7 +684,7 @@ impl CliHandler {
         Ok(())
     }
 
-    async fn search_history(&mut self, search_term: &str, limit: usize) -> Result<()> {
+    async fn search_history(&mut self, search_term: &str, limit: usize, ids: bool) -> Result<()> {
         let history = self.ensure_history().await?;
         let entries = history.search_entries(search_term, limit).await?;
 
@@ -675,18 +701,7 @@ impl CliHandler {
             entries.len(),
             search_term
         );
-        for (i, entry) in entries.iter().enumerate() {
-            println!(
-                "{}. [{}] {}",
-                i + 1,
-                entry.timestamp.format("%Y-%m-%d %H:%M:%S"),
-                match &entry.content {
-                    crate::adapters::ClipboardData::Text(text) => list_preview(text, 50),
-                    crate::adapters::ClipboardData::Image(_) => "[Image]".to_string(),
-                }
-            );
-        }
-
+        print_entries(&entries, ids);
         Ok(())
     }
 
@@ -1372,6 +1387,21 @@ impl CliHandler {
         println!("  Remaining keys: {}", remaining);
 
         Ok(())
+    }
+}
+
+fn print_entries(entries: &[crate::adapters::ClipboardEntry], ids: bool) {
+    for (i, entry) in entries.iter().enumerate() {
+        let preview = match &entry.content {
+            crate::adapters::ClipboardData::Text(text) => list_preview(text, 50),
+            crate::adapters::ClipboardData::Image(_) => "[Image]".to_string(),
+        };
+        let timestamp = entry.timestamp.format("%Y-%m-%d %H:%M:%S");
+        if ids {
+            println!("{}. {} [{}] {}", i + 1, entry.id, timestamp, preview);
+        } else {
+            println!("{}. [{}] {}", i + 1, timestamp, preview);
+        }
     }
 }
 

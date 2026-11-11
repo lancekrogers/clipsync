@@ -265,11 +265,20 @@ impl HistoryDatabase {
         Ok(results)
     }
 
-    /// Clear all entries from history
-    pub async fn clear(&self) -> Result<()> {
+    /// Remove one entry by UUID. Returns whether a row existed.
+    pub async fn delete(&self, id: Uuid) -> Result<bool> {
         let conn = self.conn.lock().await;
-        conn.execute("DELETE FROM clipboard_history", [])?;
-        Ok(())
+        let removed = conn.execute(
+            "DELETE FROM clipboard_history WHERE uuid = ?",
+            params![id.to_string()],
+        )?;
+        Ok(removed > 0)
+    }
+
+    /// Clear all entries from history. Returns the number of rows removed.
+    pub async fn clear(&self) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        Ok(conn.execute("DELETE FROM clipboard_history", [])?)
     }
 
     fn row_to_entry(&self, row: &Row, encryptor: &Encryptor) -> Result<HistoryEntry> {
@@ -399,6 +408,32 @@ mod tests {
 
         let results = db.search("world", &encryptor).await.unwrap();
         assert_eq!(results.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn delete_removes_only_the_matching_uuid_and_clear_counts_rows() {
+        let (db, encryptor, _temp_dir) = setup_test_db().await.unwrap();
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+        for (i, id) in ids.iter().enumerate() {
+            db.insert(
+                &ClipboardContent {
+                    id: *id,
+                    content: format!("row {i}").into_bytes(),
+                    content_type: "text/plain".to_string(),
+                    timestamp: Utc::now().timestamp() + i as i64,
+                    origin_node: Uuid::new_v4(),
+                },
+                &encryptor,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(db.delete(ids[1]).await.unwrap());
+        assert!(!db.delete(ids[1]).await.unwrap());
+        assert!(db.get_by_uuid(ids[1], &encryptor).await.unwrap().is_none());
+        assert!(db.get_by_uuid(ids[0], &encryptor).await.unwrap().is_some());
+        assert_eq!(db.clear().await.unwrap(), 2);
+        assert_eq!(db.clear().await.unwrap(), 0);
     }
 
     #[tokio::test]

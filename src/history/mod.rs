@@ -91,8 +91,13 @@ impl ClipboardHistory {
         database::HISTORY_LIMIT
     }
 
-    /// Clear all history entries
-    pub async fn clear(&self) -> Result<()> {
+    /// Remove one entry by UUID. Returns whether it existed.
+    pub async fn delete(&self, id: Uuid) -> Result<bool> {
+        self.db.delete(id).await
+    }
+
+    /// Clear all history entries. Returns the number removed.
+    pub async fn clear(&self) -> Result<usize> {
         self.db.clear().await
     }
 }

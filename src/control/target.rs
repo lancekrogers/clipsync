@@ -5,11 +5,12 @@ use crate::{
         diagnostics, error_codes, history_view,
         schema::{
             ControlSnapshot, DaemonStatus, DiagnosticsReport, HistoryEntryDetail, HistoryPage,
+            HistoryRemovalView,
         },
         FEATURE_ENROLLMENT,
     },
     enrollment::EnrollmentManager,
-    sync::{SyncEngine, TrustAwareSyncEngine},
+    sync::{HistoryRemoval, SyncEngine, TrustAwareSyncEngine},
 };
 use anyhow::{bail, Result};
 use chrono::Utc;
@@ -60,6 +61,14 @@ pub trait Target: Send + Sync {
     }
 
     async fn history_copy(&self, _id: Uuid) -> Result<(usize, bool)> {
+        bail!("Unsupported control command");
+    }
+
+    async fn history_delete(&self, _id: Uuid) -> Result<HistoryRemovalView> {
+        bail!("Unsupported control command");
+    }
+
+    async fn history_clear(&self) -> Result<HistoryRemovalView> {
         bail!("Unsupported control command");
     }
 
@@ -128,6 +137,12 @@ impl Target for EnrollmentTarget {
     async fn history_copy(&self, id: Uuid) -> Result<(usize, bool)> {
         self.inner.history_copy(id).await
     }
+    async fn history_delete(&self, id: Uuid) -> Result<HistoryRemovalView> {
+        self.inner.history_delete(id).await
+    }
+    async fn history_clear(&self) -> Result<HistoryRemovalView> {
+        self.inner.history_clear().await
+    }
     async fn diagnostics_export(&self) -> Result<DiagnosticsReport> {
         self.inner.diagnostics_export().await
     }
@@ -136,6 +151,16 @@ impl Target for EnrollmentTarget {
     }
     fn enrollment_manager(&self) -> Option<Arc<EnrollmentManager>> {
         Some(self.manager.clone())
+    }
+}
+
+fn removal_view(removal: HistoryRemoval) -> HistoryRemovalView {
+    let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+    HistoryRemovalView {
+        removed: count(removal.removed),
+        clipboard_cleared: removal.clipboard_cleared,
+        peers_notified: count(removal.peers_queued),
+        peers_skipped: count(removal.peers_skipped),
     }
 }
 
@@ -267,6 +292,12 @@ impl Target for SyncEngine {
         let queued = SyncEngine::history_copy(self, id).await?;
         Ok((queued, paused))
     }
+    async fn history_delete(&self, id: Uuid) -> Result<HistoryRemovalView> {
+        Ok(removal_view(SyncEngine::history_delete(self, id).await?))
+    }
+    async fn history_clear(&self) -> Result<HistoryRemovalView> {
+        Ok(removal_view(SyncEngine::history_clear(self).await?))
+    }
     async fn diagnostics_export(&self) -> Result<DiagnosticsReport> {
         let snap = engine_snapshot(self).await?;
         Ok(diagnostics::build_report(&snap))
@@ -307,6 +338,12 @@ impl Target for TrustAwareSyncEngine {
         let paused = TrustAwareSyncEngine::is_paused(self).await;
         let queued = TrustAwareSyncEngine::history_copy(self, id).await?;
         Ok((queued, paused))
+    }
+    async fn history_delete(&self, id: Uuid) -> Result<HistoryRemovalView> {
+        Ok(removal_view(self.sync_engine().history_delete(id).await?))
+    }
+    async fn history_clear(&self) -> Result<HistoryRemovalView> {
+        Ok(removal_view(self.sync_engine().history_clear().await?))
     }
     async fn diagnostics_export(&self) -> Result<DiagnosticsReport> {
         let snap = engine_snapshot(self.sync_engine().as_ref()).await?;

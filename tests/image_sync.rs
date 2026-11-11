@@ -138,6 +138,61 @@ async fn image_sync_is_enabled_by_default_for_image_clipboards() {
     ea.shutdown().await;
     eb.shutdown().await;
 }
+#[tokio::test]
+async fn deleting_a_synced_image_clears_every_clipboard_still_holding_it() {
+    let a = Identity::new().await;
+    let b = Identity::new().await;
+    a.trust(&b).await;
+    b.trust(&a).await;
+    let ca = ImageClipboard {
+        auto_enable: true,
+        ..Default::default()
+    };
+    let cb = ImageClipboard {
+        auto_enable: true,
+        ..Default::default()
+    };
+    let (ea, ta) = fixture(&a, &ca, None).await;
+    let (eb, _) = fixture(&b, &cb, None).await;
+    let la = ea.bind_listener().await.unwrap();
+    let lb = eb.bind_listener().await.unwrap();
+    let address = lb.local_addr();
+    let _a = Task(tokio::spawn({
+        let engine = ea.clone();
+        async move { engine.run(la).await }
+    }));
+    let _b = Task(tokio::spawn({
+        let engine = eb.clone();
+        async move { engine.run(lb).await }
+    }));
+    ta.connect_peer(&b.peer(address)).await.unwrap();
+    eventually(async || ta.supports_history_ops(b.id()).await).await;
+    *ca.content.lock().await = ClipboardContent::image(png(), "png");
+    eventually(async || cb.content.lock().await.data == png()).await;
+    let id = ea.history_manager().get_recent_entries(1).await.unwrap()[0].id;
+    eventually(async || eb.history_manager().get_entry(id).await.unwrap().is_some()).await;
+    let removal = ea.history_delete(id).await.unwrap();
+    assert!(removal.clipboard_cleared);
+    assert_eq!((removal.removed, removal.peers_queued), (1, 1));
+    assert!(ca.content.lock().await.data.is_empty());
+    eventually(async || cb.content.lock().await.data.is_empty()).await;
+    eventually(async || eb.history_manager().get_entry(id).await.unwrap().is_none()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+    assert!(ea
+        .history_manager()
+        .get_recent_entries(20)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(eb
+        .history_manager()
+        .get_recent_entries(20)
+        .await
+        .unwrap()
+        .is_empty());
+    ea.shutdown().await;
+    eb.shutdown().await;
+}
 fn png() -> Vec<u8> {
     base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGP4z8Dwn6HhfwMAEPoD/o3Nc3sAAAAASUVORK5CYII=").unwrap()
 }
