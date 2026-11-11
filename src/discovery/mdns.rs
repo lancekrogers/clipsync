@@ -35,15 +35,17 @@ const REBUILD_MIN_INTERVAL: Duration = Duration::from_secs(60);
 pub enum RebuildReason {
     /// Network sends failed earlier in this process and now succeed.
     NetworkRecovered,
-    /// mdns-sd bound or dropped an interface address we advertise.
-    InterfaceChanged(IpAddr),
+    /// mdns-sd bound an interface address we advertise after registration.
+    InterfaceAdded(IpAddr),
 }
 
 impl std::fmt::Display for RebuildReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NetworkRecovered => write!(f, "network sends recovered after failing"),
-            Self::InterfaceChanged(ip) => write!(f, "interface address {ip} changed"),
+            Self::InterfaceAdded(ip) => {
+                write!(f, "interface address {ip} bound after registration")
+            }
         }
     }
 }
@@ -151,20 +153,21 @@ impl Shared {
             .daemon
             .as_ref()
             .ok_or_else(|| anyhow!("mDNS daemon not started"))?;
-        let mdns_info = MdnsDiscovery::create_mdns_service_info(service_info)?;
-        let fullname = mdns_info.get_fullname().to_string();
-        let mut addresses: Vec<IpAddr> = mdns_info.get_addresses().iter().copied().collect();
-        addresses.sort();
-        let events = daemon.monitor()?;
-        daemon.register(mdns_info)?;
+        // Watch before computing addresses: with no usable address yet, the
+        // interface coming up is what must trigger the next attempt.
         let watcher = tokio::spawn(watch_interfaces(
-            events,
+            daemon.monitor()?,
             listen_bind(service_info),
             rebuild.clone(),
         ));
         if let Some(previous) = state.monitor.replace(watcher) {
             previous.abort();
         }
+        let mdns_info = MdnsDiscovery::create_mdns_service_info(service_info)?;
+        let fullname = mdns_info.get_fullname().to_string();
+        let mut addresses: Vec<IpAddr> = mdns_info.get_addresses().iter().copied().collect();
+        addresses.sort();
+        daemon.register(mdns_info)?;
         state.registered = Some(fullname);
         Ok(addresses)
     }
@@ -203,7 +206,13 @@ impl Shared {
                 "mDNS advertisement re-registered for {} on {addresses:?}",
                 service.id
             ),
-            Err(e) => tracing::warn!("mDNS advertisement rebuild failed: {e:#}"),
+            Err(e) if state.monitor.is_some() => {
+                tracing::warn!("mDNS advertisement rebuild failed; waiting for an interface: {e:#}")
+            }
+            Err(e) => {
+                tracing::warn!("mDNS advertisement rebuild failed; retrying: {e:#}");
+                requests.request(reason);
+            }
         }
     }
 }
@@ -214,7 +223,7 @@ fn listen_bind(service_info: &ServiceInfo) -> SocketAddr {
         .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), service_info.port))
 }
 
-/// Request a rebuild when mdns-sd adds or drops an address we would advertise.
+/// Request a rebuild when mdns-sd binds an address we would advertise.
 async fn watch_interfaces(
     events: mdns_sd::Receiver<DaemonEvent>,
     bind: SocketAddr,
@@ -222,7 +231,7 @@ async fn watch_interfaces(
 ) {
     while let Ok(event) = events.recv_async().await {
         let ip = match event {
-            DaemonEvent::IpAdd(ip) | DaemonEvent::IpDel(ip) => ip,
+            DaemonEvent::IpAdd(ip) => ip,
             DaemonEvent::Error(e) => {
                 tracing::debug!("mDNS daemon error: {e}");
                 continue;
@@ -230,8 +239,8 @@ async fn watch_interfaces(
             _ => continue,
         };
         if advertise_for_listener(bind, &[ip]).contains(&ip) {
-            tracing::info!("mDNS interface address {ip} changed after registration");
-            requests.request(RebuildReason::InterfaceChanged(ip));
+            tracing::info!("mDNS bound interface address {ip} after registration");
+            requests.request(RebuildReason::InterfaceAdded(ip));
         }
     }
 }
@@ -522,12 +531,12 @@ mod tests {
         assert_eq!(count(), 0, "no request, no rebuild");
 
         requests.request(RebuildReason::NetworkRecovered);
-        requests.request(RebuildReason::InterfaceChanged(ip));
+        requests.request(RebuildReason::InterfaceAdded(ip));
         tokio::time::sleep(REBUILD_DEBOUNCE * 2).await;
         assert_eq!(count(), 1, "a burst is one rebuild");
         assert_eq!(runs.lock().unwrap()[0].1, RebuildReason::NetworkRecovered);
 
-        requests.request(RebuildReason::InterfaceChanged(ip));
+        requests.request(RebuildReason::InterfaceAdded(ip));
         tokio::time::sleep(REBUILD_MIN_INTERVAL / 2).await;
         assert_eq!(count(), 1, "cooldown defers the next rebuild");
         tokio::time::sleep(REBUILD_MIN_INTERVAL).await;
@@ -537,6 +546,29 @@ mod tests {
 
         tokio::time::sleep(REBUILD_MIN_INTERVAL * 10).await;
         assert_eq!(count(), 2, "no further rebuilds without a cause");
+    }
+
+    #[tokio::test]
+    async fn failed_rebuild_keeps_watching_for_an_address() {
+        let mut discovery = MdnsDiscovery::new(PeerManager::new()).unwrap();
+        discovery.start().await.unwrap();
+        // A link-local listener has nothing advertisable, so registration fails
+        // without announcing anything on the network.
+        let mut service = ServiceInfo::default();
+        service.listen_bind = Some("[fe80::1]:9".parse().unwrap());
+        discovery.shared.state.lock().await.service = Some(service);
+
+        discovery
+            .shared
+            .rebuild(RebuildReason::NetworkRecovered, &discovery.rebuild)
+            .await;
+
+        let state = discovery.shared.state.lock().await;
+        assert!(state.registered.is_none());
+        let watcher = state.monitor.as_ref().expect("interface watcher survives");
+        assert!(!watcher.is_finished());
+        drop(state);
+        discovery.stop().await.unwrap();
     }
 
     #[tokio::test]
