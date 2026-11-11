@@ -9,6 +9,7 @@ use std::net::SocketAddr;
 use thiserror::Error;
 use uuid::Uuid;
 
+pub mod history_capability;
 pub mod image_capability;
 pub mod protocol;
 pub mod reconnect;
@@ -30,7 +31,10 @@ pub use stream::{ProgressUpdate, StreamChunk, StreamingTransport};
 pub use websocket::{WebSocketConnection, WebSocketListener, WebSocketTransport};
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use tokio::sync::{broadcast, RwLock};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,13 +72,50 @@ pub enum ImageQueueOutcome {
     StaleSession,
 }
 
+/// Live sessions a history removal was queued to, and those it was not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HistoryFanout {
+    pub queued: usize,
+    pub skipped: usize,
+}
+
 struct ManagedConnection {
     session: Uuid,
     peer: PeerInfo,
     direction: ConnectionDirection,
     sender: tokio::sync::mpsc::Sender<Message>,
     image_limits: Arc<Mutex<Option<image_capability::ImageLimits>>>,
+    history_ops: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
+}
+
+impl ManagedConnection {
+    fn is_live(&self) -> bool {
+        !self.task.is_finished() && !self.sender.is_closed()
+    }
+}
+
+fn local_capabilities(
+    image: Option<image_capability::ImageLimits>,
+    history_ops: bool,
+) -> Option<protocol::CapabilitiesPayload> {
+    let mut payload = match image {
+        Some(limits) => limits.capabilities(),
+        // Without a PNG format, receivers keep image delivery disabled.
+        None if history_ops => protocol::CapabilitiesPayload {
+            formats: Vec::new(),
+            compression: Vec::new(),
+            max_message_size: 0,
+            streaming_support: false,
+            keepalive_interval: 0,
+            extensions: HashMap::new(),
+        },
+        None => return None,
+    };
+    if history_ops {
+        history_capability::advertise(&mut payload);
+    }
+    Some(payload)
 }
 
 struct DialLease {
@@ -115,6 +156,7 @@ pub struct TransportManager {
     auth: Option<Arc<dyn Authenticator>>,
     node_id: Uuid,
     image_capability: Mutex<Option<image_capability::ImageLimits>>,
+    history_ops: AtomicBool,
     image_budget: Arc<tokio::sync::Semaphore>,
     frame_budget: Arc<tokio::sync::Semaphore>,
 }
@@ -129,6 +171,7 @@ impl TransportManager {
             auth: None,
             node_id: Uuid::nil(),
             image_capability: Mutex::new(None),
+            history_ops: AtomicBool::new(false),
             image_budget: Arc::new(tokio::sync::Semaphore::new(IMAGE_QUEUE_BUDGET)),
             frame_budget: websocket::WebSocketConfig::default().frame_budget,
         }
@@ -347,6 +390,38 @@ impl TransportManager {
         }
     }
 
+    /// Advertise history removal messages on sessions created after this call.
+    pub fn enable_history_ops(&self) {
+        self.history_ops.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether `peer`'s live session advertised history removal messages.
+    pub async fn supports_history_ops(&self, peer: Uuid) -> bool {
+        self.connections
+            .read()
+            .await
+            .get(&peer)
+            .is_some_and(|c| c.is_live() && c.history_ops.load(Ordering::SeqCst))
+    }
+
+    /// Queue a history removal to every live session that advertised support.
+    pub async fn send_history_op(&self, message: &Message) -> HistoryFanout {
+        let mut fanout = HistoryFanout::default();
+        for connection in self.connections.read().await.values() {
+            if !connection.is_live() {
+                continue;
+            }
+            if connection.history_ops.load(Ordering::SeqCst)
+                && connection.sender.try_send(message.clone()).is_ok()
+            {
+                fanout.queued += 1;
+            } else {
+                fanout.skipped += 1;
+            }
+        }
+        fanout
+    }
+
     pub async fn subscribe(&self) -> Result<broadcast::Receiver<Message>> {
         Ok(self.message_sender.subscribe())
     }
@@ -400,17 +475,21 @@ impl TransportManager {
         let messages = self.message_sender.clone();
         let limits = Arc::new(Mutex::new(None));
         let received_limits = limits.clone();
+        let history_ops = Arc::new(AtomicBool::new(false));
+        let received_history_ops = history_ops.clone();
         let local_limits = *self
             .image_capability
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let capabilities =
+            local_capabilities(local_limits, self.history_ops.load(Ordering::SeqCst));
         let peer_id = peer.id;
         let task = tokio::spawn(async move {
             let mut connection = connection;
-            if let Some(limits) = local_limits {
+            if let Some(capabilities) = capabilities {
                 let message = Message::new(
                     MessageType::Capabilities,
-                    MessagePayload::Capabilities(limits.capabilities()),
+                    MessagePayload::Capabilities(capabilities),
                 );
                 if connection.send(message).await.is_err() {
                     tracing::info!("Peer {peer_id} disconnected");
@@ -423,6 +502,7 @@ impl TransportManager {
                     message = connection.receive() => match message { Ok(m) => {
                         if let (MessageType::Capabilities, MessagePayload::Capabilities(payload)) = (&m.message_type, &m.payload) {
                             *received_limits.lock().unwrap_or_else(|e| e.into_inner()) = image_capability::ImageLimits::from_capabilities(payload);
+                            received_history_ops.store(history_capability::supported(payload), Ordering::SeqCst);
                         }
                         let _ = messages.send(m);
                     }, Err(_) => break },
@@ -437,6 +517,7 @@ impl TransportManager {
             direction,
             sender,
             image_limits: limits,
+            history_ops,
             task,
         }
     }
@@ -739,6 +820,7 @@ mod tests {
                 direction: ConnectionDirection::Outbound,
                 sender,
                 image_limits: Arc::new(Mutex::new(Some(limits))),
+                history_ops: Arc::new(AtomicBool::new(false)),
                 task: tokio::spawn(std::future::pending()),
             },
         );
@@ -797,6 +879,31 @@ mod tests {
         );
         drop(held);
         manager.shutdown().await;
+    }
+
+    #[test]
+    fn history_ops_share_one_capabilities_frame_with_image_limits() {
+        let limits = image_capability::ImageLimits {
+            max_bytes: 10,
+            max_width: 1,
+            max_height: 1,
+            max_pixels: 1,
+        };
+        assert!(local_capabilities(None, false).is_none());
+        let image_only = local_capabilities(Some(limits), false).unwrap();
+        assert!(!history_capability::supported(&image_only));
+        let history_only = local_capabilities(None, true).unwrap();
+        assert!(history_capability::supported(&history_only));
+        assert_eq!(
+            image_capability::ImageLimits::from_capabilities(&history_only),
+            None
+        );
+        let both = local_capabilities(Some(limits), true).unwrap();
+        assert!(history_capability::supported(&both));
+        assert_eq!(
+            image_capability::ImageLimits::from_capabilities(&both),
+            Some(limits)
+        );
     }
 
     #[test]

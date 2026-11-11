@@ -11,7 +11,7 @@ use crate::{
     config::Config,
     history::encryption::Encryptor,
     transport::{
-        protocol::{ClipboardFormat, MessagePayload, MessageType},
+        protocol::{ClipboardFormat, HistoryOperation, MessagePayload, MessageType},
         ClipboardData as WireData, Message, TransportManager, WebSocketListener,
     },
 };
@@ -54,6 +54,19 @@ struct UncertainWrite {
     observed: String,
     order: (u64, Uuid, Uuid),
     entry: ClipboardEntry,
+}
+
+/// Outcome of a history delete or clear on this device.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HistoryRemoval {
+    /// Rows removed from this device's history.
+    pub removed: usize,
+    /// Whether this device's system clipboard was cleared.
+    pub clipboard_cleared: bool,
+    /// Connected peers the removal was queued to (not an acknowledgement).
+    pub peers_queued: usize,
+    /// Connected peers that were not sent the removal: no support or a full queue.
+    pub peers_skipped: usize,
 }
 
 /// Runtime snapshot for the control plane (not a wire DTO).
@@ -132,6 +145,7 @@ impl SyncEngine {
         } else {
             None
         };
+        transport.enable_history_ops();
         Self {
             config,
             clipboard,
@@ -310,13 +324,27 @@ impl SyncEngine {
         } else {
             let mut state = self.state.lock().await;
             if state.paused {
-                let content = self.clipboard.get_content().await.map_err(|e| {
-                    anyhow::anyhow!("Resume failed: could not read clipboard ({e})")
-                })?;
-                let content = self.prepare_content(content, false).await.map_err(|e| {
-                    anyhow::anyhow!("Resume failed: could not read clipboard ({e})")
-                })?;
-                state.observed = Some(content.observed);
+                let observed = match self.clipboard.get_content().await {
+                    Ok(content) => Some(
+                        self.prepare_content(content, false)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("Resume failed: could not read clipboard ({e})")
+                            })?
+                            .observed,
+                    ),
+                    // An empty clipboard, e.g. after a history clear, is a valid baseline.
+                    Err(e)
+                        if matches!(
+                            e.downcast_ref::<crate::clipboard::ClipboardError>(),
+                            Some(crate::clipboard::ClipboardError::NoContent)
+                        ) =>
+                    {
+                        None
+                    }
+                    Err(e) => bail!("Resume failed: could not read clipboard ({e})"),
+                };
+                state.observed = observed;
                 state.uncertain_write = None;
                 state.paused = false;
                 state.generation = state.generation.saturating_add(1);
@@ -674,6 +702,9 @@ impl SyncEngine {
         Ok(queued)
     }
     pub async fn apply_remote(&self, message: Message) -> Result<()> {
+        if message.message_type == MessageType::HistoryOperation {
+            return self.apply_history_operation(message).await;
+        }
         if message.message_type != MessageType::ClipboardData {
             return Ok(());
         }
@@ -955,6 +986,161 @@ impl SyncEngine {
 
     pub async fn is_paused(&self) -> bool {
         self.state.lock().await.paused
+    }
+
+    /// Delete `id` here and on connected peers that support it, and clear this
+    /// clipboard if it still holds that entry. A removal carries no clipboard
+    /// content, so it is sent and applied while paused too.
+    pub async fn history_delete(&self, id: Uuid) -> Result<HistoryRemoval> {
+        self.delete_entry(id, true).await
+    }
+
+    /// Clear history and the system clipboard here and on connected peers that support it.
+    pub async fn history_clear(&self) -> Result<HistoryRemoval> {
+        self.clear_history(true).await
+    }
+
+    async fn apply_history_operation(&self, message: Message) -> Result<()> {
+        let MessagePayload::History(operation) = message.payload else {
+            bail!("Invalid history message");
+        };
+        let origin = message
+            .source_peer_id
+            .ok_or_else(|| anyhow::anyhow!("Missing authenticated origin"))?;
+        if origin == self.config.node_id() {
+            bail!("Reflected local event");
+        }
+        // Remote removals are applied once and never forwarded.
+        let removal = match operation {
+            HistoryOperation::Delete { id } => self.delete_entry(id, false).await?,
+            HistoryOperation::Clear => self.clear_history(false).await?,
+        };
+        tracing::info!(
+            "Peer {origin} removed {} history entries (clipboard cleared: {})",
+            removal.removed,
+            removal.clipboard_cleared
+        );
+        Ok(())
+    }
+
+    // History and peers come before the clipboard so a cancelled control call
+    // has already done the parts that matter most.
+    async fn delete_entry(&self, id: Uuid, fan_out: bool) -> Result<HistoryRemoval> {
+        let mut state = self.state.lock().await;
+        // An unreadable row can still be deleted; it just cannot be compared.
+        let entry = self.history.get_entry(id).await.ok().flatten();
+        let removed = self
+            .history
+            .delete_entry(id)
+            .await
+            .map_err(|e| anyhow::anyhow!("History unavailable: {e}"))?;
+        Self::forget_outbound(&mut state, Some(id));
+        Self::bump_generation(&mut state);
+        let mut removal = HistoryRemoval {
+            removed: usize::from(removed),
+            ..Default::default()
+        };
+        if fan_out {
+            self.fan_out_history(&mut removal, HistoryOperation::Delete { id })
+                .await;
+        }
+        if let Some(entry) = entry {
+            if self.clipboard_holds(&entry).await {
+                removal.clipboard_cleared = self.clear_clipboard_locked(&mut state).await;
+            }
+        }
+        Ok(removal)
+    }
+
+    async fn clear_history(&self, fan_out: bool) -> Result<HistoryRemoval> {
+        let mut state = self.state.lock().await;
+        let removed = self
+            .history
+            .clear()
+            .await
+            .map_err(|e| anyhow::anyhow!("History unavailable: {e}"))?;
+        Self::forget_outbound(&mut state, None);
+        Self::bump_generation(&mut state);
+        let mut removal = HistoryRemoval {
+            removed,
+            ..Default::default()
+        };
+        if fan_out {
+            self.fan_out_history(&mut removal, HistoryOperation::Clear)
+                .await;
+        }
+        removal.clipboard_cleared = self.clear_clipboard_locked(&mut state).await;
+        Ok(removal)
+    }
+
+    async fn fan_out_history(&self, removal: &mut HistoryRemoval, operation: HistoryOperation) {
+        let message = Message::new(
+            MessageType::HistoryOperation,
+            MessagePayload::History(operation),
+        );
+        let fanout = self.transport.send_history_op(&message).await;
+        removal.peers_queued = fanout.queued;
+        removal.peers_skipped = fanout.skipped;
+    }
+
+    /// Drop queued or unreconciled outbound copies of `id` (all when `None`) so a
+    /// new session or a late reconcile cannot bring a removed entry back.
+    fn forget_outbound(state: &mut SyncState, id: Option<Uuid>) {
+        let removed = |entry: Option<Uuid>| id.is_none() || entry == id;
+        if state
+            .pending
+            .as_ref()
+            .is_some_and(|message| removed(message.correlation_id))
+        {
+            state.pending = None;
+            state.pending_image_dimensions = None;
+            state.queued_sessions.clear();
+            state.rejected_sessions.clear();
+        }
+        if state
+            .uncertain_write
+            .as_ref()
+            .is_some_and(|write| removed(Some(write.entry.id)))
+        {
+            state.uncertain_write = None;
+        }
+    }
+
+    async fn clipboard_holds(&self, entry: &ClipboardEntry) -> bool {
+        let Ok(current) = self.clipboard.get_content().await else {
+            return false;
+        };
+        let Ok(current) = self.prepare_content(current, false).await else {
+            return false;
+        };
+        let stored = match &entry.content {
+            ClipboardData::Text(text) => crate::clipboard::ClipboardContent::text(text.clone()),
+            ClipboardData::Image(png) => {
+                crate::clipboard::ClipboardContent::image(png.clone(), "png")
+            }
+        };
+        self.prepare_content(stored, false)
+            .await
+            .is_ok_and(|stored| stored.observed == current.observed)
+    }
+
+    /// Clear the system clipboard and baseline whatever reads back afterwards,
+    /// so the capture loop neither records nor syncs the cleared state.
+    async fn clear_clipboard_locked(&self, state: &mut SyncState) -> bool {
+        if let Err(e) = self.clipboard.clear().await {
+            tracing::warn!("Clipboard clear failed: {e}");
+            return false;
+        }
+        state.observed = match self.clipboard.get_content().await {
+            Ok(content) => self
+                .prepare_content(content, false)
+                .await
+                .ok()
+                .map(|content| content.observed),
+            Err(_) => None,
+        };
+        state.uncertain_write = None;
+        true
     }
 }
 fn now_millis() -> u64 {

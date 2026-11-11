@@ -127,6 +127,16 @@ impl HistoryManager {
             .map(history_entry_to_clipboard))
     }
 
+    /// Remove one retained entry by UUID. Returns whether it existed.
+    pub async fn delete_entry(&self, id: Uuid) -> Result<bool> {
+        self.inner.delete(id).await
+    }
+
+    /// Remove every retained entry. Returns the number removed.
+    pub async fn clear(&self) -> Result<usize> {
+        self.inner.clear().await
+    }
+
     pub fn retention_capacity() -> u32 {
         crate::history::ClipboardHistory::capacity() as u32
     }
