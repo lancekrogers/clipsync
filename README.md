@@ -59,6 +59,12 @@ Kitty or Sixel graphics get a sharper preview; set `CLIPSYNC_TUI_GRAPHICS=off`
 to keep the character preview where a terminal reports graphics it cannot show.
 
 <p align="center">
+  <img src="docs/assets/companion-tui.gif" width="960" alt="ClipSync terminal companion: Overview with a connected device, Devices, History with an image preview, copying a line from another device, search, and pause">
+</p>
+
+*`clipsync tui` against an isolated fixture. Re-record with `just demo-tui` (macOS).*
+
+<p align="center">
   <img src="docs/assets/desktop-overview.png" width="960" alt="ClipSync desktop Overview showing service status, Pause syncing, Sync current copy, and Open clipboard history controls">
 </p>
 
