@@ -24,7 +24,7 @@ Pairing runs on its own TLS 1.3 raw-public-key listener (ALPN `clipsync-enroll/2
 
 The joining computer dials, and both run SPAKE2 over the Ed25519 group with the code as the password and fixed, distinct role identities; the `spake2` crate hashes both identities and both PAKE messages into the shared key. Each side then sends an HMAC-SHA256 key confirmation, under a per-direction key derived with HKDF, over a transcript of: direction label, protocol version, both session IDs and nonces, both PAKE messages, both key fingerprints as observed in the TLS session (never as claimed in a message), and the TLS exporter for this connection. The joining side confirms first and the allowing side verifies before sending anything keyed. Each side writes trust only after the other's confirmation verifies. Mutual success still requires both durable-save acknowledgements; otherwise the result is reported as waiting or incomplete.
 
-Each connection to the listener consumes the code on screen before the peer's PAKE message is read, and a fresh code appears. Codes also renew every two minutes. One window accepts five attempts and closes after ten minutes, when its attempts are used, or once a device has paired.
+Each connection to the listener consumes the code on screen before the peer's PAKE message is read, and a fresh code appears. Codes also renew every two minutes. One window accepts five attempts and closes after ten minutes, when its attempts are used, or once a device has paired; closing it ends any attempt still checking one of its codes. Wrong codes are not also counted against the guesser's key: an attacker can make new keys at will, and the extra count would only lock out a person who mistyped.
 
 **A stranger on the same network can:**
 

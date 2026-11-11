@@ -14,6 +14,9 @@ use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 pub const ENROLL_SERVICE_TYPE: &str = "_clipsync-enroll._tcp.local.";
+/// Bounds what announcements on a busy or hostile network can add to every snapshot.
+const MAX_NEARBY_DEVICES: usize = 32;
+const MAX_ADDRESSES_PER_DEVICE: usize = 4;
 
 pub struct EnrollMdns {
     daemon: Arc<Mutex<Option<ServiceDaemon>>>,
@@ -210,7 +213,7 @@ async fn handle_event(
                 .unwrap_or_else(|| info.get_hostname().to_string());
             let port = info.get_port();
             let mut views = Vec::new();
-            for addr in info.get_addresses() {
+            for addr in info.get_addresses().iter().take(MAX_ADDRESSES_PER_DEVICE) {
                 views.push(EnrollmentCandidateView {
                     display_name: name.clone(),
                     address: SocketAddr::new(*addr, port).to_string(),
@@ -224,6 +227,11 @@ async fn handle_event(
             }
             let mut guard = candidates.write().await;
             guard.retain(|c| c.advertised_node_id != Some(node_id));
+            let mut devices: Vec<_> = guard.iter().map(|c| c.advertised_node_id).collect();
+            devices.dedup();
+            if devices.len() >= MAX_NEARBY_DEVICES {
+                return Ok(());
+            }
             guard.extend(views);
             Ok(())
         }

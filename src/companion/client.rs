@@ -252,7 +252,7 @@ fn user_facing_error(error: &ControlError) -> (Option<String>, String) {
         Some(error_codes::ENROLLMENT_EXPIRED) => "Pairing took too long and stopped. Try again.",
         Some(error_codes::ENROLLMENT_CANCELLED) => "Pairing was cancelled.",
         Some(error_codes::ENROLLMENT_RATE_LIMITED) => {
-            "Too many pairing attempts. Wait a minute and try again."
+            "Too many pairing attempts. Wait a few minutes and try again."
         }
         Some(error_codes::ENROLLMENT_MISMATCH) => {
             "These computers could not verify each other. Nothing was paired."

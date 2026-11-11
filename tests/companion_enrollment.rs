@@ -930,6 +930,43 @@ async fn cancelling_or_expiring_an_attempt_mid_exchange_writes_nothing() {
 }
 
 #[tokio::test]
+async fn honest_typos_do_not_lock_a_computer_out() {
+    let allowing = Party::new("allowing").await;
+    let joining = Party::new("joining").await;
+    // Five typos use up a window; the codes were the cost, not the key.
+    let (addr, mut code) = allowing.allow().await;
+    for _ in 0..5 {
+        let sid = joining.pair(&addr, &wrong(&code)).await;
+        assert_eq!(failure(&wait_end(&joining.mgr, sid).await), "wrong_code");
+        if let Some((next, _)) = allowing.code().await {
+            code = PairingCode::parse(&next).unwrap();
+        }
+    }
+    eventually(async || !allowing.mgr.inspect(None).await.unwrap().listening).await;
+    let (addr, code) = allowing.allow().await;
+    let sid = joining.pair(&addr, code.digits()).await;
+    assert_eq!(wait_end(&joining.mgr, sid).await.state, "Succeeded");
+}
+
+#[tokio::test]
+async fn a_successful_pairing_ends_attempts_still_checking_other_codes() {
+    let allowing = Party::new("allowing").await;
+    let joining = Party::new("joining").await;
+    let (addr, code) = allowing.allow().await;
+    let attacker = Identity::new().await;
+    let stalled = raw_dial(&attacker, &addr, &[ENROLL_ALPN]).await;
+    let sibling = wait_state(&allowing.mgr, "acceptor", "Verifying").await;
+    let (shown, _) = wait_code_change(&allowing, code.digits()).await;
+
+    let sid = joining.pair(&addr, &shown).await;
+    assert_eq!(wait_end(&joining.mgr, sid).await.state, "Succeeded");
+    // One window, one device: the other attempt cannot pair after this.
+    assert_eq!(wait_end(&allowing.mgr, sibling).await.state, "Cancelled");
+    assert_eq!(allowing.trusted().await, vec![joining.fp()]);
+    drop(stalled);
+}
+
+#[tokio::test]
 async fn revoke_preserves_unrelated_pins() {
     let a = Party::new("a").await;
     let b = Identity::new().await;

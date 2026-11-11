@@ -179,6 +179,7 @@ struct Inner {
     last_outcome: Option<EnrollmentOutcomeView>,
     mdns: EnrollMdns,
     browse_until: Option<Instant>,
+    browse_task: Option<JoinHandle<()>>,
 }
 
 /// Daemon-owned enrollment controller.
@@ -195,6 +196,9 @@ impl Drop for EnrollmentManager {
                 t.abort();
             }
             if let Some(t) = g.expiry_task.take() {
+                t.abort();
+            }
+            if let Some(t) = g.browse_task.take() {
                 t.abort();
             }
             g.listening = false;
@@ -279,6 +283,7 @@ impl EnrollmentManager {
                 last_outcome: None,
                 mdns: EnrollMdns::new(our_node_id),
                 browse_until: None,
+                browse_task: None,
             })),
         })
     }
@@ -368,27 +373,32 @@ impl EnrollmentManager {
         let mgr = self.inner.clone();
         let auth = g.auth_dyn.clone();
         g.accept_task = Some(tokio::spawn(async move {
+            // This loop serves only its own window's listener. A loop that
+            // closed its window itself is not aborted, so it must not adopt
+            // the listener of a window opened after that.
+            let ours = |g: &Inner| {
+                g.listening
+                    && g.listener
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &listener))
+            };
             loop {
-                let tcp = {
-                    let guard = mgr.read().await;
-                    let Some(listener) = guard.listener.clone() else {
-                        break;
-                    };
-                    drop(guard);
-                    match listener.accept().await {
-                        Ok((tcp, _)) => tcp,
-                        Err(_) => break,
-                    }
+                if !ours(&*mgr.read().await) {
+                    break;
+                }
+                let tcp = match listener.accept().await {
+                    Ok((tcp, _)) => tcp,
+                    Err(_) => break,
                 };
                 let mgr2 = mgr.clone();
                 let auth2 = auth.clone();
                 {
                     let mut g = mgr2.write().await;
                     Self::expire_locked(&mut g).await;
-                    if !g.listening
-                        || !Self::can_start_handshake(&g)
-                        || !g.rates.allow_accept(Instant::now())
-                    {
+                    if !ours(&g) {
+                        break;
+                    }
+                    if !Self::can_start_handshake(&g) || !g.rates.allow_accept(Instant::now()) {
                         continue;
                     }
                     g.pending_handshakes += 1;
@@ -413,7 +423,17 @@ impl EnrollmentManager {
         Self::expire_locked(&mut g).await;
         if Self::lan_discovery(&g) {
             match g.mdns.browse().await {
-                Ok(()) => g.browse_until = Some(Instant::now() + BROWSE_TTL),
+                Ok(()) => {
+                    g.browse_until = Some(Instant::now() + BROWSE_TTL);
+                    // Stop browsing even if no companion polls again.
+                    let mgr = self.inner.clone();
+                    if let Some(task) = g.browse_task.replace(tokio::spawn(async move {
+                        tokio::time::sleep(BROWSE_TTL).await;
+                        Self::expire_locked(&mut *mgr.write().await).await;
+                    })) {
+                        task.abort();
+                    }
+                }
                 Err(e) => tracing::debug!("Enrollment mDNS browse skipped: {e}"),
             }
         }
@@ -534,9 +554,15 @@ impl EnrollmentManager {
             Self::close_window_locked(&mut g).await;
             g.mdns.stop().await;
             g.browse_until = None;
+            if let Some(task) = g.browse_task.take() {
+                task.abort();
+            }
             if was_listening {
                 g.last_outcome = outcome("cancelled", None, "Stopped allowing a new device.");
             }
+        } else {
+            // Cancelling the last attempt in flight may leave the window without codes.
+            Self::maintain_window_locked(&mut g).await;
         }
         Ok(Self::snapshot_locked(&g).await)
     }
@@ -650,7 +676,28 @@ impl EnrollmentManager {
         }
     }
 
+    /// Close the allowing window. Attempts still checking a code from it end
+    /// too, so nothing pairs after the window has said it closed, and a
+    /// successful pairing leaves no sibling attempt running.
     async fn close_window_locked(g: &mut Inner) {
+        let ending = if g
+            .window_expires
+            .is_some_and(|closes| Instant::now() >= closes)
+        {
+            (SessionState::Expired, PairingFailure::Expired)
+        } else {
+            (SessionState::Cancelled, PairingFailure::Cancelled)
+        };
+        for s in g.sessions.values_mut() {
+            if s.role == Role::Acceptor
+                && s.state == SessionState::Verifying
+                && s.commit_gate.try_cancel()
+            {
+                s.state = ending.0.clone();
+                s.failure = Some(ending.1);
+                Self::abort_session_io(s);
+            }
+        }
         g.listening = false;
         g.window_expires = None;
         g.code = None;
@@ -781,10 +828,9 @@ impl EnrollmentManager {
                 Self::start_persisting(mgr, session_id, conn).await;
             }
             Err(failure) => {
-                if matches!(
-                    failure,
-                    PairingFailure::WrongCode | PairingFailure::Protocol
-                ) {
+                // A wrong code already cost its code; charging it to the key as
+                // well would only lock out a person who mistyped.
+                if failure == PairingFailure::Protocol {
                     mgr.write()
                         .await
                         .rates
@@ -974,10 +1020,7 @@ impl EnrollmentManager {
         let peer = match exchange {
             Ok(peer) => peer,
             Err(failure) => {
-                if matches!(
-                    failure,
-                    PairingFailure::WrongCode | PairingFailure::Protocol
-                ) {
+                if failure == PairingFailure::Protocol {
                     mgr.write()
                         .await
                         .rates
