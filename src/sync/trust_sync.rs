@@ -4,7 +4,7 @@ use crate::adapters::{ClipboardProviderWrapper, HistoryManager, PeerDiscovery};
 use crate::auth::{SshAuthenticator, TrustManager};
 use crate::config::Config;
 use crate::discovery::TrustAwareDiscovery;
-use crate::sync::SyncEngine;
+use crate::sync::{known_peers::KnownPeers, SyncEngine};
 use crate::transport::TransportManager;
 use anyhow::Result;
 use std::sync::Arc;
@@ -65,9 +65,16 @@ impl TrustAwareSyncEngine {
             ssh_auth.clone(),
             config.node_id(),
         ));
-        let sync_engine = Arc::new(SyncEngine::new(
-            config, clipboard, history, discovery, transport,
-        ));
+        // Lives beside the trust store it is filtered against.
+        let known_peers_path = config
+            .auth
+            .authorized_keys
+            .with_file_name("known_peers.json");
+        let known_peers = Arc::new(KnownPeers::open(known_peers_path));
+        let sync_engine = Arc::new(
+            SyncEngine::new(config, clipboard, history, discovery, transport)
+                .with_known_peers(known_peers),
+        );
 
         Ok(Self {
             sync_engine,

@@ -52,7 +52,8 @@ impl DiscoveryService {
     pub fn new(config: &crate::Config) -> Result<Self> {
         let peer_manager = PeerManager::new();
         let mdns = MdnsDiscovery::new(peer_manager.clone())?;
-        let fallback = FallbackDiscovery::new(peer_manager.clone(), config)?;
+        let fallback = FallbackDiscovery::new(peer_manager.clone(), config)?
+            .with_rebuild_handle(mdns.rebuild_handle());
 
         Ok(Self {
             mdns,

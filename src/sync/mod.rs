@@ -1,6 +1,7 @@
 #![deny(warnings, clippy::all)]
 pub mod connection_policy;
 pub mod discovery_connect;
+pub mod known_peers;
 pub mod trust_sync;
 use crate::{
     adapters::{
@@ -16,7 +17,8 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
-use discovery_connect::{discovery_connect_peers, PeerDialState};
+use discovery_connect::{connect_peers, PeerDialState};
+use known_peers::KnownPeers;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::{broadcast, Mutex};
 pub use trust_sync::{setup_trust_sync, TrustAwareSyncEngine};
@@ -71,6 +73,7 @@ pub struct SyncEngine {
     clipboard: Arc<ClipboardProviderWrapper>,
     history: Arc<HistoryManager>,
     discovery: Option<Arc<PeerDiscovery>>,
+    known_peers: Option<Arc<KnownPeers>>,
     transport: Arc<TransportManager>,
     state: Mutex<SyncState>,
     events: broadcast::Sender<SyncEvent>,
@@ -134,12 +137,19 @@ impl SyncEngine {
             clipboard,
             history,
             discovery: None,
+            known_peers: None,
             transport,
             state: Mutex::new(SyncState::default()),
             events,
             instance_id: Uuid::new_v4(),
             image_support,
         }
+    }
+
+    /// Redial peers from `store` at startup and while they are disconnected.
+    pub fn with_known_peers(mut self, store: Arc<KnownPeers>) -> Self {
+        self.known_peers = Some(store);
+        self
     }
 
     /// Override image limits in isolated integration harnesses.
@@ -356,7 +366,7 @@ impl SyncEngine {
                     .map_err(anyhow::Error::from)
             },
             self.sync_loop(incoming),
-            self.discovery_loop(),
+            self.connect_loop(),
         );
         self.shutdown().await;
         result.map(|_| ())
@@ -369,23 +379,38 @@ impl SyncEngine {
             }
         }
     }
-    async fn discovery_loop(&self) -> Result<()> {
-        let Some(discovery) = &self.discovery else {
+    async fn connect_loop(&self) -> Result<()> {
+        if self.discovery.is_none() && self.known_peers.is_none() {
             return std::future::pending().await;
-        };
-        discovery.start().await?;
+        }
+        if let Some(discovery) = &self.discovery {
+            discovery.start().await?;
+        }
         let mut interval = tokio::time::interval(Duration::from_secs(2));
         let mut retry: HashMap<Uuid, PeerDialState> = HashMap::new();
         loop {
             interval.tick().await;
             let now = std::time::Instant::now();
-            let peers = discovery.snapshot().await?;
-            discovery_connect_peers(
+            let mut peers = match &self.discovery {
+                Some(discovery) => discovery.snapshot().await?,
+                None => Vec::new(),
+            };
+            if let Some(known) = &self.known_peers {
+                if !known.is_empty().await {
+                    // Fail closed: without a readable trust store, stored addresses are not dialed.
+                    match self.transport.authorized_peer_ids().await {
+                        Ok(authorized) => known.merge_into(&mut peers, &authorized).await,
+                        Err(e) => tracing::debug!("Skipping known peers: {e}"),
+                    }
+                }
+            }
+            connect_peers(
                 &self.transport,
                 self.config.node_id(),
                 &peers,
                 &mut retry,
                 now,
+                self.known_peers.as_deref(),
             )
             .await;
         }

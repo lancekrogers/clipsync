@@ -6,57 +6,262 @@ use crate::discovery::{
 };
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo as MdnsServiceInfo, TxtProperties};
+use mdns_sd::{
+    DaemonEvent, ServiceDaemon, ServiceEvent, ServiceInfo as MdnsServiceInfo, TxtProperties,
+};
 use std::collections::HashMap;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex, RwLock};
+use std::time::Duration;
+use tokio::sync::{mpsc, Mutex, Notify, RwLock};
+use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 const SERVICE_TYPE: &str = "_clipsync._tcp.local.";
-const BROWSE_TIMEOUT_MS: u64 = 5000;
+/// Coalesces a burst of rebuild requests into one rebuild.
+const REBUILD_DEBOUNCE: Duration = Duration::from_secs(3);
+/// Upper bound on how often the advertisement is rebuilt.
+const REBUILD_MIN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Why the mDNS daemon and advertisement are being rebuilt.
+///
+/// mdns-sd skips an interface whose test multicast send fails when the daemon starts
+/// (as it does while macOS is still deciding Local Network access). It binds the
+/// interface again once sends work, but only re-announces services with automatic
+/// addresses. Ours lists explicit addresses, so it stays unanswered on that interface
+/// until it is registered again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebuildReason {
+    /// Network sends failed earlier in this process and now succeed.
+    NetworkRecovered,
+    /// mdns-sd bound an interface address we advertise after registration.
+    InterfaceAdded(IpAddr),
+}
+
+impl std::fmt::Display for RebuildReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NetworkRecovered => write!(f, "network sends recovered after failing"),
+            Self::InterfaceAdded(ip) => {
+                write!(f, "interface address {ip} bound after registration")
+            }
+        }
+    }
+}
+
+/// Requests an in-process rebuild of the mDNS daemon. Requests are coalesced.
+#[derive(Clone, Default)]
+pub struct RebuildHandle {
+    inner: Arc<RebuildRequests>,
+}
+
+#[derive(Default)]
+struct RebuildRequests {
+    pending: std::sync::Mutex<Option<RebuildReason>>,
+    notify: Notify,
+}
+
+impl RebuildHandle {
+    pub fn request(&self, reason: RebuildReason) {
+        self.inner
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert(reason);
+        self.inner.notify.notify_one();
+    }
+
+    fn take(&self) -> Option<RebuildReason> {
+        self.inner
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+}
+
+/// Run `rebuild` once per burst of requests, never more often than `min_interval`.
+async fn run_rebuilds<F, Fut>(
+    requests: RebuildHandle,
+    debounce: Duration,
+    min_interval: Duration,
+    mut rebuild: F,
+) where
+    F: FnMut(RebuildReason) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let mut last: Option<tokio::time::Instant> = None;
+    loop {
+        requests.inner.notify.notified().await;
+        tokio::time::sleep(debounce).await;
+        if let Some(last) = last {
+            tokio::time::sleep_until(last + min_interval).await;
+        }
+        let Some(reason) = requests.take() else {
+            continue;
+        };
+        rebuild(reason).await;
+        last = Some(tokio::time::Instant::now());
+    }
+}
 
 /// mDNS-based service discovery
 pub struct MdnsDiscovery {
-    daemon: Arc<Mutex<Option<ServiceDaemon>>>,
+    shared: Arc<Shared>,
+    rebuild: RebuildHandle,
+    rebuild_task: Option<JoinHandle<()>>,
+}
+
+struct Shared {
     peer_manager: PeerManager,
-    service_handle: Arc<Mutex<Option<String>>>,
-    browse_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
     our_id: Arc<RwLock<Option<Uuid>>>,
+    state: Mutex<DaemonState>,
+}
+
+#[derive(Default)]
+struct DaemonState {
+    daemon: Option<ServiceDaemon>,
+    browse: Option<JoinHandle<()>>,
+    monitor: Option<JoinHandle<()>>,
+    /// Kept so a rebuild can register again with fresh interface addresses.
+    service: Option<ServiceInfo>,
+    registered: Option<String>,
+}
+
+impl Shared {
+    fn launch(&self, state: &mut DaemonState) -> Result<()> {
+        let daemon = ServiceDaemon::new()?;
+        let receiver = daemon.browse(SERVICE_TYPE);
+        // Keep the daemon even if browsing failed so teardown still shuts it down.
+        state.daemon = Some(daemon);
+        let receiver = receiver?;
+        let peer_manager = self.peer_manager.clone();
+        let our_id = self.our_id.clone();
+        state.browse = Some(tokio::spawn(async move {
+            MdnsDiscovery::browse_loop(receiver, peer_manager, our_id).await;
+        }));
+        Ok(())
+    }
+
+    fn register(
+        state: &mut DaemonState,
+        service_info: &ServiceInfo,
+        rebuild: &RebuildHandle,
+    ) -> Result<Vec<IpAddr>> {
+        let daemon = state
+            .daemon
+            .as_ref()
+            .ok_or_else(|| anyhow!("mDNS daemon not started"))?;
+        // Watch before computing addresses: with no usable address yet, the
+        // interface coming up is what must trigger the next attempt.
+        let watcher = tokio::spawn(watch_interfaces(
+            daemon.monitor()?,
+            listen_bind(service_info),
+            rebuild.clone(),
+        ));
+        if let Some(previous) = state.monitor.replace(watcher) {
+            previous.abort();
+        }
+        let mdns_info = MdnsDiscovery::create_mdns_service_info(service_info)?;
+        let fullname = mdns_info.get_fullname().to_string();
+        let mut addresses: Vec<IpAddr> = mdns_info.get_addresses().iter().copied().collect();
+        addresses.sort();
+        daemon.register(mdns_info)?;
+        state.registered = Some(fullname);
+        Ok(addresses)
+    }
+
+    fn teardown(state: &mut DaemonState) {
+        for task in [state.browse.take(), state.monitor.take()]
+            .into_iter()
+            .flatten()
+        {
+            task.abort();
+        }
+        if let Some(daemon) = state.daemon.take() {
+            if let Some(name) = state.registered.take() {
+                if let Err(e) = daemon.unregister(&name) {
+                    tracing::debug!("mDNS unregister {name}: {e}");
+                }
+            }
+            if let Err(e) = daemon.shutdown() {
+                tracing::debug!("mDNS shutdown: {e}");
+            }
+        }
+    }
+
+    async fn rebuild(&self, reason: RebuildReason, requests: &RebuildHandle) {
+        let mut state = self.state.lock().await;
+        let Some(service) = state.service.clone() else {
+            return;
+        };
+        tracing::warn!("Rebuilding mDNS advertisement: {reason}");
+        Self::teardown(&mut state);
+        let result = self
+            .launch(&mut state)
+            .and_then(|()| Self::register(&mut state, &service, requests));
+        match result {
+            Ok(addresses) => tracing::info!(
+                "mDNS advertisement re-registered for {} on {addresses:?}",
+                service.id
+            ),
+            Err(e) if state.monitor.is_some() => {
+                tracing::warn!("mDNS advertisement rebuild failed; waiting for an interface: {e:#}")
+            }
+            Err(e) => {
+                tracing::warn!("mDNS advertisement rebuild failed; retrying: {e:#}");
+                requests.request(reason);
+            }
+        }
+    }
+}
+
+fn listen_bind(service_info: &ServiceInfo) -> SocketAddr {
+    service_info
+        .listen_bind
+        .unwrap_or_else(|| SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), service_info.port))
+}
+
+/// Request a rebuild when mdns-sd binds an address we would advertise.
+async fn watch_interfaces(
+    events: mdns_sd::Receiver<DaemonEvent>,
+    bind: SocketAddr,
+    requests: RebuildHandle,
+) {
+    while let Ok(event) = events.recv_async().await {
+        let ip = match event {
+            DaemonEvent::IpAdd(ip) => ip,
+            DaemonEvent::Error(e) => {
+                tracing::debug!("mDNS daemon error: {e}");
+                continue;
+            }
+            _ => continue,
+        };
+        if advertise_for_listener(bind, &[ip]).contains(&ip) {
+            tracing::info!("mDNS bound interface address {ip} after registration");
+            requests.request(RebuildReason::InterfaceAdded(ip));
+        }
+    }
 }
 
 impl MdnsDiscovery {
     /// Create a new mDNS discovery instance
     pub fn new(peer_manager: PeerManager) -> Result<Self> {
         Ok(Self {
-            daemon: Arc::new(Mutex::new(None)),
-            peer_manager,
-            service_handle: Arc::new(Mutex::new(None)),
-            browse_handle: Arc::new(RwLock::new(None)),
-            our_id: Arc::new(RwLock::new(None)),
+            shared: Arc::new(Shared {
+                peer_manager,
+                our_id: Arc::new(RwLock::new(None)),
+                state: Mutex::new(DaemonState::default()),
+            }),
+            rebuild: RebuildHandle::default(),
+            rebuild_task: None,
         })
     }
 
-    /// Start browsing for services
-    async fn start_browsing(&self) -> Result<()> {
-        let daemon = self.daemon.lock().await;
-        let daemon = daemon
-            .as_ref()
-            .ok_or_else(|| anyhow!("mDNS daemon not started"))?;
-
-        let receiver = daemon.browse(SERVICE_TYPE)?;
-        let peer_manager = self.peer_manager.clone();
-        let our_id = self.our_id.clone();
-
-        // Spawn browser task
-        let handle = tokio::spawn(async move {
-            Self::browse_loop(receiver, peer_manager, our_id).await;
-        });
-
-        let mut browse_handle = self.browse_handle.write().await;
-        *browse_handle = Some(handle);
-
-        Ok(())
+    /// Handle for other components to request an advertisement rebuild.
+    pub fn rebuild_handle(&self) -> RebuildHandle {
+        self.rebuild.clone()
     }
 
     /// Browse loop to handle discovered services
@@ -181,9 +386,7 @@ impl MdnsDiscovery {
             properties.insert(key.clone(), value.clone());
         }
 
-        let bind = service_info.listen_bind.unwrap_or_else(|| {
-            SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), service_info.port)
-        });
+        let bind = listen_bind(service_info);
         let interface_ips = Self::get_local_addresses()?;
         let addresses = advertise_for_listener(bind, &interface_ips);
         if addresses.is_empty() {
@@ -217,69 +420,64 @@ impl MdnsDiscovery {
 #[async_trait]
 impl Discovery for MdnsDiscovery {
     async fn start(&mut self) -> Result<()> {
-        // Create mDNS daemon
-        let daemon = ServiceDaemon::new()?;
-
-        *self.daemon.lock().await = Some(daemon);
-
-        // Start browsing for services
-        self.start_browsing().await?;
-
+        let mut state = self.shared.state.lock().await;
+        if state.daemon.is_none() {
+            self.shared.launch(&mut state)?;
+        }
+        drop(state);
+        if self.rebuild_task.is_none() {
+            let shared = Arc::downgrade(&self.shared);
+            let requests = self.rebuild.clone();
+            self.rebuild_task = Some(tokio::spawn(run_rebuilds(
+                self.rebuild.clone(),
+                REBUILD_DEBOUNCE,
+                REBUILD_MIN_INTERVAL,
+                move |reason| {
+                    let shared = shared.upgrade();
+                    let requests = requests.clone();
+                    async move {
+                        if let Some(shared) = shared {
+                            shared.rebuild(reason, &requests).await;
+                        }
+                    }
+                },
+            )));
+        }
         Ok(())
     }
 
     async fn stop(&mut self) -> Result<()> {
-        // Stop browsing
-        if let Some(handle) = self.browse_handle.write().await.take() {
-            handle.abort();
+        if let Some(task) = self.rebuild_task.take() {
+            task.abort();
         }
-
-        // Unregister our service
-        if let Some(service_name) = self.service_handle.lock().await.take() {
-            if let Some(daemon) = self.daemon.lock().await.as_ref() {
-                daemon.unregister(&service_name)?;
-            }
-        }
-
-        // Shutdown daemon
-        if let Some(daemon) = self.daemon.lock().await.take() {
-            daemon.shutdown()?;
-        }
-
+        let mut state = self.shared.state.lock().await;
+        Shared::teardown(&mut state);
+        state.service = None;
         Ok(())
     }
 
     async fn discover_peers(&mut self) -> Result<Vec<PeerInfo>> {
         // Return peers discovered via mDNS
-        self.peer_manager
+        self.shared
+            .peer_manager
             .get_peers_by_method(DiscoveryMethod::Mdns)
             .await
     }
 
     async fn announce(&mut self, service_info: ServiceInfo) -> Result<()> {
-        let daemon = self.daemon.lock().await;
-        let daemon = daemon
-            .as_ref()
-            .ok_or_else(|| anyhow!("mDNS daemon not started"))?;
-
-        // Store our ID
-        *self.our_id.write().await = Some(service_info.id);
-
-        // Create mDNS service info
-        let mdns_info = Self::create_mdns_service_info(&service_info)?;
-        let service_name = mdns_info.get_fullname().to_string();
-
-        // Register service
-        daemon.register(mdns_info)?;
-
-        // Store handle for cleanup
-        *self.service_handle.lock().await = Some(service_name);
-
+        *self.shared.our_id.write().await = Some(service_info.id);
+        let mut state = self.shared.state.lock().await;
+        let addresses = Shared::register(&mut state, &service_info, &self.rebuild)?;
+        tracing::info!(
+            "mDNS advertisement registered for {} on {addresses:?}",
+            service_info.id
+        );
+        state.service = Some(service_info);
         Ok(())
     }
 
     fn subscribe_changes(&mut self) -> mpsc::Receiver<DiscoveryEvent> {
-        self.peer_manager.subscribe()
+        self.shared.peer_manager.subscribe()
     }
 }
 
@@ -307,6 +505,70 @@ mod tests {
             peer_id.unwrap().to_string(),
             "550e8400-e29b-41d4-a716-446655440000"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rebuild_requests_coalesce_and_are_rate_limited() {
+        let requests = RebuildHandle::default();
+        let runs = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recorded = runs.clone();
+        let _worker = tokio::spawn(run_rebuilds(
+            requests.clone(),
+            REBUILD_DEBOUNCE,
+            REBUILD_MIN_INTERVAL,
+            move |reason| {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((tokio::time::Instant::now(), reason));
+                async {}
+            },
+        ));
+        let ip: IpAddr = "192.168.1.5".parse().unwrap();
+        let count = || runs.lock().unwrap().len();
+
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        assert_eq!(count(), 0, "no request, no rebuild");
+
+        requests.request(RebuildReason::NetworkRecovered);
+        requests.request(RebuildReason::InterfaceAdded(ip));
+        tokio::time::sleep(REBUILD_DEBOUNCE * 2).await;
+        assert_eq!(count(), 1, "a burst is one rebuild");
+        assert_eq!(runs.lock().unwrap()[0].1, RebuildReason::NetworkRecovered);
+
+        requests.request(RebuildReason::InterfaceAdded(ip));
+        tokio::time::sleep(REBUILD_MIN_INTERVAL / 2).await;
+        assert_eq!(count(), 1, "cooldown defers the next rebuild");
+        tokio::time::sleep(REBUILD_MIN_INTERVAL).await;
+        assert_eq!(count(), 2, "a deferred request still runs");
+        let runs_now = runs.lock().unwrap().clone();
+        assert!(runs_now[1].0 - runs_now[0].0 >= REBUILD_MIN_INTERVAL);
+
+        tokio::time::sleep(REBUILD_MIN_INTERVAL * 10).await;
+        assert_eq!(count(), 2, "no further rebuilds without a cause");
+    }
+
+    #[tokio::test]
+    async fn failed_rebuild_keeps_watching_for_an_address() {
+        let mut discovery = MdnsDiscovery::new(PeerManager::new()).unwrap();
+        discovery.start().await.unwrap();
+        // A link-local listener has nothing advertisable, so registration fails
+        // without announcing anything on the network.
+        let mut service = ServiceInfo::default();
+        service.listen_bind = Some("[fe80::1]:9".parse().unwrap());
+        discovery.shared.state.lock().await.service = Some(service);
+
+        discovery
+            .shared
+            .rebuild(RebuildReason::NetworkRecovered, &discovery.rebuild)
+            .await;
+
+        let state = discovery.shared.state.lock().await;
+        assert!(state.registered.is_none());
+        let watcher = state.monitor.as_ref().expect("interface watcher survives");
+        assert!(!watcher.is_finished());
+        drop(state);
+        discovery.stop().await.unwrap();
     }
 
     #[tokio::test]

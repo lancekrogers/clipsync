@@ -1,6 +1,7 @@
 //! Fallback discovery mechanisms for when mDNS is unavailable
 
 use crate::discovery::{
+    mdns::{RebuildHandle, RebuildReason},
     types::{DiscoveryMethod, PeerMetadata},
     Discovery, DiscoveryEvent, PeerInfo, PeerManager, ServiceInfo,
 };
@@ -26,6 +27,22 @@ pub struct FallbackDiscovery {
     broadcast_socket: Arc<Mutex<Option<UdpSocket>>>,
     broadcast_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     our_info: Arc<RwLock<Option<ServiceInfo>>>,
+    network_recovered: Option<RebuildHandle>,
+}
+
+/// Tracks broadcast send outcomes to spot the network becoming usable mid-process.
+#[derive(Debug, Default)]
+struct SendHealth {
+    failing: bool,
+}
+
+impl SendHealth {
+    /// Returns true only when a send succeeds after one or more failures.
+    fn record(&mut self, sent: bool) -> bool {
+        let recovered = sent && self.failing;
+        self.failing = !sent;
+        recovered
+    }
 }
 
 /// Manually configured peer
@@ -49,7 +66,14 @@ impl FallbackDiscovery {
             broadcast_socket: Arc::new(Mutex::new(None)),
             broadcast_task: Arc::new(Mutex::new(None)),
             our_info: Arc::new(RwLock::new(None)),
+            network_recovered: None,
         })
+    }
+
+    /// Ask for an mDNS rebuild when broadcasts start succeeding after failures.
+    pub fn with_rebuild_handle(mut self, handle: RebuildHandle) -> Self {
+        self.network_recovered = Some(handle);
+        self
     }
 
     /// Parse manual peers from configuration
@@ -74,9 +98,10 @@ impl FallbackDiscovery {
         let socket = self.broadcast_socket.clone();
         let our_info = self.our_info.clone();
         let peer_manager = self.peer_manager.clone();
+        let network_recovered = self.network_recovered.clone();
 
         let handle = tokio::spawn(async move {
-            Self::broadcast_loop(socket, our_info, peer_manager).await;
+            Self::broadcast_loop(socket, our_info, peer_manager, network_recovered).await;
         });
 
         *self.broadcast_task.lock().await = Some(handle);
@@ -89,16 +114,29 @@ impl FallbackDiscovery {
         socket: Arc<Mutex<Option<UdpSocket>>>,
         our_info: Arc<RwLock<Option<ServiceInfo>>>,
         peer_manager: PeerManager,
+        network_recovered: Option<RebuildHandle>,
     ) {
         let mut interval = interval(Duration::from_secs(BROADCAST_INTERVAL_SECS));
         let mut recv_buf = vec![0u8; 1024];
+        let mut health = SendHealth::default();
 
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    // Send broadcast announcement
-                    if let Err(e) = Self::send_broadcast(&socket, &our_info).await {
-                        tracing::error!("Failed to send broadcast: {}", e);
+                    match Self::send_broadcast(&socket, &our_info).await {
+                        Ok(true) => {
+                            if health.record(true) {
+                                tracing::info!("Broadcast send recovered after earlier failures");
+                                if let Some(handle) = &network_recovered {
+                                    handle.request(RebuildReason::NetworkRecovered);
+                                }
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            health.record(false);
+                            tracing::error!("Failed to send broadcast: {}", e);
+                        }
                     }
                 }
                 result = Self::receive_broadcast(&socket, &mut recv_buf) => {
@@ -131,11 +169,11 @@ impl FallbackDiscovery {
         }
     }
 
-    /// Send broadcast announcement
+    /// Send broadcast announcement. `Ok(false)` means nothing to announce yet.
     async fn send_broadcast(
         socket: &Arc<Mutex<Option<UdpSocket>>>,
         our_info: &Arc<RwLock<Option<ServiceInfo>>>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let socket_guard = socket.lock().await;
         let socket = socket_guard
             .as_ref()
@@ -147,7 +185,7 @@ impl FallbackDiscovery {
             None => {
                 // Service info not available yet - this is normal during startup
                 // Skip broadcast until announce() is called
-                return Ok(());
+                return Ok(false);
             }
         };
 
@@ -159,7 +197,7 @@ impl FallbackDiscovery {
             .send_to(&packet, ("255.255.255.255", BROADCAST_PORT))
             .await?;
 
-        Ok(())
+        Ok(true)
     }
 
     /// Receive broadcast announcement
@@ -364,6 +402,22 @@ impl Discovery for FallbackDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn send_health_fires_once_per_failure_to_success_transition() {
+        let mut steady = SendHealth::default();
+        assert!((0..10).all(|_| !steady.record(true)));
+
+        let mut health = SendHealth::default();
+        let fired: Vec<bool> = [false, false, true, true, true, false, true, true]
+            .into_iter()
+            .map(|sent| health.record(sent))
+            .collect();
+        assert_eq!(
+            fired,
+            [false, false, true, false, false, false, true, false]
+        );
+    }
 
     #[test]
     fn test_broadcast_packet_roundtrip() {
