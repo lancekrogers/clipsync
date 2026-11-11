@@ -13,9 +13,8 @@ cask "clipsync" do
   binary "#{appdir}/ClipSync.app/Contents/MacOS/clipsync"
 @IF_UNSIGNED@
   # Not notarized; the bundle carries an ad-hoc signature.
-  postflight do
-    system_command "/usr/bin/xattr",
-                   args: ["-dr", "com.apple.quarantine", "#{appdir}/ClipSync.app"]
+  postflight_steps do
+    run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/ClipSync.app"]
   end
 @END_UNSIGNED@
   # The background service runs from the app, so uninstall only quits the GUI

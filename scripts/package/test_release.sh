@@ -303,7 +303,7 @@ fi
 CASK_TEXT="$(cat "$STAGE/clipsync.rb")"
 for needle in 'depends_on arch: :arm64' 'app "ClipSync.app"' \
   'binary "#{appdir}/ClipSync.app/Contents/MacOS/clipsync"' \
-  '"-dr", "com.apple.quarantine", "#{appdir}/ClipSync.app"' \
+  'run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/ClipSync.app"]' \
   'url "https://github.com/example/clipsync/releases/download/v#{version}/ClipSync-#{version}-macos-arm64-unsigned.dmg"' \
   'uninstall quit: "com.clipsync.desktop"'; do
   if [[ "$CASK_TEXT" == *"$needle"* ]]; then pass "cask has: $needle"; else fail "cask lacks: $needle"; fi
