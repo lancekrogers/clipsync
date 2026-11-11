@@ -289,12 +289,12 @@ mod tests {
     fn device_names_drop_fingerprints_and_clipsync_affixes() {
         let fingerprint = "SHA256:TtXaCtU8Moi9iEkJFkmdyuY+R+ViWhCd5e8r2r+/v4c";
         assert_eq!(
-            friendly_device_name(&format!("archdtop-clipsync {fingerprint}")).as_deref(),
-            Some("archdtop")
+            friendly_device_name(&format!("workbench-clipsync {fingerprint}")).as_deref(),
+            Some("workbench")
         );
         assert_eq!(
-            friendly_device_name("clipsync-studio").as_deref(),
-            Some("studio")
+            friendly_device_name("clipsync-laptop").as_deref(),
+            Some("laptop")
         );
         assert_eq!(
             friendly_device_name("Lance's MacBook Air").as_deref(),

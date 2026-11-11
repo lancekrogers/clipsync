@@ -288,12 +288,12 @@ impl PeerFixture {
         local_auth
             .add_trusted_peer(
                 &public.to_openssh(),
-                Some(format!("archdtop-clipsync {}", public.fingerprint())),
+                Some(format!("workbench-clipsync {}", public.fingerprint())),
             )
             .await?;
         let offline = KeyPair::generate(KeyType::Ed25519)?.public_key();
         local_auth
-            .add_trusted_peer(&offline.to_openssh(), Some("clipsync-studio".into()))
+            .add_trusted_peer(&offline.to_openssh(), Some("clipsync-laptop".into()))
             .await?;
         Ok(Self {
             _dir: dir,

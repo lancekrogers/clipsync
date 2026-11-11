@@ -1208,12 +1208,12 @@ mod tests {
         assert_eq!(view.device_name(peer), "Device Jhs4k2ab");
         view.trusted_devices = vec![TrustedDeviceView {
             fingerprint: fingerprint.into(),
-            comment: Some(format!("archdtop-clipsync {fingerprint}")),
+            comment: Some(format!("workbench-clipsync {fingerprint}")),
         }];
-        assert_eq!(view.device_name(peer), "archdtop");
+        assert_eq!(view.device_name(peer), "workbench");
         view.seen_peers.insert(peer, fingerprint.into());
         view.devices.clear();
-        assert_eq!(view.device_name(peer), "archdtop");
+        assert_eq!(view.device_name(peer), "workbench");
         assert_eq!(view.device_name(Uuid::from_u128(7)), "Device 00000000");
     }
     #[test]
