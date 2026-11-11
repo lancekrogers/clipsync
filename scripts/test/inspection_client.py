@@ -2,6 +2,7 @@
 import json
 import socket
 import struct
+import sys
 import time
 import msgpack
 
@@ -93,6 +94,36 @@ class Inspection:
                 for pressed in (True, False)
             ],
         ])
+
+    def fields(self):
+        """Text fields in tree order, each as its attribute dict (bounds, value)."""
+        found = []
+        for _, node in self.tree()[2][0]:
+            if node and node[0] == 'textInput':
+                attrs = next((v for v in node if isinstance(v, dict) and 'bounds' in v), None)
+                if attrs:
+                    found.append(attrs)
+        return found
+
+    def type_into(self, index, text, attempts=5):
+        """Replace the index-th field's text, retrying until the field shows it.
+        Text sent before the click has focused the field is otherwise dropped."""
+        select_all = dict(self.modifiers, command=True, mac_cmd=sys.platform == 'darwin', ctrl=sys.platform != 'darwin')
+        for _ in range(attempts):
+            fields = self.fields()
+            assert len(fields) > index, f'Missing text field {index}: {self.text()}'
+            x, y, right, bottom = fields[index]['bounds']
+            self.click_at([(x + right) / 2, (y + bottom) / 2])
+            time.sleep(.2)
+            for pressed in (True, False):
+                self.events([{'Key': dict(key='A', physical_key=None, pressed=pressed, repeat=False, modifiers=select_all)}])
+            self.events([{'Text': text}])
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline:
+                if self.fields()[index].get('value') == text:
+                    return
+                time.sleep(.1)
+        raise AssertionError(f'Field {index} never showed {text!r}: {self.text()}')
 
     def screenshot(self, path):
         path.write_bytes(self.request({'GetScreenshot': [1.0]})['Screenshot'][1])

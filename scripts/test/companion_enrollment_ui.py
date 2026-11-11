@@ -27,16 +27,7 @@ b_app = None
 
 def set_field(view, index, text):
     """Type into the index-th text field (0 = code, 1 = address)."""
-    fields = []
-    for _, node in view.tree()[2][0]:
-        if node and node[0] == 'textInput':
-            bounds = next((v['bounds'] for v in node if isinstance(v, dict) and 'bounds' in v), None)
-            if bounds:
-                fields.append(bounds)
-    assert len(fields) > index, f'Missing text field {index}: {view.text()}'
-    x, y, r, d = fields[index]
-    view.click_at([(x + r) / 2, (y + d) / 2])
-    view.events([{'Text': text}])
+    view.type_into(index, text)
 
 
 try:

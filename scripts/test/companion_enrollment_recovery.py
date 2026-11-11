@@ -179,19 +179,7 @@ def save(name):
 
 def set_field(view, index, text):
     """Type into the index-th text field (0 = code, 1 = address)."""
-    fields = []
-    for _, node in view.tree()[2][0]:
-        if node and node[0] == "textInput":
-            bounds = next((v["bounds"] for v in node if isinstance(v, dict) and "bounds" in v), None)
-            if bounds:
-                fields.append(bounds)
-    assert len(fields) > index, "Missing text field %d: %s" % (index, view.text())
-    x, y, right, bottom = fields[index]
-    view.click_at([(x + right) / 2, (y + bottom) / 2])
-    select_all = dict(view.modifiers, command=True, mac_cmd=sys.platform == "darwin", ctrl=sys.platform != "darwin")
-    for pressed in (True, False):
-        view.events([{"Key": dict(key="A", physical_key=None, pressed=pressed, repeat=False, modifiers=select_all)}])
-    view.events([{"Text": text}])
+    view.type_into(index, text)
 
 
 def gui_pair(address, code):
