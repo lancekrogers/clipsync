@@ -28,8 +28,11 @@ brew install --cask @TAP@/clipsync
 The cask installs ClipSync to `/Applications`, puts `clipsync` on your PATH
 @IF_UNSIGNED@and clears the download quarantine flag, so the app opens without a
 Gatekeeper prompt.@END_UNSIGNED@@IF_SIGNED@and opens like any notarized app.@END_SIGNED@
-`brew uninstall --cask clipsync` removes the app but keeps your settings, paired
-devices and history. `brew uninstall --zap --cask clipsync` removes those too.
+`brew uninstall --cask clipsync` removes the app and keeps your settings, paired
+devices and history. If you set up the background service, it stays registered:
+remove it with `launchctl bootout gui/$(id -u)/com.clipsync` and delete
+`~/Library/LaunchAgents/com.clipsync.plist`. `brew uninstall --zap --cask clipsync`
+removes the service and all ClipSync data.
 
 **From the disk image:**
 
