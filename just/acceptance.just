@@ -25,3 +25,8 @@ companion-test-instance-macos:
 companion-test-restart:
   cargo +1.95.0 build --locked --features tui,integration-tests --bin clipsync --example companion_fixture
   uv run --with pyte python scripts/test/companion_restart.py '{{env_var_or_default("CARGO_TARGET_DIR", "target")}}/debug/examples/companion_fixture' '{{env_var_or_default("CARGO_TARGET_DIR", "target")}}/debug/clipsync' target/companion-evidence/restart
+
+# Delete and clear History in the real TUI; private Mac pasteboard and fixture only.
+companion-test-history-removal:
+  cargo +1.95.0 build --locked --features tui,integration-tests --bin clipsync --example companion_fixture
+  uv run --with pyte python scripts/test/companion_history_removal_tui.py '{{env_var_or_default("CARGO_TARGET_DIR", "target")}}/debug/examples/companion_fixture' '{{env_var_or_default("CARGO_TARGET_DIR", "target")}}/debug/clipsync' target/companion-evidence/history-removal

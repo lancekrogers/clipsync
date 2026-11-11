@@ -3,6 +3,7 @@ use super::{
     app::{Companion, SetupIntent, SetupState},
     client::{Intent, View},
     model::{Connection, Route},
+    terminal_history::Confirm,
     terminal_theme::{Depth, Theme, Tone},
 };
 use anyhow::Result;
@@ -51,6 +52,7 @@ pub fn run(config: Option<PathBuf>, daemon_binary: Option<PathBuf>) -> Result<()
     let mut graphics = super::terminal_image::GraphicsPreview::new(theme.color());
     let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     let mut devices = super::terminal_devices::DevicesUi::default();
+    let mut confirm = Confirm::default();
     let mut search = false;
     let mut choice = 0usize;
     let mut detail_scroll = 0u16;
@@ -74,6 +76,7 @@ pub fn run(config: Option<PathBuf>, daemon_binary: Option<PathBuf>) -> Result<()
                 &theme,
                 detail_scroll,
                 &devices,
+                &confirm,
                 &mut graphics,
             )
         })?;
@@ -88,6 +91,13 @@ pub fn run(config: Option<PathBuf>, daemon_binary: Option<PathBuf>) -> Result<()
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             break;
+        }
+        // An open question takes the next key, so Esc and q cancel instead of quitting.
+        if confirm.pending().is_some() {
+            if let (Some(intent), Some(client)) = (confirm.answer(key.code), &mut app.client) {
+                client.dispatch(intent);
+            }
+            continue;
         }
         if app.route == Route::Devices {
             if let Some(client) = &mut app.client {
@@ -170,6 +180,14 @@ pub fn run(config: Option<PathBuf>, daemon_binary: Option<PathBuf>) -> Result<()
             KeyCode::Char('c') if app.route == Route::History => {
                 if let Some(client) = &mut app.client {
                     client.dispatch(Intent::CopySelected);
+                }
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') if app.route == Route::History => {
+                if let Some(client) = &mut app.client {
+                    let all = key.code == KeyCode::Char('D');
+                    if let Some(intent) = confirm.ask(all, &client.view) {
+                        client.dispatch(intent);
+                    }
                 }
             }
             KeyCode::Char('n') if app.setup.state == SetupState::Fresh => {
@@ -328,7 +346,13 @@ fn notice<'a>(theme: &Theme, tone: Tone, icon: &str, text: &str) -> Line<'a> {
     ])
 }
 
-fn notices<'a>(app: &Companion, theme: &Theme) -> Vec<Line<'a>> {
+fn notices<'a>(app: &Companion, theme: &Theme, confirm: &Confirm) -> Vec<Line<'a>> {
+    if let Some(removal) = confirm.pending() {
+        return vec![Line::from(Span::styled(
+            format!(" {} ", removal.question()),
+            theme.badge(Tone::Bad),
+        ))];
+    }
     let mut lines = Vec::new();
     if let Some(view) = app.client.as_ref().map(|client| &client.view) {
         if let Some(error) = &view.error {
@@ -338,6 +362,8 @@ fn notices<'a>(app: &Companion, theme: &Theme) -> Vec<Line<'a>> {
                 (Tone::Warn, "‖")
             } else if message.starts_with("The service restarted") {
                 (Tone::Info, "↻")
+            } else if message.contains("not sent to") || message.contains("could not") {
+                (Tone::Warn, "▲")
             } else {
                 (Tone::Good, "✓")
             };
@@ -352,11 +378,14 @@ fn notices<'a>(app: &Companion, theme: &Theme) -> Vec<Line<'a>> {
     lines
 }
 
-fn hints(app: &Companion, search: bool) -> Vec<(&'static str, &'static str)> {
+fn hints(app: &Companion, search: bool, confirm: &Confirm) -> Vec<(&'static str, &'static str)> {
     let pause = match &app.client {
         Some(client) if client.view.connection == Connection::Paused => ("p", "resume"),
         _ => ("p", "pause"),
     };
+    if let Some(removal) = confirm.pending() {
+        return vec![("y", removal.verb()), ("other keys", "cancel")];
+    }
     if search {
         return vec![
             ("type", "to filter"),
@@ -368,14 +397,18 @@ fn hints(app: &Companion, search: bool) -> Vec<(&'static str, &'static str)> {
         return vec![("1-4", "sections"), ("r", "refresh"), ("q", "quit app")];
     }
     match app.route {
-        Route::History => vec![
-            ("↑/↓", "select"),
-            ("/", "search"),
-            ("c", "copy"),
-            pause,
-            ("1-4", "sections"),
-            ("q", "quit app"),
-        ],
+        Route::History => {
+            let view = app.client.as_ref().map(|client| &client.view);
+            let mut keys = vec![("↑/↓", "select"), ("/", "search"), ("c", "copy")];
+            if view.is_some_and(|view| view.history_delete_supported) {
+                keys.push(("d", "delete"));
+            }
+            if view.is_some_and(|view| view.history_clear_supported) {
+                keys.push(("D", "clear all"));
+            }
+            keys.extend([pause, ("1-4", "sections"), ("q", "quit app")]);
+            keys
+        }
         Route::Devices | Route::Settings => vec![
             ("1-4", "sections"),
             ("Tab", "next"),
@@ -410,12 +443,13 @@ fn render(
     theme: &Theme,
     detail_scroll: u16,
     devices: &super::terminal_devices::DevicesUi,
+    confirm: &Confirm,
     graphics: &mut super::terminal_image::GraphicsPreview,
 ) {
     let area = frame.area();
-    let mut footer = notices(app, theme);
+    let mut footer = notices(app, theme, confirm);
     let notice_rows = rows(&footer, area.width).min(3);
-    footer.push(theme.hints(&hints(app, search), area.width));
+    footer.push(theme.hints(&hints(app, search, confirm), area.width));
     let sections = Layout::vertical([
         Constraint::Length(if area.height >= 24 { 3 } else { 2 }),
         Constraint::Min(4),
