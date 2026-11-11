@@ -706,6 +706,24 @@ mod tests {
             }
         }
     }
+    // The sync engine relies on this to keep a deliberate clear out of history.
+    #[tokio::test]
+    async fn cleared_pasteboard_reads_as_no_content() {
+        let board = NamedPasteboard::new();
+        board.0.enable_image_capture();
+        board
+            .0
+            .set_content(&ClipboardContent::text("about to be cleared"))
+            .await
+            .unwrap();
+        assert!(board.0.get_content().await.is_ok());
+        board.0.clear().await.unwrap();
+        assert!(matches!(
+            board.0.get_content().await,
+            Err(ClipboardError::NoContent)
+        ));
+    }
+
     #[test]
     fn rejects_non_test_pasteboard_names() {
         for name in [

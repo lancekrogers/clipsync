@@ -25,6 +25,9 @@ pub async fn clear(config: &Config, yes: bool) -> Result<()> {
     }
     let removal = send(config, Command::HistoryClear).await?;
     println!("Cleared {} history entries", removal.removed);
+    if !removal.clipboard_cleared {
+        println!("Could not clear the clipboard on this device; see the daemon log");
+    }
     print_summary(&removal);
     Ok(())
 }
