@@ -1,50 +1,155 @@
-//! Keyboard interactions for the same enrollment intents as the desktop.
+//! Keyboard interactions for the same pairing intents as the desktop.
 use super::{
     client::{Controller, Intent},
+    model::{big_digits, countdown, enrollment_state_label, friendly_device_name},
     terminal_theme::{Theme, Tone},
 };
+use crate::control::{EnrollmentCandidateView, PairingCode};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
     style::{Modifier, Style},
     text::{Line, Span},
 };
+use uuid::Uuid;
+
+/// Where the typed code goes.
+#[derive(Clone)]
+struct Target {
+    address: String,
+    label: String,
+    expected_fingerprint: Option<String>,
+    expected_node_id: Option<Uuid>,
+}
+
+impl Target {
+    fn manual(address: String) -> Self {
+        Self {
+            label: address.clone(),
+            address,
+            expected_fingerprint: None,
+            expected_node_id: None,
+        }
+    }
+
+    fn nearby(candidate: EnrollmentCandidateView) -> Self {
+        Self {
+            label: friendly_device_name(&candidate.display_name)
+                .unwrap_or_else(|| candidate.address.clone()),
+            address: candidate.address,
+            expected_fingerprint: candidate.advertised_fingerprint,
+            expected_node_id: candidate.advertised_node_id,
+        }
+    }
+}
+
+/// Text entry modes. While one is open every key goes to it, so digits do not
+/// switch sections and `q` does not quit.
+enum Entry {
+    Address,
+    Code(Target),
+}
+
+/// What the footer should advertise while typing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Typing {
+    Address,
+    Code,
+}
 
 #[derive(Default)]
 pub struct DevicesUi {
-    editing: bool,
+    entry: Option<Entry>,
     candidate: usize,
     trusted: usize,
     revoke: Option<String>,
 }
+
+fn plain_char(key: &KeyEvent) -> Option<char> {
+    match key.code {
+        KeyCode::Char(ch)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+        {
+            Some(ch)
+        }
+        _ => None,
+    }
+}
+
 impl DevicesUi {
-    pub fn key(&mut self, key: KeyEvent, client: &mut Controller) -> bool {
-        if self.editing {
-            let mut address = client.view.device_address.clone();
-            match key.code {
-                KeyCode::Esc => self.editing = false,
-                KeyCode::Enter => {
-                    self.editing = false;
-                    client.dispatch(Intent::DialEnrollment {
-                        address,
-                        expected_fingerprint: None,
-                        expected_node_id: None,
-                    });
-                    return true;
-                }
-                KeyCode::Backspace => {
-                    address.pop();
-                }
-                KeyCode::Char(ch)
-                    if !key
-                        .modifiers
-                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
-                {
-                    address.push(ch)
-                }
-                _ => {}
+    pub fn typing(&self) -> Option<Typing> {
+        match self.entry {
+            Some(Entry::Address) => Some(Typing::Address),
+            Some(Entry::Code(_)) => Some(Typing::Code),
+            None => None,
+        }
+    }
+
+    fn key_address(&mut self, key: KeyEvent, client: &mut Controller) {
+        let mut address = client.view.device_address.clone();
+        match key.code {
+            KeyCode::Esc => self.entry = None,
+            KeyCode::Enter if !address.trim().is_empty() => {
+                client.dispatch(Intent::PairingCode(String::new()));
+                self.entry = Some(Entry::Code(Target::manual(address.trim().to_owned())));
             }
-            client.dispatch(Intent::DeviceAddress(address));
-            return true;
+            KeyCode::Backspace => {
+                address.pop();
+            }
+            _ => {
+                if let Some(ch) = plain_char(&key) {
+                    address.push(ch);
+                }
+            }
+        }
+        client.dispatch(Intent::DeviceAddress(address));
+    }
+
+    fn key_code(&mut self, key: KeyEvent, target: Target, client: &mut Controller) {
+        let mut code = client.view.pairing_code.as_str().to_owned();
+        match key.code {
+            KeyCode::Esc => {
+                client.dispatch(Intent::PairingCode(String::new()));
+                return;
+            }
+            KeyCode::Enter if client.view.pairing_code.is_complete() => {
+                client.dispatch(Intent::Pair {
+                    address: target.address.clone(),
+                    expected_fingerprint: target.expected_fingerprint.clone(),
+                    expected_node_id: target.expected_node_id,
+                });
+                // Sending clears the code; if the service was busy, keep typing.
+                if client.view.pairing_code.is_complete() {
+                    self.entry = Some(Entry::Code(target));
+                }
+                return;
+            }
+            KeyCode::Backspace => {
+                code.pop();
+            }
+            _ => {
+                if let Some(ch) = plain_char(&key).filter(char::is_ascii_digit) {
+                    code.push(ch);
+                }
+            }
+        }
+        client.dispatch(Intent::PairingCode(code));
+        self.entry = Some(Entry::Code(target));
+    }
+
+    pub fn key(&mut self, key: KeyEvent, client: &mut Controller) -> bool {
+        match self.entry.take() {
+            Some(Entry::Address) => {
+                self.entry = Some(Entry::Address);
+                self.key_address(key, client);
+                return true;
+            }
+            Some(Entry::Code(target)) => {
+                self.key_code(key, target, client);
+                return true;
+            }
+            None => {}
         }
         if let Some(fingerprint) = self.revoke.take() {
             if key.code == KeyCode::Char('y') {
@@ -52,14 +157,12 @@ impl DevicesUi {
             }
             return true;
         }
+        let pairing = client.view.pairing_supported;
         match key.code {
             KeyCode::Char('e') => client.dispatch(Intent::OpenEnrollment),
             KeyCode::Char('f') => client.dispatch(Intent::DiscoverEnrollment),
-            KeyCode::Char('m') => self.editing = true,
-            KeyCode::Char('y') => {
-                if let Some(id) = client.view.selected_session {
-                    client.dispatch(Intent::ConfirmEnrollment(id));
-                }
+            KeyCode::Char('m') if pairing => {
+                self.entry = Some(Entry::Address);
             }
             KeyCode::Char('c') => {
                 if let Some(id) = client.view.selected_session {
@@ -93,12 +196,10 @@ impl DevicesUi {
                     .as_ref()
                     .and_then(|s| s.candidates.get(self.candidate))
                     .cloned()
+                    .filter(|_| pairing)
                 {
-                    client.dispatch(Intent::DialEnrollment {
-                        address: candidate.address,
-                        expected_fingerprint: candidate.advertised_fingerprint,
-                        expected_node_id: candidate.advertised_node_id,
-                    });
+                    client.dispatch(Intent::PairingCode(String::new()));
+                    self.entry = Some(Entry::Code(Target::nearby(candidate)));
                 }
             }
             KeyCode::Char('j') => self.trusted = self.trusted.saturating_add(1),
@@ -124,6 +225,7 @@ impl DevicesUi {
             .min(client.view.trusted_devices.len().saturating_sub(1));
         true
     }
+
     pub fn lines(&self, client: &Controller, theme: &Theme) -> Vec<Line<'static>> {
         let view = &client.view;
         let key = |text: &str| Span::styled(text.to_owned(), theme.key());
@@ -147,12 +249,11 @@ impl DevicesUi {
                 key("m"),
                 Span::raw(" enter address  "),
                 key("x"),
-                Span::raw(" close enrollment"),
+                Span::raw(" stop"),
             ]),
-            Line::from(vec![
-                Span::styled("▲ ", theme.tone(Tone::Warn)),
-                Span::raw("Compare BOTH full fingerprints on BOTH computers before confirming."),
-            ]),
+            Line::from(quiet(
+                "To pair, press e on one computer and type the code it shows on the other.",
+            )),
             Line::from(""),
         ];
         if !view.enrollment_supported {
@@ -160,81 +261,142 @@ impl DevicesUi {
                 "Update the service to add devices here.",
                 theme.tone(Tone::Warn),
             ));
+        } else if !view.pairing_supported {
+            lines.push(Line::styled(
+                "▲ Update the background service to pair with a code.",
+                theme.tone(Tone::Warn),
+            ));
         }
-        if self.editing {
-            lines.push(Line::from(vec![
-                quiet("Address: "),
-                strong(view.device_address.clone()),
-                Span::styled("▏", theme.accent()),
-                quiet(" · "),
-                key("Enter"),
-                quiet(" connect / "),
-                key("Esc"),
-                quiet(" cancel"),
-            ]));
-        }
-        if let Some(snapshot) = &view.enrollment {
-            if snapshot.listening {
+        let snapshot = view.enrollment.as_ref();
+        match snapshot.and_then(|s| s.code.as_ref()) {
+            Some(code) => {
+                let accent = theme.accent().add_modifier(Modifier::BOLD);
                 lines.push(Line::from(vec![
-                    Span::styled("● ", theme.tone(Tone::Good)),
-                    Span::raw("Allowing connections: "),
-                    strong(
-                        snapshot
-                            .listen_addr
-                            .clone()
-                            .unwrap_or_else(|| "opening…".into()),
-                    ),
+                    heading("Pairing code "),
+                    Span::styled(code.code.grouped(), accent),
+                    Span::raw(" · type it on the other computer · "),
+                    strong(countdown(code.remaining_secs)),
+                ]));
+                for row in big_digits(code.code.digits()) {
+                    lines.push(Line::from(Span::styled(format!("  {row}"), accent)));
+                }
+                let tries = if code.attempts_left == 1 {
+                    "Last code for this window".to_owned()
+                } else {
+                    format!("{} codes left in this window", code.attempts_left)
+                };
+                lines.push(Line::from(quiet(&format!(
+                    "Each code works once; a new one appears after a try or when time runs out. {tries}."
+                ))));
+                if let Some(address) = snapshot.and_then(|s| {
+                    s.listen_hints
+                        .first()
+                        .cloned()
+                        .or_else(|| s.listen_addr.clone())
+                }) {
+                    lines.push(Line::from(vec![
+                        quiet("If it is not listed there, use address "),
+                        strong(address),
+                    ]));
+                }
+            }
+            None if snapshot.is_some_and(|s| s.listening) => {
+                lines.push(Line::styled(
+                    "Checking a code someone typed…",
+                    theme.tone(Tone::Info),
+                ));
+            }
+            None => {}
+        }
+        match &self.entry {
+            Some(Entry::Address) => {
+                lines.push(Line::from(vec![
+                    quiet("Address of the other computer: "),
+                    strong(view.device_address.clone()),
+                    Span::styled("▏", theme.accent()),
+                ]));
+                lines.push(Line::from(vec![
+                    key("Enter"),
+                    quiet(" next · "),
+                    key("Esc"),
+                    quiet(" cancel"),
                 ]));
             }
+            Some(Entry::Code(target)) => {
+                let typed = view.pairing_code.as_str();
+                let mut boxes = String::new();
+                for index in 0..PairingCode::DIGITS {
+                    if index == 3 {
+                        boxes.push_str("  ");
+                    }
+                    boxes.push(typed.chars().nth(index).unwrap_or('_'));
+                    boxes.push(' ');
+                }
+                lines.push(Line::from(vec![
+                    quiet("Code shown on "),
+                    strong(target.label.clone()),
+                    quiet(": "),
+                    Span::styled(boxes, theme.accent().add_modifier(Modifier::BOLD)),
+                ]));
+                lines.push(Line::from(vec![
+                    key("Enter"),
+                    quiet(" pair · "),
+                    key("Esc"),
+                    quiet(" cancel"),
+                ]));
+            }
+            None => {}
+        }
+        if let Some(snapshot) = snapshot {
             if let Some(session) = snapshot
                 .sessions
                 .iter()
                 .find(|s| Some(s.session_id) == view.selected_session)
             {
-                lines.extend([
-                    Line::from(vec![
-                        Span::styled(
-                            super::model::enrollment_state_label(&session.state).to_owned(),
-                            theme.tone(Tone::Info),
-                        ),
-                        quiet(&format!(" · {}s left · ", session.remaining_secs)),
-                        key("[ / ]"),
-                        quiet(" switch session"),
-                    ]),
-                    Line::from(quiet("This computer:")),
-                    Line::from(strong(session.local_fingerprint.clone())),
-                    Line::from(quiet("Other computer:")),
-                    Line::from(match &session.peer_fingerprint {
-                        Some(fingerprint) => strong(fingerprint.clone()),
-                        None => quiet("Waiting for secure connection…"),
-                    }),
-                    Line::from(if session.local_confirmed {
-                        vec![
-                            quiet("Confirmed here; awaiting both computers. · "),
-                            key("c"),
-                            quiet(" cancel"),
-                        ]
-                    } else {
-                        vec![
-                            key("y"),
-                            Span::raw(" fingerprints match, confirm · "),
-                            key("c"),
-                            quiet(" cancel"),
-                        ]
-                    }),
-                ]);
+                let who = session
+                    .peer_display_name
+                    .as_deref()
+                    .and_then(friendly_device_name)
+                    .or_else(|| session.dialed_addr.clone())
+                    .unwrap_or_else(|| "another computer".into());
+                let tone = match session.state.as_str() {
+                    "Succeeded" => Tone::Good,
+                    "Failed" | "Expired" => Tone::Bad,
+                    _ => Tone::Info,
+                };
+                let live = !matches!(
+                    session.state.as_str(),
+                    "Succeeded" | "Failed" | "Cancelled" | "Expired"
+                );
+                let mut row = vec![
+                    Span::styled(
+                        enrollment_state_label(&session.state).to_owned(),
+                        theme.tone(tone),
+                    ),
+                    quiet(&format!(" · {who}")),
+                ];
+                if snapshot.sessions.len() > 1 {
+                    row.extend([quiet(" · "), key("[ / ]"), quiet(" other attempts")]);
+                }
+                if live {
+                    row.extend([quiet(" · "), key("c"), quiet(" cancel")]);
+                }
+                lines.push(Line::from(row));
                 if let Some(error) = &session.error {
                     lines.push(Line::styled(format!("✗ {error}"), theme.tone(Tone::Bad)));
                 }
             }
             if let Some(outcome) = &snapshot.outcome {
+                let tone = match outcome.status.as_str() {
+                    "succeeded" => Tone::Good,
+                    "cancelled" => Tone::Quiet,
+                    "waiting_peer" => Tone::Info,
+                    _ => Tone::Warn,
+                };
+                let icon = if tone == Tone::Good { "✓ " } else { "" };
                 lines.push(Line::styled(
-                    format!(
-                        "{}: {}",
-                        outcome.status,
-                        outcome.detail.as_deref().unwrap_or_default()
-                    ),
-                    theme.tone(Tone::Info),
+                    format!("{icon}{}", outcome.detail.as_deref().unwrap_or_default()),
+                    theme.tone(tone),
                 ));
             }
             if !snapshot.candidates.is_empty() {
@@ -245,7 +407,7 @@ impl DevicesUi {
                     key("↑/↓"),
                     quiet(" select · "),
                     key("Enter"),
-                    quiet(" connect"),
+                    quiet(" type its code"),
                 ]));
             }
             for (index, candidate) in snapshot.candidates.iter().enumerate() {
@@ -297,7 +459,7 @@ impl DevicesUi {
             let name = device
                 .comment
                 .as_deref()
-                .and_then(super::model::friendly_device_name)
+                .and_then(friendly_device_name)
                 .unwrap_or_else(|| "Device".into());
             let selected = index == self.trusted;
             let mut row = vec![
