@@ -180,12 +180,18 @@ impl TransportManager {
     }
     /// Connect only when discovery provides an identity derived from the peer's key.
     pub async fn connect_peer(&self, peer: &PeerInfo) -> Result<()> {
+        self.dial_peer(peer).await.map(|_| ())
+    }
+
+    /// Like [`Self::connect_peer`], returning the address whose handshake authenticated
+    /// `peer`, or `None` when no dial was needed (already connected or dial in flight).
+    pub async fn dial_peer(&self, peer: &PeerInfo) -> Result<Option<SocketAddr>> {
         if peer.id == self.node_id || self.is_connected(peer.id).await {
-            return Ok(());
+            return Ok(None);
         }
         let mut lease = match self.try_acquire_dial_lease(peer.id) {
             Some(lease) => lease,
-            None => return Ok(()),
+            None => return Ok(None),
         };
         let result = async {
             let connection = WebSocketTransport::connect_to_peer(
@@ -195,16 +201,29 @@ impl TransportManager {
                 self.node_id,
             )
             .await?;
+            let remote = connection.connection_info().remote_addr;
             self.register_peer_connection(
                 peer.id,
                 Box::new(connection),
                 ConnectionDirection::Outbound,
             )
-            .await
+            .await?;
+            Ok(Some(remote))
         }
         .await;
         lease.release();
         result
+    }
+
+    /// Node ids of the keys this transport currently pins. Re-reads the trust store.
+    pub async fn authorized_peer_ids(&self) -> Result<HashSet<Uuid>> {
+        Ok(self
+            .auth()?
+            .trusted_keys()
+            .await?
+            .iter()
+            .map(tls::node_id)
+            .collect())
     }
     fn try_acquire_dial_lease(&self, peer_id: Uuid) -> Option<DialLease> {
         let mut in_flight = self
@@ -346,6 +365,7 @@ impl TransportManager {
             if existing_rank >= incoming_rank {
                 // Closing a socket may wait on I/O; release the registry first.
                 drop(connections);
+                tracing::debug!("Peer {peer_id}: kept existing connection over {direction:?}");
                 let mut connection = connection;
                 let _ = connection.close().await;
                 return Ok(());
@@ -355,11 +375,17 @@ impl TransportManager {
                 message: "Connection limit reached".into(),
             });
         }
+        let remote = connection.connection_info().remote_addr;
         // Arbitration and insertion must share one lock so concurrent inbound/outbound
         // registrations cannot overwrite the preferred connection after the decision.
         let replacement = self.spawn_managed_connection(connection, direction);
         let old = connections.insert(peer_id, replacement);
         drop(connections);
+        if old.is_some() {
+            tracing::debug!("Peer {peer_id}: replaced connection with {direction:?} via {remote}");
+        } else {
+            tracing::info!("Peer {peer_id} connected ({direction:?} via {remote})");
+        }
         drop(old);
         Ok(())
     }
@@ -378,6 +404,7 @@ impl TransportManager {
             .image_capability
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        let peer_id = peer.id;
         let task = tokio::spawn(async move {
             let mut connection = connection;
             if let Some(limits) = local_limits {
@@ -386,6 +413,7 @@ impl TransportManager {
                     MessagePayload::Capabilities(limits.capabilities()),
                 );
                 if connection.send(message).await.is_err() {
+                    tracing::info!("Peer {peer_id} disconnected");
                     return;
                 }
             }
@@ -400,6 +428,7 @@ impl TransportManager {
                     }, Err(_) => break },
                 }
             }
+            tracing::info!("Peer {peer_id} disconnected");
             let _ = connection.close().await;
         });
         ManagedConnection {

@@ -32,9 +32,12 @@ pub fn should_attempt_outbound_dial(
     now.duration_since(peer_first_seen) >= FALLBACK_INITIATOR_GRACE
 }
 
+/// Failed attempts after which the dial backoff stops growing.
+pub const MAX_DIAL_ATTEMPTS: u32 = 5;
+
 /// Exponential backoff after a failed dial attempt.
 pub fn dial_backoff(attempt: u32) -> Duration {
-    let capped = attempt.min(5);
+    let capped = attempt.min(MAX_DIAL_ATTEMPTS);
     Duration::from_secs(1_u64 << capped)
 }
 
