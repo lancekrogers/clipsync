@@ -723,13 +723,14 @@ impl Controller {
     /// Older services cannot parse removal commands and drop the connection
     /// unanswered, so they are never sent one.
     fn remove(&mut self, supported: bool, command: Command) {
-        let refusal = if !supported {
+        // Support is unknown until a status arrives, so readiness is checked first.
+        let refusal = if !self.view.can_act() {
+            "The service is busy or unavailable, so nothing was removed. Try again."
+        } else if !supported {
             NEEDS_UPDATE
-        } else if self.view.can_act() {
+        } else {
             self.view.action_pending = self.send(Domain::Action, command);
             return;
-        } else {
-            "The service is busy or unavailable, so nothing was removed. Try again."
         };
         self.view.error = Some(refusal.into());
         self.view.error_code = None;
@@ -1451,6 +1452,19 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("nothing was removed"));
+
+        // Before any status, support is unknown: say unavailable, not outdated.
+        let (jobs_tx, jobs) = mpsc::sync_channel(8);
+        let (_, replies) = mpsc::sync_channel(8);
+        let mut unreached = Controller::with_channels(jobs_tx, replies);
+        unreached.dispatch(Intent::DeleteEntry(Uuid::from_u128(1)));
+        assert!(sent(&jobs).is_empty());
+        assert!(unreached
+            .view
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("unavailable"));
     }
 
     #[test]
