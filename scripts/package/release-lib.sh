@@ -111,7 +111,7 @@ clipsync_release_require_release_absent() {
   local slug="$1" tag="$2" tags
   tags="$(gh release list --repo "$slug" --limit 1000 --json tagName --jq '.[].tagName')" \
     || clipsync_release_die "could not list GitHub releases for $slug (gh auth or network); refusing to guess"
-  if printf '%s\n' "$tags" | grep -qxF "$tag"; then
+  if grep -qxF "$tag" <<<"$tags"; then
     clipsync_release_die "a GitHub release (draft or published) for $tag already exists in $slug"
   fi
 }

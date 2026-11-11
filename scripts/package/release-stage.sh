@@ -226,7 +226,7 @@ for arch in "${LINUX_ARCHES[@]}"; do
   tar -xzf "$WORK/linux-$arch/linux/$archive" -C "$WORK/check-linux-$arch"
   bash "$SCRIPT_DIR/verify.sh" --linux "$WORK/check-linux-$arch/$bundle" --manifest "$manifest"
   for bin in clipsync clipsync-desktop; do
-    file -b "$WORK/check-linux-$arch/$bundle/bin/$bin" | grep -q "$elf_machine" \
+    [[ "$(file -b "$WORK/check-linux-$arch/$bundle/bin/$bin")" == *"$elf_machine"* ]] \
       || clipsync_release_die "Linux $arch $bin is not an $elf_machine ELF binary"
   done
 
@@ -272,7 +272,11 @@ if [[ "$SIGNING" == "unsigned" ]]; then
 else
   MAC_ROW="| \`$DMG_NAME\` | macOS on Apple Silicon |"
 fi
-NEEDED_TEXT="$(printf '%s\n' ${NEEDED_ALL[@]+"${NEEDED_ALL[@]}"} | sed '/^$/d' | sort -u | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')"
+# Libraries beyond the glibc/libgcc runtime every Linux system has.
+NEEDED_TEXT="$(printf '%s\n' ${NEEDED_ALL[@]+"${NEEDED_ALL[@]}"} \
+  | { grep -Ev '^(ld-linux.*|libc\.so\..*|libm\.so\..*|libgcc_s\.so\..*|libpthread\.so\..*|libdl\.so\..*|librt\.so\..*|libutil\.so\..*)$' || true; } \
+  | sed '/^$/d' | sort -u | sed 's/.*/`&`/' | paste -sd, - | sed 's/,/, /g')"
+[[ -n "$NEEDED_TEXT" ]] || NEEDED_TEXT="nothing else"
 NOTE_BLOCKS=(--enable "$SIGNING_BLOCK")
 for arch in "${LINUX_ARCHES[@]}"; do
   [[ "$arch" == "aarch64" ]] && NOTE_BLOCKS+=(--enable AARCH64)
@@ -300,4 +304,6 @@ python3 -I "$SCRIPT_DIR/release_render.py" manifest "$STAGE/release.json" \
 clipsync_release_log "staged $TAG in $STAGE"
 (cd "$STAGE/assets" && sed 's/^/[release]   /' SHA256SUMS)
 clipsync_release_log "macOS signing: $SIGNING; quality gates: $GATES; Linux glibc >= $GLIBC_MAX"
+clipsync_release_log "Docker keeps $IMAGE and volume clipsync-release-cargo-registry as build caches;"
+clipsync_release_log "  free them with: docker rmi $IMAGE && docker volume rm clipsync-release-cargo-registry"
 clipsync_release_log "review $STAGE/RELEASE_NOTES.md, then: just companion-release-publish"

@@ -15,8 +15,6 @@ account.
 |---|---|
 @ASSET_TABLE@
 
-`SHA256SUMS` has a checksum for each file.
-
 ## Install on macOS (Apple Silicon)
 
 **With Homebrew (recommended):**
@@ -28,6 +26,7 @@ brew install --cask @TAP@/clipsync
 The cask installs ClipSync to `/Applications`, puts `clipsync` on your PATH
 @IF_UNSIGNED@and clears the download quarantine flag, so the app opens without a
 Gatekeeper prompt.@END_UNSIGNED@@IF_SIGNED@and opens like any notarized app.@END_SIGNED@
+
 `brew uninstall --cask clipsync` removes the app and keeps your settings, paired
 devices and history. If you set up the background service, it stays registered:
 remove it with `launchctl bootout gui/$(id -u)/com.clipsync` and delete
@@ -70,11 +69,12 @@ you finish setup. Instead of the terminal, you can open the extracted folder in
 your file manager and run **ClipSync-Install.desktop**. Add `~/.local/bin` to
 your PATH to use the `clipsync` command.
 
-Requirements: glibc @GLIBC@ or newer and OpenSSL 3. The archives are built on
-Ubuntu 22.04, so Ubuntu 22.04, Debian 12, Fedora 36 and current Arch Linux or
-newer all qualify. The binaries link: @NEEDED@. The desktop app needs an X11 or
-Wayland session; on X11 it also needs libxkbcommon-x11 (`libxkbcommon-x11-0` on
-Debian and Ubuntu). Wayland clipboard sync needs a compositor that supports the
+Requirements: glibc @GLIBC@ or newer and OpenSSL 3 (`libssl3` on Debian and
+Ubuntu; desktop installs normally have it). The archives are built on Ubuntu
+22.04 and were checked on Ubuntu 22.04, Debian 12 and Arch Linux. Besides glibc,
+the binaries link only @NEEDED@. The desktop app needs an X11 or Wayland
+session; on X11 it also needs libxkbcommon-x11 (`libxkbcommon-x11-0` on Debian
+and Ubuntu). Wayland clipboard sync needs a compositor that supports the
 data-control protocol.
 
 ## Pair two computers
