@@ -54,7 +54,9 @@ owner, so closing either interface leaves syncing running.
 
 In the TUI, selecting an image in History shows a color preview using terminal
 characters. With `NO_COLOR` set, the preview uses grayscale characters. Update
-both the TUI and its local daemon to use image previews.
+both the TUI and its local daemon to use image previews. Terminals that support
+Kitty or Sixel graphics get a sharper preview; set `CLIPSYNC_TUI_GRAPHICS=off`
+to keep the character preview where a terminal reports graphics it cannot show.
 
 <p align="center">
   <img src="docs/assets/desktop-overview.png" width="960" alt="ClipSync desktop Overview showing service status, Pause syncing, Sync current copy, and Open clipboard history controls">
