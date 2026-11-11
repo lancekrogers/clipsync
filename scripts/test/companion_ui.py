@@ -105,6 +105,8 @@ assert 'cargo test --locked' in output,output
 if os.environ.get('CLIPSYNC_IMAGE_FIXTURE') == '1' and sys.platform == 'darwin':
     click(find_copy('[Image]'))
     wait_for(lambda:'Copy image' in text(), 'image detail loads')
+    wait_for(lambda:'Copied image preview' in text(), 'image preview renders')
+    assert not any(isinstance(v,dict) and str(v.get('label','')).strip()=='[Image]' for _,node in nodes() for v in node), 'preview replaces the [Image] placeholder'
     shot('history-image-selected')
     click('Copy image')
     if os.environ.get('CLIPSYNC_IMAGE_FAILURE_FIXTURE') == '1':
@@ -120,8 +122,18 @@ if os.environ.get('CLIPSYNC_IMAGE_FIXTURE') == '1' and sys.platform == 'darwin':
         shot('history-image-history-failed')
     else:
         wait_for(lambda:'Queued for' in text() or 'Copied locally' in text(), 'image copy acknowledgement')
-    image=subprocess.check_output(['swift',str(Path(__file__).with_name('read_private_pasteboard.swift')),session['pasteboard'],'--png-base64'],text=True).strip()
-    assert image == 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGP4z8Dwn6HhfwMAEPoD/o3Nc3sAAAAASUVORK5CYII=', image
+    # The text copy's notice can still be showing, so wait for the image itself.
+    deadline=time.monotonic()+8
+    while True:
+        image=subprocess.check_output(['swift',str(Path(__file__).with_name('read_private_pasteboard.swift')),session['pasteboard'],'--png-base64'],text=True).strip()
+        if image or time.monotonic()>deadline:break
+        time.sleep(.2)
+    if os.environ.get('CLIPSYNC_IMAGE_DETAIL_FIXTURE') == '1':
+        import base64
+        png=base64.b64decode(image)
+        assert png[:8]==b'\x89PNG\r\n\x1a\n' and struct.unpack('>II',png[16:24])==(640,400), png[:24]
+    else:
+        assert image == 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAAEUlEQVR4nGP4z8Dwn6HhfwMAEPoD/o3Nc3sAAAAASUVORK5CYII=', image
 replace_search('review')
 wait_for(lambda:'Review notes' in text() and 'cargo test --locked' not in text(), 'filter results')
 shot('history-search')

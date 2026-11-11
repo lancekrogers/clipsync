@@ -214,7 +214,7 @@ async fn engine_history_get(engine: &SyncEngine, id: Uuid) -> Result<HistoryEntr
             .min(3 * 1024 * 1024)
             * 3
             / 4)
-        .min(2 * 1024 * 1024);
+        .min(history_view::PREVIEW_PNG_MAX_BYTES);
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
         if let Ok(Ok(permit)) =
             tokio::time::timeout_at(deadline, crate::sync::image_decode_gate().acquire()).await
