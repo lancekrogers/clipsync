@@ -1213,12 +1213,25 @@ impl EnrollmentManager {
                         Self::on_session_message(mgr2.clone(), session_id, msg).await;
                     }
                     SessionEvent::Disconnected | SessionEvent::WriteFailed => {
-                        // Persist owns the outcome from here: a lost ack is "incomplete".
+                        // Persist owns the outcome while saving. Once our pin and ack
+                        // are out, a peer that leaves without acking saved nothing.
                         let mut g = mgr2.write().await;
+                        let mut one_sided = None;
                         if let Some(s) = g.sessions.get_mut(&session_id) {
                             if !matches!(s.state, SessionState::Persisting) {
+                                if matches!(s.state, SessionState::WaitingPeerAuth)
+                                    && s.local_ack_flushed
+                                    && !s.peer_persisted_ack
+                                {
+                                    s.failure = Some(PairingFailure::Incomplete);
+                                    one_sided = Some(s.peer_fp.clone());
+                                }
                                 Self::abort_session_io(s);
                             }
+                        }
+                        if let Some(peer) = one_sided {
+                            g.last_outcome =
+                                outcome("incomplete", peer, PairingFailure::Incomplete.message());
                         }
                         break;
                     }

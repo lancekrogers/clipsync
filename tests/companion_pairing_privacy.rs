@@ -63,6 +63,60 @@ async fn wait_finished(mgr: &EnrollmentManager, id: uuid::Uuid) -> String {
     panic!("attempt did not finish");
 }
 
+struct Daemon {
+    manager: Arc<EnrollmentManager>,
+    path: std::path::PathBuf,
+    max_frame: usize,
+    _identity: Identity,
+    _server: Task<anyhow::Result<()>>,
+}
+
+impl Daemon {
+    async fn start(name: &str) -> Self {
+        let identity = Identity::new().await;
+        let config = config_for(&identity, name);
+        let transport = Arc::new(TransportManager::with_auth(
+            TransportConfig::default(),
+            identity.auth.clone(),
+            identity.id(),
+        ));
+        let history = Arc::new(
+            HistoryManager::new_with_key_path(
+                &config.clipboard.history_db,
+                config.clipboard.history_key.as_ref().unwrap(),
+            )
+            .await
+            .unwrap(),
+        );
+        let engine = Arc::new(SyncEngine::without_discovery(
+            Arc::new(config.clone()),
+            Arc::new(ClipboardProviderWrapper::new(
+                Box::new(Clipboard::default()),
+            )),
+            history,
+            transport,
+        ));
+        let manager = Arc::new(
+            EnrollmentManager::new(Arc::new(config.clone()), identity.auth.clone()).unwrap(),
+        );
+        manager.set_listen_port_override(0).await;
+        let target = Arc::new(EnrollmentTarget::new(engine, manager.clone()));
+        let path = control::socket_path(&config);
+        let max_frame = control::max_frame_bytes(&config);
+        let server = control::Server::bind(path.clone(), &config).unwrap();
+        let task = Task(tokio::spawn(
+            async move { server.run(target.as_ref()).await },
+        ));
+        Self {
+            manager,
+            path,
+            max_frame,
+            _identity: identity,
+            _server: task,
+        }
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn codes_stay_out_of_logs_diagnostics_and_the_joining_snapshot() {
     let capture = Capture::default();
@@ -75,53 +129,23 @@ async fn codes_stay_out_of_logs_diagnostics_and_the_joining_snapshot() {
         .finish();
     let _guard = tracing::subscriber::set_default(subscriber);
 
-    let allowing_id = Identity::new().await;
-    let allowing = Arc::new(
-        EnrollmentManager::new(
-            Arc::new(config_for(&allowing_id, "allowing")),
-            allowing_id.auth.clone(),
-        )
-        .unwrap(),
-    );
-    allowing.set_listen_port_override(0).await;
+    // Both sides are full daemon targets, so their control servers and
+    // diagnostics exports run for real.
+    let allowing_side = Daemon::start("allowing").await;
+    let joining_side = Daemon::start("joining").await;
+    let allowing = allowing_side.manager.clone();
+    let joining = joining_side.manager.clone();
+    let (path, max_frame) = (joining_side.path.clone(), joining_side.max_frame);
 
-    // The joining side is a full daemon target so its control server and
-    // diagnostics export run for real.
-    let joining_id = Identity::new().await;
-    let config = config_for(&joining_id, "joining");
-    let transport = Arc::new(TransportManager::with_auth(
-        TransportConfig::default(),
-        joining_id.auth.clone(),
-        joining_id.id(),
-    ));
-    let history = Arc::new(
-        HistoryManager::new_with_key_path(
-            &config.clipboard.history_db,
-            config.clipboard.history_key.as_ref().unwrap(),
-        )
-        .await
-        .unwrap(),
-    );
-    let engine = Arc::new(SyncEngine::without_discovery(
-        Arc::new(config.clone()),
-        Arc::new(ClipboardProviderWrapper::new(
-            Box::new(Clipboard::default()),
-        )),
-        history,
-        transport,
-    ));
-    let joining = Arc::new(
-        EnrollmentManager::new(Arc::new(config.clone()), joining_id.auth.clone()).unwrap(),
-    );
-    let target = Arc::new(EnrollmentTarget::new(engine, joining.clone()));
-    let path = control::socket_path(&config);
-    let max_frame = control::max_frame_bytes(&config);
-    let server = control::Server::bind(path.clone(), &config).unwrap();
-    let _server = Task(tokio::spawn(
-        async move { server.run(target.as_ref()).await },
-    ));
-
-    let open = allowing.open().await.unwrap();
+    let open = control::request(
+        &allowing_side.path,
+        Command::EnrollmentOpen,
+        allowing_side.max_frame,
+    )
+    .await
+    .unwrap()
+    .enrollment
+    .unwrap();
     let open_debug = format!("{open:?}");
     let addr = open.listen_addr.unwrap();
     let mut codes = vec![open.code.unwrap().code];
@@ -174,12 +198,28 @@ async fn codes_stay_out_of_logs_diagnostics_and_the_joining_snapshot() {
         max_frame,
     )
     .await;
-    let diagnostics = control::request(&path, Command::DiagnosticsExport, max_frame)
-        .await
-        .unwrap()
-        .diagnostics
-        .unwrap();
-    let diagnostics = serde_json::to_string(&diagnostics).unwrap();
+    // And one on the allowing daemon, which generated every code.
+    let _ = control::request_result(
+        &allowing_side.path,
+        Command::EnrollmentPair {
+            address: "nowhere".into(),
+            code: codes[1].clone(),
+            expected_fingerprint: None,
+            expected_node_id: None,
+        },
+        allowing_side.max_frame,
+    )
+    .await;
+    let mut diagnostics = String::new();
+    for side in [&joining_side, &allowing_side] {
+        let report = control::request(&side.path, Command::DiagnosticsExport, side.max_frame)
+            .await
+            .unwrap()
+            .diagnostics
+            .unwrap();
+        assert!(!report.recent_errors.is_empty(), "error ring not exercised");
+        diagnostics.push_str(&serde_json::to_string(&report).unwrap());
+    }
     let joining_view = control::request(
         &path,
         Command::EnrollmentInspect { session_id: None },

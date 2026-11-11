@@ -151,6 +151,58 @@ async fn wait_code_change(party: &Party, from: &str) -> (String, u32) {
     panic!("code never changed");
 }
 
+async fn wait_failure(
+    mgr: &EnrollmentManager,
+    id: uuid::Uuid,
+    expected: &str,
+) -> EnrollmentSessionView {
+    for _ in 0..800 {
+        let snap = mgr.inspect(None).await.unwrap();
+        if let Some(s) = snap.sessions.iter().find(|s| s.session_id == id) {
+            if s.failure.as_deref() == Some(expected) {
+                return s.clone();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("session {id} never reported {expected}");
+}
+
+async fn wait_state(mgr: &EnrollmentManager, role: &str, state: &str) -> uuid::Uuid {
+    for _ in 0..400 {
+        let snap = mgr.inspect(None).await.unwrap();
+        if let Some(s) = snap
+            .sessions
+            .iter()
+            .find(|s| s.role == role && s.state == state)
+        {
+            return s.session_id;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no {role} session reached {state}");
+}
+
+/// An enrollment listener that completes TLS and then never answers.
+async fn silent_peer() -> (String, Task<()>) {
+    let id = Identity::new().await;
+    let (_, server) = clipsync::enrollment::enroll_configs(id.auth.as_ref())
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let task = Task(tokio::spawn(async move {
+        let _id = id;
+        let mut held = Vec::new();
+        while let Ok((tcp, _)) = listener.accept().await {
+            if let Ok(tls) = TlsAcceptor::from(server.clone()).accept(tcp).await {
+                held.push(tls);
+            }
+        }
+    }));
+    (addr, task)
+}
+
 fn failure(session: &EnrollmentSessionView) -> &str {
     session.failure.as_deref().unwrap_or("<none>")
 }
@@ -735,6 +787,146 @@ async fn a_window_accepts_a_bounded_number_of_attempts() {
     let sid = joining.pair(&addr, code.digits()).await;
     assert_eq!(failure(&wait_end(&joining.mgr, sid).await), "not_listening");
     assert_eq!((allowing.pins(), joining.pins()), before);
+}
+
+#[tokio::test]
+async fn saved_on_one_side_only_is_reported_as_incomplete() {
+    let allowing = Party::new("allowing").await;
+    let joining = Party::new("joining").await;
+    let allowing_before = allowing.pins();
+    // A directory at the allowing side's lock path makes only its save fail.
+    let lock = allowing.pins_path().with_extension("lock");
+    let _ = std::fs::remove_file(&lock);
+    std::fs::create_dir(&lock).unwrap();
+    let (addr, code) = allowing.allow().await;
+
+    let sid = joining.pair(&addr, code.digits()).await;
+    let session = wait_failure(&joining.mgr, sid, "incomplete").await;
+    assert_eq!(session.state, "WaitingPeerAuth");
+    assert!(session.error.unwrap().contains("did not confirm it saved"));
+    assert_eq!(
+        joining
+            .mgr
+            .inspect(None)
+            .await
+            .unwrap()
+            .outcome
+            .unwrap()
+            .status,
+        "incomplete"
+    );
+    assert_eq!(joining.trusted().await, vec![allowing.fp()]);
+    assert_eq!(
+        failure(&wait_acceptor_end(&allowing.mgr).await),
+        "save_failed"
+    );
+    std::fs::remove_dir(&lock).unwrap();
+    assert_eq!(allowing.pins(), allowing_before);
+}
+
+#[tokio::test]
+async fn malformed_and_oversize_frames_after_the_burn_write_nothing() {
+    let allowing = Party::new("allowing").await;
+    let before = allowing.pins();
+    let (addr, _) = allowing.allow().await;
+    let attempts = allowing.code().await.unwrap().1;
+    let attacker = Identity::new().await;
+
+    let mut oversize = raw_dial(&attacker, &addr, &[ENROLL_ALPN]).await;
+    oversize.write_u32(u32::MAX).await.unwrap();
+    oversize.flush().await.unwrap();
+    let mut garbage = raw_dial(&attacker, &addr, &[ENROLL_ALPN]).await;
+    garbage.write_u32(5).await.unwrap();
+    garbage.write_all(b"{{{{{").await.unwrap();
+    garbage.flush().await.unwrap();
+
+    eventually(async || {
+        allowing
+            .mgr
+            .inspect(None)
+            .await
+            .unwrap()
+            .sessions
+            .iter()
+            .filter(|s| s.role == "acceptor" && s.state == "Failed")
+            .count()
+            == 2
+    })
+    .await;
+    let (code, left) = allowing.code().await.expect("window stays open");
+    assert_eq!(left, attempts - 2);
+    assert_eq!(allowing.pins(), before);
+
+    // The same window still pairs a real device.
+    let joining = Party::new("joining").await;
+    let sid = joining.pair(&addr, &code).await;
+    assert_eq!(wait_end(&joining.mgr, sid).await.state, "Succeeded");
+}
+
+#[tokio::test]
+async fn a_fourth_simultaneous_attempt_is_refused_without_spending_a_code() {
+    assert_eq!(clipsync::enrollment::MAX_CONCURRENT_SESSIONS, 3);
+    let allowing = Party::new("allowing").await;
+    let joining = Party::new("joining").await;
+    let before = (allowing.pins(), joining.pins());
+    let (addr, code) = allowing.allow().await;
+    let attackers = [
+        Identity::new().await,
+        Identity::new().await,
+        Identity::new().await,
+    ];
+    let mut shown = code.digits().to_string();
+    let mut held = Vec::new();
+    for attacker in &attackers {
+        held.push(raw_dial(attacker, &addr, &[ENROLL_ALPN]).await);
+        shown = wait_code_change(&allowing, &shown).await.0;
+    }
+    let (_, left) = allowing.code().await.unwrap();
+
+    let sid = joining.pair(&addr, &shown).await;
+    assert_eq!(failure(&wait_end(&joining.mgr, sid).await), "busy");
+    assert_eq!(allowing.code().await, Some((shown, left)));
+    assert_eq!((allowing.pins(), joining.pins()), before);
+    drop(held);
+}
+
+#[tokio::test]
+async fn cancelling_or_expiring_an_attempt_mid_exchange_writes_nothing() {
+    // Allowing side: one stalled attempt is cancelled, the next one expires.
+    let allowing = Party::new("allowing").await;
+    allowing
+        .mgr
+        .set_session_ttl_override(Duration::from_millis(300))
+        .await;
+    let before = allowing.pins();
+    let (addr, _) = allowing.allow().await;
+    let attacker = Identity::new().await;
+    let first = raw_dial(&attacker, &addr, &[ENROLL_ALPN]).await;
+    let id = wait_state(&allowing.mgr, "acceptor", "Verifying").await;
+    allowing.mgr.cancel(Some(id)).await.unwrap();
+    let cancelled = wait_end(&allowing.mgr, id).await;
+    assert_eq!(cancelled.state, "Cancelled");
+    let second = raw_dial(&attacker, &addr, &[ENROLL_ALPN]).await;
+    let id = wait_state(&allowing.mgr, "acceptor", "Verifying").await;
+    assert_eq!(wait_end(&allowing.mgr, id).await.state, "Expired");
+    assert!(allowing.mgr.inspect(None).await.unwrap().listening);
+    drop((first, second));
+    assert_eq!(allowing.pins(), before);
+
+    // Joining side: the computer that answered never replies.
+    let (silent, _peer) = silent_peer().await;
+    let joining = Party::new("joining").await;
+    let sid = joining.pair(&silent, "123456").await;
+    wait_state(&joining.mgr, "initiator", "Verifying").await;
+    joining.mgr.cancel(Some(sid)).await.unwrap();
+    assert_eq!(wait_end(&joining.mgr, sid).await.state, "Cancelled");
+    joining
+        .mgr
+        .set_session_ttl_override(Duration::from_millis(300))
+        .await;
+    let sid = joining.pair(&silent, "123456").await;
+    assert_eq!(wait_end(&joining.mgr, sid).await.state, "Expired");
+    assert!(joining.pins().is_none());
 }
 
 #[tokio::test]

@@ -157,7 +157,18 @@ async fn mdns_discovery_and_code_pairing_regression() {
     // Real mDNS, browse only: A never opens a window.
     let cand_for_b = wait_mdns_peer(&ma, b.id(), &fp_b, "manager-a→b").await;
     assert_eq!(cand_for_b.source, "mdns");
-    assert!(!ma.inspect(None).await.unwrap().listening);
+    // An ordinary poll (what the companions send every second) keeps the
+    // nearby device listed; only discover() starts the browse.
+    let polled = ma.inspect(None).await.unwrap();
+    assert!(!polled.listening);
+    assert!(
+        polled
+            .candidates
+            .iter()
+            .any(|c| c.source == "mdns" && c.advertised_node_id == Some(b.id())),
+        "nearby device vanished on poll: {:?}",
+        polled.candidates
+    );
     assert_eq!(
         cand_for_b.advertised_fingerprint.as_deref(),
         Some(fp_b.as_str()),
