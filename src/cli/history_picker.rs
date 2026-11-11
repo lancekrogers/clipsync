@@ -99,16 +99,7 @@ impl HistoryPicker {
             };
 
             let content_preview = match &entry.content {
-                crate::adapters::ClipboardData::Text(text) => {
-                    let preview = if text.len() > 80 {
-                        format!("{}...", &text[..80])
-                    } else {
-                        text.clone()
-                    };
-
-                    // Replace newlines with spaces for display
-                    preview.replace('\n', " ").replace('\r', "")
-                }
+                crate::adapters::ClipboardData::Text(text) => super::list_preview(text, 80),
                 crate::adapters::ClipboardData::Image(_) => "[Image]".to_string(),
             };
 

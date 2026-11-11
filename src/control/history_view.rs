@@ -22,15 +22,15 @@ pub fn validate_query(query: &str) -> Result<()> {
 
 /// Fold newlines and other control characters to spaces; truncate to preview budget.
 pub fn preview_text(text: &str) -> String {
-    let folded: String = text
-        .chars()
+    preview_chars(text, HISTORY_PREVIEW_CHARS)
+}
+
+/// Fold control characters to spaces and keep at most `max_chars` characters.
+pub fn preview_chars(text: &str, max_chars: usize) -> String {
+    text.chars()
+        .take(max_chars)
         .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let count = folded.chars().count();
-    if count <= HISTORY_PREVIEW_CHARS {
-        return folded;
-    }
-    folded.chars().take(HISTORY_PREVIEW_CHARS).collect()
+        .collect()
 }
 
 fn entry_text(entry: &ClipboardEntry) -> Option<&str> {

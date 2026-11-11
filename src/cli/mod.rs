@@ -521,13 +521,7 @@ impl CliHandler {
                 i + 1,
                 entry.timestamp.format("%Y-%m-%d %H:%M:%S"),
                 match &entry.content {
-                    crate::adapters::ClipboardData::Text(text) => {
-                        if text.len() > 50 {
-                            format!("{}...", &text[..50])
-                        } else {
-                            text.clone()
-                        }
-                    }
+                    crate::adapters::ClipboardData::Text(text) => list_preview(text, 50),
                     crate::adapters::ClipboardData::Image(_) => "[Image]".to_string(),
                 }
             );
@@ -687,13 +681,7 @@ impl CliHandler {
                 i + 1,
                 entry.timestamp.format("%Y-%m-%d %H:%M:%S"),
                 match &entry.content {
-                    crate::adapters::ClipboardData::Text(text) => {
-                        if text.len() > 50 {
-                            format!("{}...", &text[..50])
-                        } else {
-                            text.clone()
-                        }
-                    }
+                    crate::adapters::ClipboardData::Text(text) => list_preview(text, 50),
                     crate::adapters::ClipboardData::Image(_) => "[Image]".to_string(),
                 }
             );
@@ -1384,5 +1372,47 @@ impl CliHandler {
         println!("  Remaining keys: {}", remaining);
 
         Ok(())
+    }
+}
+
+/// One-line history preview of at most `max_chars` characters.
+fn list_preview(text: &str, max_chars: usize) -> String {
+    let preview = crate::control::preview_chars(text, max_chars);
+    if text.chars().nth(max_chars).is_some() {
+        format!("{preview}...")
+    } else {
+        preview
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::list_preview;
+
+    #[test]
+    fn list_preview_truncates_multibyte_text_on_char_boundaries() {
+        let rule = "─".repeat(60);
+        assert_eq!(list_preview(&rule, 50), format!("{}...", "─".repeat(50)));
+        assert_eq!(list_preview(&rule, 80), rule);
+
+        let emoji = "😀".repeat(60);
+        assert_eq!(list_preview(&emoji, 50), format!("{}...", "😀".repeat(50)));
+        let mixed = format!("a{}", "😀".repeat(30));
+        assert_eq!(list_preview(&mixed, 80), mixed);
+    }
+
+    #[test]
+    fn list_preview_limit_counts_chars_not_bytes() {
+        let short = "─".repeat(20);
+        assert_eq!(list_preview(&short, 50), short);
+        let exact = "é".repeat(50);
+        assert_eq!(list_preview(&exact, 50), exact);
+        let over = "é".repeat(51);
+        assert_eq!(list_preview(&over, 50), format!("{exact}..."));
+    }
+
+    #[test]
+    fn list_preview_stays_on_one_line() {
+        assert_eq!(list_preview("a\nb\r\nc\td", 50), "a b  c d");
     }
 }
