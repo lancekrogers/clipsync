@@ -63,6 +63,44 @@ pub fn display_text(text: &str, multiline: bool) -> String {
         .collect()
 }
 
+/// A short human name from an authorization comment or advertised label.
+/// Enrollment stores `<name> SHA256:…` and `clipsync setup` stores
+/// `clipsync-<host>`; advertised names default to `<host>-clipsync`.
+/// Input must already be sanitized with [`display_text`].
+pub fn friendly_device_name(label: &str) -> Option<String> {
+    let words = label
+        .split_whitespace()
+        .filter(|word| !word.starts_with("SHA256:"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut name = words.as_str();
+    if name
+        .get(..9)
+        .is_some_and(|head| head.eq_ignore_ascii_case("clipsync-"))
+    {
+        name = &name[9..];
+    }
+    if let Some(cut) = name.len().checked_sub(9) {
+        if name
+            .get(cut..)
+            .is_some_and(|tail| tail.eq_ignore_ascii_case("-clipsync"))
+        {
+            name = &name[..cut];
+        }
+    }
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let mut chars = name.chars();
+    let short: String = chars.by_ref().take(32).collect();
+    Some(if chars.next().is_some() {
+        format!("{short}…")
+    } else {
+        short
+    })
+}
+
 /// Bidirectional and invisible format marks that can reorder a label without
 /// being Unicode control characters (`Cc`).
 pub(crate) fn is_unsafe_format(ch: char) -> bool {
@@ -247,6 +285,35 @@ mod tests {
         );
         assert_eq!(display_text("a\u{2028}b\u{2029}c", true), "a\nb\nc");
     }
+    #[test]
+    fn device_names_drop_fingerprints_and_clipsync_affixes() {
+        let fingerprint = "SHA256:TtXaCtU8Moi9iEkJFkmdyuY+R+ViWhCd5e8r2r+/v4c";
+        assert_eq!(
+            friendly_device_name(&format!("workbench-clipsync {fingerprint}")).as_deref(),
+            Some("workbench")
+        );
+        assert_eq!(
+            friendly_device_name("clipsync-laptop").as_deref(),
+            Some("laptop")
+        );
+        assert_eq!(
+            friendly_device_name("Lance's MacBook Air").as_deref(),
+            Some("Lance's MacBook Air")
+        );
+        assert_eq!(
+            friendly_device_name("clipsync").as_deref(),
+            Some("clipsync")
+        );
+        assert_eq!(friendly_device_name(fingerprint), None);
+        assert_eq!(friendly_device_name("  "), None);
+        assert_eq!(friendly_device_name("é-clipsync").as_deref(), Some("é"));
+        let long = "x".repeat(40);
+        assert_eq!(
+            friendly_device_name(&long).map(|name| name.chars().count()),
+            Some(33)
+        );
+    }
+
     #[test]
     fn older_generation_and_other_instances_cannot_replace_a_newer_snapshot() {
         let mut state = Reconciliation::default();

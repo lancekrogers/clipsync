@@ -1,7 +1,13 @@
 //! Keyboard interactions for the same enrollment intents as the desktop.
-use super::client::{Controller, Intent};
+use super::{
+    client::{Controller, Intent},
+    terminal_theme::{Theme, Tone},
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::text::Line;
+use ratatui::{
+    style::{Modifier, Style},
+    text::{Line, Span},
+};
 
 #[derive(Default)]
 pub struct DevicesUi {
@@ -118,104 +124,217 @@ impl DevicesUi {
             .min(client.view.trusted_devices.len().saturating_sub(1));
         true
     }
-    pub fn lines(&self, client: &Controller) -> Vec<Line<'static>> {
+    pub fn lines(&self, client: &Controller, theme: &Theme) -> Vec<Line<'static>> {
+        let view = &client.view;
+        let key = |text: &str| Span::styled(text.to_owned(), theme.key());
+        let quiet = |text: &str| Span::styled(text.to_owned(), theme.muted());
+        let heading = |text: &str| Span::styled(text.to_owned(), theme.heading());
+        let strong =
+            |text: String| Span::styled(text, Style::default().add_modifier(Modifier::BOLD));
+        let marker = |selected: bool| {
+            if selected {
+                theme.selection_bar()
+            } else {
+                Span::raw(" ")
+            }
+        };
         let mut lines = vec![
-            Line::from("e allow a device · f find nearby · m enter address · x close enrollment"),
-            Line::from("Compare BOTH full fingerprints on BOTH computers before confirming."),
+            Line::from(vec![
+                key("e"),
+                Span::raw(" allow a device  "),
+                key("f"),
+                Span::raw(" find nearby  "),
+                key("m"),
+                Span::raw(" enter address  "),
+                key("x"),
+                Span::raw(" close enrollment"),
+            ]),
+            Line::from(vec![
+                Span::styled("▲ ", theme.tone(Tone::Warn)),
+                Span::raw("Compare BOTH full fingerprints on BOTH computers before confirming."),
+            ]),
             Line::from(""),
         ];
-        if !client.view.enrollment_supported {
-            lines.push(Line::from("Update the service to add devices here."));
+        if !view.enrollment_supported {
+            lines.push(Line::styled(
+                "Update the service to add devices here.",
+                theme.tone(Tone::Warn),
+            ));
         }
         if self.editing {
-            lines.push(Line::from(format!(
-                "Address: {} · Enter connect / Esc cancel",
-                client.view.device_address
-            )));
+            lines.push(Line::from(vec![
+                quiet("Address: "),
+                strong(view.device_address.clone()),
+                Span::styled("▏", theme.accent()),
+                quiet(" · "),
+                key("Enter"),
+                quiet(" connect / "),
+                key("Esc"),
+                quiet(" cancel"),
+            ]));
         }
-        if let Some(snapshot) = &client.view.enrollment {
+        if let Some(snapshot) = &view.enrollment {
             if snapshot.listening {
-                lines.push(Line::from(format!(
-                    "Allowing connections: {}",
-                    snapshot.listen_addr.as_deref().unwrap_or("opening…")
-                )));
+                lines.push(Line::from(vec![
+                    Span::styled("● ", theme.tone(Tone::Good)),
+                    Span::raw("Allowing connections: "),
+                    strong(
+                        snapshot
+                            .listen_addr
+                            .clone()
+                            .unwrap_or_else(|| "opening…".into()),
+                    ),
+                ]));
             }
             if let Some(session) = snapshot
                 .sessions
                 .iter()
-                .find(|s| Some(s.session_id) == client.view.selected_session)
+                .find(|s| Some(s.session_id) == view.selected_session)
             {
                 lines.extend([
-                    Line::from(format!(
-                        "{} · {}s left · [ / ] switch session",
-                        super::model::enrollment_state_label(&session.state),
-                        session.remaining_secs
-                    )),
-                    Line::from("This computer:"),
-                    Line::from(session.local_fingerprint.clone()),
-                    Line::from("Other computer:"),
-                    Line::from(
-                        session
-                            .peer_fingerprint
-                            .clone()
-                            .unwrap_or_else(|| "Waiting for secure connection…".into()),
-                    ),
+                    Line::from(vec![
+                        Span::styled(
+                            super::model::enrollment_state_label(&session.state).to_owned(),
+                            theme.tone(Tone::Info),
+                        ),
+                        quiet(&format!(" · {}s left · ", session.remaining_secs)),
+                        key("[ / ]"),
+                        quiet(" switch session"),
+                    ]),
+                    Line::from(quiet("This computer:")),
+                    Line::from(strong(session.local_fingerprint.clone())),
+                    Line::from(quiet("Other computer:")),
+                    Line::from(match &session.peer_fingerprint {
+                        Some(fingerprint) => strong(fingerprint.clone()),
+                        None => quiet("Waiting for secure connection…"),
+                    }),
                     Line::from(if session.local_confirmed {
-                        "Confirmed here; awaiting both computers. · c cancel"
+                        vec![
+                            quiet("Confirmed here; awaiting both computers. · "),
+                            key("c"),
+                            quiet(" cancel"),
+                        ]
                     } else {
-                        "y fingerprints match, confirm · c cancel"
+                        vec![
+                            key("y"),
+                            Span::raw(" fingerprints match, confirm · "),
+                            key("c"),
+                            quiet(" cancel"),
+                        ]
                     }),
                 ]);
                 if let Some(error) = &session.error {
-                    lines.push(Line::from(error.clone()));
+                    lines.push(Line::styled(format!("✗ {error}"), theme.tone(Tone::Bad)));
                 }
             }
             if let Some(outcome) = &snapshot.outcome {
-                lines.push(Line::from(format!(
-                    "{}: {}",
-                    outcome.status,
-                    outcome.detail.as_deref().unwrap_or_default()
-                )));
+                lines.push(Line::styled(
+                    format!(
+                        "{}: {}",
+                        outcome.status,
+                        outcome.detail.as_deref().unwrap_or_default()
+                    ),
+                    theme.tone(Tone::Info),
+                ));
             }
             if !snapshot.candidates.is_empty() {
-                lines.push(Line::from("Nearby · ↑/↓ select · Enter connect"));
+                lines.push(Line::default());
+                lines.push(Line::from(vec![
+                    heading("Nearby"),
+                    quiet(" · "),
+                    key("↑/↓"),
+                    quiet(" select · "),
+                    key("Enter"),
+                    quiet(" connect"),
+                ]));
             }
             for (index, candidate) in snapshot.candidates.iter().enumerate() {
-                lines.push(Line::from(format!(
-                    "{} {} · {}",
-                    if index == self.candidate { ">" } else { " " },
-                    candidate.display_name,
-                    candidate.address
-                )));
+                let hue = candidate
+                    .advertised_node_id
+                    .map_or_else(Style::default, |id| theme.device(id));
+                lines.push(Line::from(vec![
+                    marker(index == self.candidate),
+                    Span::raw(" "),
+                    Span::styled(candidate.display_name.clone(), hue),
+                    quiet(&format!(" · {}", candidate.address)),
+                ]));
             }
         }
-        lines.push(Line::from(""));
-        lines.push(Line::from("Connected now"));
-        if client.view.devices.is_empty() {
-            lines.push(Line::from("No authenticated devices connected."));
+        if lines.last().is_some_and(|line| line.width() > 0) {
+            lines.push(Line::from(""));
         }
-        for device in &client.view.devices {
-            lines.push(Line::from(format!("{} · {}", device.name, device.address)));
+        lines.push(Line::from(heading("Connected now")));
+        if view.devices.is_empty() {
+            lines.push(Line::styled(
+                "No authenticated devices connected.",
+                theme.muted(),
+            ));
+        }
+        for device in &view.devices {
+            lines.push(Line::from(vec![
+                Span::styled("● ", theme.tone(Tone::Good)),
+                Span::styled(view.device_name(device.id), theme.device(device.id)),
+                quiet(&format!(" · {}", device.address)),
+            ]));
         }
         lines.push(Line::from(""));
-        lines.push(Line::from(
-            "Authorized devices · j/k select · D remove authorization",
-        ));
-        for (index, device) in client.view.trusted_devices.iter().enumerate() {
-            lines.push(Line::from(format!(
-                "{} {}",
-                if index == self.trusted { ">" } else { " " },
-                device.comment.as_deref().unwrap_or("Device")
-            )));
-            lines.push(Line::from(device.fingerprint.clone()));
+        lines.push(Line::from(vec![
+            heading("Authorized devices"),
+            quiet(" · "),
+            key("j/k"),
+            quiet(" select · "),
+            key("D"),
+            quiet(" remove authorization"),
+        ]));
+        if view.trusted_devices.is_empty() {
+            lines.push(Line::styled("No devices authorized yet.", theme.muted()));
+        }
+        for (index, device) in view.trusted_devices.iter().enumerate() {
+            let connected = view
+                .devices
+                .iter()
+                .find(|peer| peer.name == device.fingerprint);
+            let name = device
+                .comment
+                .as_deref()
+                .and_then(super::model::friendly_device_name)
+                .unwrap_or_else(|| "Device".into());
+            let selected = index == self.trusted;
+            let mut row = vec![
+                marker(selected),
+                Span::raw(" "),
+                Span::styled(
+                    name,
+                    connected.map_or_else(Style::default, |peer| theme.device(peer.id)),
+                ),
+                Span::raw("  "),
+            ];
+            row.extend(if connected.is_some() {
+                [
+                    Span::styled("● ", theme.tone(Tone::Good)),
+                    Span::styled("connected", theme.tone(Tone::Good)),
+                ]
+            } else {
+                [quiet("○ "), quiet("not connected")]
+            });
+            lines.push(Line::from(row));
+            lines.push(Line::from(vec![
+                marker(selected),
+                Span::raw(" "),
+                quiet(&device.fingerprint),
+            ]));
         }
         if let Some(fingerprint) = &self.revoke {
             // Put destructive confirmation first so it remains visible in a small terminal.
             lines.splice(
                 0..0,
                 [
-                    Line::from("REMOVE authorization? y confirms; any other key cancels."),
-                    Line::from(fingerprint.clone()),
+                    Line::from(vec![
+                        Span::styled("REMOVE authorization?", theme.badge(Tone::Bad)),
+                        Span::raw(" y confirms; any other key cancels."),
+                    ]),
+                    Line::from(strong(fingerprint.clone())),
+                    Line::default(),
                 ],
             );
         }

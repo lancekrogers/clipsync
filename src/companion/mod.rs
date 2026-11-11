@@ -10,3 +10,9 @@ mod terminal_image;
 
 #[cfg(feature = "tui")]
 mod terminal_devices;
+
+#[cfg(feature = "tui")]
+mod terminal_history;
+
+#[cfg(feature = "tui")]
+mod terminal_theme;

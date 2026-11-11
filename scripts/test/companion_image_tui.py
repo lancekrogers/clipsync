@@ -1,4 +1,5 @@
 """Exercise image history in the real TUI using an isolated macOS pasteboard."""
+import codecs
 import fcntl
 import json
 import os
@@ -52,6 +53,8 @@ try:
     answered = False
     cursor_queries = 0
     pending = bytearray()
+    # Reads can split a multi-byte character; decode across them.
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
 
     def pump():
         global answered, cursor_queries
@@ -73,11 +76,11 @@ try:
                 if start < 0:
                     keep = 2 if pending.endswith(b"\x1b_") else 1 if pending.endswith(b"\x1b") else 0
                     if len(pending) > keep:
-                        stream.feed(bytes(pending[:len(pending)-keep]).decode("utf-8", errors="replace"))
+                        stream.feed(decoder.decode(bytes(pending[:len(pending)-keep])))
                         del pending[:len(pending)-keep]
                     break
                 if start:
-                    stream.feed(bytes(pending[:start]).decode("utf-8", errors="replace"))
+                    stream.feed(decoder.decode(bytes(pending[:start])))
                     del pending[:start]
                 end = pending.find(b"\x1b\\", 3)
                 if end < 0:
@@ -97,7 +100,7 @@ try:
 
     wait_for(lambda: "Ready to sync" in snapshot(), "service ready")
     os.write(master, b"3")
-    wait_for(lambda: "[Image]" in snapshot(), "image history row")
+    wait_for(lambda: "▣ Image" in snapshot(), "image history row")
     os.write(master, b"\r")
     if kitty:
         wait_for(lambda: b",a=T,U=1,f=32" in raw, "Kitty graphics image")
@@ -114,7 +117,8 @@ try:
     else:
         wait_for(lambda: "▀" in snapshot(), "image preview after resize")
     os.write(master, b"\x1b[B")
-    wait_for(lambda: "▀" not in snapshot() and "Selected copy" in snapshot(), "text replaces preview")
+    # Text details title their character count; image details do not.
+    wait_for(lambda: "▀" not in snapshot() and " characters" in snapshot(), "text replaces preview")
     assert "\U0010eeee" not in snapshot(), "stale graphics placeholder remains"
     os.write(master, b"q")
     assert tui.wait(timeout=5) == 0
