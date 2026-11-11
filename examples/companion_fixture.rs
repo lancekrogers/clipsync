@@ -333,6 +333,8 @@ impl PeerFixture {
             self.auth.clone(),
             tls::node_id(&self.key.public_key()),
         ));
+        // Accept history removals like a current ClipSync peer.
+        transport.enable_history_ops();
         let dialer = transport.clone();
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
