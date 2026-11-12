@@ -139,10 +139,11 @@ if [[ "$MODE" == push ]]; then
   done
 fi
 
-# libcrypto.so.3 is linked (Arch ships it as openssl-3 since openssl moved to 4.x). The
-# X11, Wayland, xkbcommon and GL libraries are loaded by the GUI at runtime, which the
-# container check verifies; namcap cannot see them and calls them possibly unneeded.
-DEPENDS="'glibc' 'libgcc' 'openssl-3' 'libx11' 'libxcursor' 'libxi' 'libxrender'
+# libcrypto.so.3 is linked. Depend on the soname: Arch ships it as openssl-3 (openssl is
+# 4.x there) while Arch Linux ARM still ships it as openssl. The X11, Wayland, xkbcommon
+# and GL libraries are loaded by the GUI at runtime, which the container check verifies;
+# namcap cannot see them and calls them possibly unneeded.
+DEPENDS="'glibc' 'libgcc' 'libcrypto.so=3-64' 'libx11' 'libxcursor' 'libxi' 'libxrender'
          'libxkbcommon' 'libxkbcommon-x11' 'wayland' 'libglvnd' 'hicolor-icon-theme'"
 RENDER_ARGS=(--set "VERSION=$VERSION" --set "REPO=$SLUG" --set "MAINTAINER=$MAINTAINER"
   --set "DEPENDS=$DEPENDS" --set "X86_64_SHA256=$X86_SHA" "${LICENSE_ARGS[@]}")
