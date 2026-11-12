@@ -5,7 +5,7 @@ resolver = "2"
 
 [package]
 name = "clipsync"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["ClipSync Team"]
 description = "Cross-platform clipboard synchronization service"

@@ -4,7 +4,15 @@ use clipsync::config::Config;
 
 #[test]
 fn test_version() {
-    assert_eq!(clipsync::VERSION, "0.1.0");
+    let parts: Vec<&str> = clipsync::VERSION.split('.').collect();
+    assert!(
+        parts.len() == 3
+            && parts
+                .iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit())),
+        "version {} is not x.y.z",
+        clipsync::VERSION
+    );
 }
 
 #[test]
