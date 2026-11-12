@@ -90,9 +90,9 @@ package: release
     tar -czf dist/clipsync-linux-$(uname -m).tar.gz -C dist clipsync-linux
   fi
 
-# Install locally
-install: release
-  cargo install --path .
+# Install the clipsync CLI with the terminal UI (clipsync tui) to ~/.cargo/bin
+install:
+  cargo install --path . --locked --features tui
 
 # Setup development environment
 dev-setup:
