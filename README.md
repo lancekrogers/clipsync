@@ -131,6 +131,12 @@ Kitty or Sixel graphics get a sharper preview; set `CLIPSYNC_TUI_GRAPHICS=off`
 to keep the character preview where a terminal reports graphics it cannot show.
 
 <p align="center">
+  <img src="docs/assets/companion-tui-history-mac-arch.png" width="960" alt="ClipSync terminal companion History on a Mac connected to an Arch Linux desktop named archdtop: images, text, a link and shell commands copied on either computer, with a sharp preview of a screenshot copied on archdtop">
+</p>
+
+*Real use: History on a Mac connected to an Arch Linux desktop (`archdtop`), in a terminal with graphics support. Private entries are blurred.*
+
+<p align="center">
   <img src="docs/assets/companion-tui.gif" width="960" alt="ClipSync terminal companion: Overview with a connected device, Devices, History with an image preview, copying a line from another device, search, and pause">
 </p>
 
