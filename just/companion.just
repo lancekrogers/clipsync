@@ -57,11 +57,13 @@ companion-release *ARGS:
   export CLIPSYNC_RUSTUP_TOOLCHAIN="{{companion_toolchain}}"
   ./scripts/package_companion.sh release {{ARGS}}
 
-# Publishing the draft (which creates the tag) stays a manual step.
+# Publishing the draft (which creates the tag) stays a manual step; it starts the
+# Release packages workflow, which updates the Homebrew tap and the AUR.
 # Upload the staged release as a DRAFT GitHub release.
 companion-release-publish:
   ./scripts/package_companion.sh release-publish
 
+# The Release packages workflow runs this after publishing; use it when the workflow cannot.
 # Refuses while the release is a draft or the public DMG checksum differs from the staged one.
 # After the release is published, push the staged cask to the Homebrew tap.
 companion-release-tap:
@@ -69,7 +71,8 @@ companion-release-tap:
 
 # --check builds and installs the package in an Arch Linux container from the staged archives
 # and pushes nothing. Without it, refuses until the release is published and its archives match
-# the staged checksums, then pushes. CLIPSYNC_AUR_SSH_KEY picks the AUR key.
+# the staged checksums, then pushes. CLIPSYNC_AUR_SSH_KEY picks the AUR key. The Release
+# packages workflow pushes after publishing; use this when the workflow cannot.
 # Test the clipsync-bin AUR package in Arch Linux, then push it to the AUR.
 companion-release-aur *ARGS:
   ./scripts/package_companion.sh release-aur {{ARGS}}

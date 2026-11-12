@@ -187,7 +187,7 @@ cp "$PKGDIR/PKGBUILD" "$PKGDIR/.SRCINFO" "$STAGE/aur/"
 clipsync_release_log "clipsync-bin $VERSION built, installed and passed namcap in Arch Linux"
 clipsync_release_log "wrote $STAGE/aur/PKGBUILD and .SRCINFO"
 if [[ "$MODE" == check ]]; then
-  clipsync_release_log "check only; after the release is published run: just companion-release-aur"
+  clipsync_release_log "check only; publishing the release pushes it through the Release packages workflow"
   exit 0
 fi
 

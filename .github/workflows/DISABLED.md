@@ -2,6 +2,9 @@
 
 All GitHub workflows have been temporarily disabled to prevent unnecessary CI/CD costs.
 
+`release-packages.yml` is enabled. It runs only when a release is published (or
+by hand) and updates the Homebrew tap and the AUR; see docs/RELEASE_CHECKLIST.md.
+
 ## Disabled Workflows:
 - build.yml.disabled
 - ci.yml.disabled  
