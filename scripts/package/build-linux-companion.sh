@@ -84,7 +84,7 @@ Comment=Clipboard sync companion (GUI)
 Exec=@CLIPSYNC_DESKTOP_EXEC@
 Icon=clipsync
 Terminal=false
-Categories=Utility;Network;
+Categories=Utility;
 StartupNotify=true
 EOF
 
