@@ -2,8 +2,8 @@
 
 A release publishes the version in `Cargo.toml` as GitHub release `v<version>`
 with a macOS disk image, Linux archives, `SHA256SUMS` and release notes, then
-updates the Homebrew cask. Three commands do it; making the release public is
-a manual click in between.
+updates the Homebrew cask and the `clipsync-bin` AUR package. Four commands do
+it; making the release public is a manual click in between.
 
 | Step | Command | Writes to GitHub |
 |---|---|---|
@@ -11,6 +11,7 @@ a manual click in between.
 | Draft | `just companion-release-publish` | A **draft** release with the staged files |
 | Publish | `gh release edit v<version> --repo lancekrogers/clipsync --draft=false`, or **Publish release** on the draft | The tag and the public release |
 | Tap | `just companion-release-tap` | `Casks/clipsync.rb` in `lancekrogers/homebrew-tap` |
+| AUR | `just companion-release-aur` | `PKGBUILD` and `.SRCINFO` in the AUR's `clipsync-bin` |
 
 ## Before staging
 
@@ -107,11 +108,48 @@ maintained. Afterwards `brew install --cask lancekrogers/tap/clipsync` works.
 The tap also holds an older, unbuildable `Formula/clipsync.rb`; always pass
 `--cask`.
 
+## AUR: `just companion-release-aur`
+
+`clipsync-bin` repackages the published Linux archives: `clipsync` and
+`clipsync-desktop` in `/usr/bin`, the desktop entry and icon, and the license
+files from the tagged commit. It ships no systemd unit; the app writes the
+per-user service when setup finishes, and it points at `/usr/bin/clipsync`.
+
+`just companion-release-aur --check` works before publishing. It renders the
+PKGBUILD from `release.json`, then in an `archlinux:base-devel` container
+(amd64, emulated on Apple Silicon) runs `makepkg --printsrcinfo` and `makepkg`
+on the staged archives, `namcap`, and `pacman -U` with the dependencies. It
+fails on namcap errors, linked libraries missing from `depends`, GUI runtime
+libraries the dependencies do not install, a desktop entry that does not
+validate, or `clipsync --version` printing another version. The PKGBUILD and
+`.SRCINFO` land in `dist/release/v<version>/aur/`. It contacts neither GitHub
+nor the AUR.
+
+Without `--check` it also refuses unless the release is published, its tag on
+origin points at the staged commit, quality gates passed, and the archives and
+license files at their public URLs match the staged ones. The container then
+downloads the public files itself. If everything passes, it commits `PKGBUILD`
+and `.SRCINFO` to `master` as the maintainer (`CLIPSYNC_AUR_MAINTAINER`,
+default `Obedience Corp <contact@obediencecorp.com>`, never the local git
+identity) and pushes. Rerunning is a no-op; changing the package without a new
+version is refused, since it needs a `pkgrel` bump by hand.
+
+The push uses your ssh configuration for `aur.archlinux.org`, or the key in
+`CLIPSYNC_AUR_SSH_KEY`:
+
+```sh
+CLIPSYNC_AUR_SSH_KEY=~/.ssh/<aur-key> just companion-release-aur
+```
+
+Only the x86_64 package is built and installed in the check; the aarch64
+entries are checked only against `release.json`.
+
 ## Testing the commands
 
 `just companion-package-test` runs the release-command tests in
 `scripts/package/test_release.sh` against a throwaway repository with stub
-`gh`, `cargo`, `docker` and `curl`. They cover the refusals above that can be
+`gh`, `cargo`, `docker` and `curl`, and a local bare repository standing in for
+the AUR. They cover the refusals above that can be
 reached without a real build or credentials (not the post-signing Developer ID
 checks) and check the exact `gh release create` arguments; nothing reaches
 GitHub.
