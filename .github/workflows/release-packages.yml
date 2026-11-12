@@ -37,7 +37,7 @@ jobs:
 
       # A manual rerun uses the newest release scripts on the release's version.
       - name: Use the release scripts from the workflow's commit
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name != 'release'
         run: git checkout "$GITHUB_SHA" -- scripts/package
 
       - name: Install the SSH keys
@@ -65,6 +65,7 @@ jobs:
       - name: Update the Homebrew tap and the AUR
         env:
           GH_TOKEN: ${{ github.token }}
+          CLIPSYNC_RELEASE_REPO: ${{ github.repository }}
           CLIPSYNC_TAP_URL: git@github.com:lancekrogers/homebrew-tap.git
           CLIPSYNC_TAP_SSH_KEY: ${{ runner.temp }}/tap_key
           CLIPSYNC_AUR_SSH_KEY: ${{ runner.temp }}/aur_key
