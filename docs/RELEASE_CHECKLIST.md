@@ -2,15 +2,14 @@
 
 A release publishes the version in `Cargo.toml` as GitHub release `v<version>`
 with a macOS disk image, Linux archives, `SHA256SUMS` and release notes. Two
-commands stage and draft it. Publishing the draft is a manual click, and it
-starts the **Release packages** workflow, which updates the Homebrew cask and
-the `clipsync-bin` AUR package.
+commands do it: one stages, one publishes. Publishing starts the **Release
+packages** workflow, which updates the Homebrew cask and the `clipsync-bin` AUR
+package.
 
 | Step | How | Writes |
 |---|---|---|
 | Stage | `just companion-release` | Nothing (reads releases and tags) |
-| Draft | `just companion-release-publish` | A **draft** release with the staged files, the cask and `release.json` |
-| Publish | **Publish release** on the draft, or `gh release edit v<version> --repo lancekrogers/clipsync --draft=false` | The tag and the public release |
+| Publish | `just companion-release-publish` | The release with the staged files, the cask and `release.json`, and its tag |
 | Homebrew and AUR | Automatic: `.github/workflows/release-packages.yml` | `Casks/clipsync.rb` in `lancekrogers/homebrew-tap`; `PKGBUILD` and `.SRCINFO` in the AUR's `clipsync-bin` |
 
 `just companion-release-tap` and `just companion-release-aur` do the last step
@@ -83,24 +82,25 @@ that removes them.
 `--skip-gates` (`just companion-release --skip-gates`) is for iterating on
 packaging. It is recorded in `release.json` and publish refuses the result.
 
-Read `RELEASE_NOTES.md` before publishing.
+`RELEASE_NOTES.md` may be edited before publishing, and the published notes
+can be changed later with `gh release edit v<version> --notes-file <file>`.
 
-## Draft: `just companion-release-publish`
+## Publish: `just companion-release-publish`
 
 Refuses unless `release.json` exists, every staged file and the cask still
 match their checksums in `release.json` and `SHA256SUMS`, no unlisted files are
 in `assets/`, gates ran, HEAD is the staged commit and that commit is on
-`origin/main`, and the tag and release still do not exist. `RELEASE_NOTES.md`
-may be edited after staging. It then runs
+`origin/main`, and the tag and release still do not exist. It then runs
 `gh release create v<version> --draft --target <commit>` with the notes and
 assets, plus `clipsync.rb` and `release.json` for the Release packages
-workflow, and prints the draft URL. A draft creates no tag.
+workflow. Once every file is uploaded it publishes the draft with
+`gh release edit v<version> --draft=false`, which creates the tag at the staged
+commit and starts the workflow. Uploading to a draft first means the workflow
+never sees a release with missing files.
 
-## Publish
-
-Open the draft, check the notes and files, then click **Publish release** or
-run the `gh release edit … --draft=false` command it printed. This creates the
-tag at the staged commit and starts the Release packages workflow.
+`just companion-release-publish --draft` stops at the draft so you can review
+it on GitHub; publish it afterwards with the `gh release edit` command it
+prints, or **Edit → Publish release** on the draft.
 
 ## Homebrew and AUR: the Release packages workflow
 

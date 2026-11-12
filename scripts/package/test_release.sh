@@ -66,6 +66,11 @@ case "${1:-} ${2:-}" in
     printf '%s\n' "$@" >"$STUB_LOGS/gh-create.args"
     echo "https://github.com/example/clipsync/releases/tag/untagged-0123"
     exit 0 ;;
+  "release edit")
+    printf '%s\n' "$*" >"$STUB_LOGS/gh-edit.args"
+    if [[ "${STUB_GH_EDIT_FAIL:-0}" == 1 ]]; then echo "HTTP 422" >&2; exit 1; fi
+    echo "https://github.com/example/clipsync/releases/tag/v0.1.0"
+    exit 0 ;;
   "release download")
     if [[ -z "${STUB_GH_DOWNLOAD_DIR:-}" ]]; then echo "release not found" >&2; exit 1; fi
     dir=""
@@ -417,8 +422,8 @@ expect_refusal "renderer refuses unfilled placeholders" "unfilled placeholders" 
 # ===================== publish =====================
 make_stage
 : >"$LOGS/gh.log"
-rm -f "$LOGS/gh-create.args"
-expect_success "publish creates a draft from a valid stage" bash "$PUBLISH_SH"
+rm -f "$LOGS/gh-create.args" "$LOGS/gh-edit.args"
+expect_success "publish uploads and publishes a valid stage" bash "$PUBLISH_SH"
 HEAD_SHA="$(git -C "$REPO" rev-parse HEAD)"
 EXPECTED_ARGS="release
 create
@@ -444,9 +449,20 @@ else
   fail "unexpected gh release create arguments"
   diff <(printf '%s\n' "$EXPECTED_ARGS") "$LOGS/gh-create.args" >&2 || true
 fi
-if [[ "$LAST_OUT" == *"draft created: https://github.com/example/clipsync/releases/tag/untagged-0123"* \
+if [[ "$(cat "$LOGS/gh-edit.args" 2>/dev/null)" == "release edit v0.1.0 --repo example/clipsync --draft=false" \
+   && "$LAST_OUT" == *"published v0.1.0: https://github.com/example/clipsync/releases/tag/v0.1.0"* ]]; then
+  pass "publish makes the uploaded draft public"
+else
+  fail "publish did not publish the draft (edit: $(cat "$LOGS/gh-edit.args" 2>/dev/null))"
+fi
+
+make_stage
+rm -f "$LOGS/gh-create.args" "$LOGS/gh-edit.args"
+expect_success "publish --draft uploads a draft" bash "$PUBLISH_SH" --draft
+if [[ -f "$LOGS/gh-create.args" && ! -e "$LOGS/gh-edit.args" \
+   && "$LAST_OUT" == *"draft created: https://github.com/example/clipsync/releases/tag/untagged-0123"* \
    && "$LAST_OUT" == *"gh release edit v0.1.0 --repo example/clipsync --draft=false"* ]]; then
-  pass "publish prints the draft URL and the command that makes it public"
+  pass "publish --draft stops at the draft and prints the command that makes it public"
 else
   fail "publish output lacks the draft URL or publish command"
 fi
@@ -459,10 +475,10 @@ fi
 publish_refusal() {
   local name="$1" needle="$2"
   shift 2
-  rm -f "$LOGS/gh-create.args"
+  rm -f "$LOGS/gh-create.args" "$LOGS/gh-edit.args"
   expect_refusal "$name" "$needle" "$@"
-  if [[ -e "$LOGS/gh-create.args" ]]; then
-    fail "$name: gh release create was called"
+  if [[ -e "$LOGS/gh-create.args" || -e "$LOGS/gh-edit.args" ]]; then
+    fail "$name: gh release create or edit was called"
   fi
 }
 
@@ -529,6 +545,12 @@ publish_refusal "publish refuses a cask changed after staging" "clipsync.rb chan
 make_stage
 publish_refusal "publish refuses an existing release or draft" "already exists in example/clipsync" \
   env STUB_GH_RELEASES=v0.1.0 bash "$PUBLISH_SH"
+
+make_stage
+expect_refusal "publish reports a draft it uploaded but could not publish" \
+  "the draft is uploaded but publishing failed; retry with: gh release edit v0.1.0" \
+  env STUB_GH_EDIT_FAIL=1 bash "$PUBLISH_SH"
+expect_refusal "publish rejects unknown arguments" "unknown argument: --now" bash "$PUBLISH_SH" --now
 
 # ===================== tap =====================
 TAP="$TMP/tap.git"

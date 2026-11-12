@@ -57,11 +57,11 @@ companion-release *ARGS:
   export CLIPSYNC_RUSTUP_TOOLCHAIN="{{companion_toolchain}}"
   ./scripts/package_companion.sh release {{ARGS}}
 
-# Publishing the draft (which creates the tag) stays a manual step; it starts the
-# Release packages workflow, which updates the Homebrew tap and the AUR.
-# Upload the staged release as a DRAFT GitHub release.
-companion-release-publish:
-  ./scripts/package_companion.sh release-publish
+# Publishing creates the tag and starts the Release packages workflow, which updates the
+# Homebrew tap and the AUR. --draft stops at a draft for review.
+# Publish the staged release on GitHub.
+companion-release-publish *ARGS:
+  ./scripts/package_companion.sh release-publish {{ARGS}}
 
 # The Release packages workflow runs this after publishing; use it when the workflow cannot.
 # Refuses while the release is a draft or the public DMG checksum differs from the staged one.

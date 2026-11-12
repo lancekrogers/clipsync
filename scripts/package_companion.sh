@@ -19,7 +19,7 @@ Commands:
   test         Isolated package tests (tempdirs; no host service changes)
   sign-macos   Developer ID + notarize (hard-gated on credentials; usually blocked)
   release      Stage a public release of the Cargo version into dist/release/v<version>
-  release-publish  Upload the staged release as a draft GitHub release
+  release-publish  Publish the staged release on GitHub (--draft: stop at a draft)
   release-tap  Push the staged Homebrew cask once the release is published
   release-aur  Test the clipsync-bin AUR package in Arch Linux, then push it (--check: test only)
   release-packages <tag>  Update the tap and the AUR from a published release (the workflow's step)
