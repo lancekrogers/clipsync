@@ -19,7 +19,7 @@ clipsync_package_version() {
 }
 
 clipsync_package_arch() {
-  uname -m
+  printf '%s\n' "${CLIPSYNC_PACKAGE_ARCH:-$(uname -m)}"
 }
 
 # Optional Rust 1.95 toolchain pin for GUI crate; never mutates rustup default.
@@ -91,6 +91,38 @@ clipsync_package_fixture_mode() {
     || "${CLIPSYNC_PACKAGE_SKIP_BUILD:-0}" == "1" ]]
 }
 
+# Release builds are staged by release-stage.sh and carry public artifact names.
+clipsync_package_release_mode() {
+  [[ "${CLIPSYNC_PACKAGE_RELEASE:-0}" == "1" ]]
+}
+
+# unsigned (ad-hoc sealed on macOS) or developer-id (sign-macos.sh runs next).
+clipsync_package_release_signing() {
+  local signing="${CLIPSYNC_PACKAGE_RELEASE_SIGNING:-unsigned}"
+  case "$signing" in
+    unsigned|developer-id) printf '%s' "$signing" ;;
+    *) clipsync_package_die "unknown CLIPSYNC_PACKAGE_RELEASE_SIGNING: $signing" ;;
+  esac
+}
+
+# A release must come from a fresh cargo build, never fixture or prebuilt binaries.
+clipsync_package_require_release_inputs() {
+  clipsync_package_release_mode || return 0
+  if clipsync_package_fixture_mode \
+    || [[ -n "${CLIPSYNC_PACKAGE_CLI_BIN:-}" || -n "${CLIPSYNC_PACKAGE_GUI_BIN:-}" ]]; then
+    clipsync_package_die "release builds cannot use fixture or prebuilt binaries (unset CLIPSYNC_PACKAGE_FIXTURE_MODE, CLIPSYNC_PACKAGE_SKIP_BUILD, CLIPSYNC_PACKAGE_CLI_BIN, CLIPSYNC_PACKAGE_GUI_BIN)"
+  fi
+}
+
+# Full commit; release containers build from an export without .git and pass it in.
+clipsync_package_git_commit() {
+  if [[ -n "${CLIPSYNC_PACKAGE_GIT_COMMIT:-}" ]]; then
+    printf '%s' "$CLIPSYNC_PACKAGE_GIT_COMMIT"
+    return 0
+  fi
+  git -C "$(clipsync_package_project_root)" rev-parse HEAD 2>/dev/null || printf 'unknown'
+}
+
 # Guard against catastrophic rm -rf targets before force-replace.
 clipsync_package_path_is_dangerous() {
   local path="$1"
@@ -133,6 +165,12 @@ clipsync_package_target_dir() {
   local root
   root="$(clipsync_package_project_root)"
   printf '%s\n' "${CARGO_TARGET_DIR:-$root/target}"
+}
+
+# Where cargo leaves release binaries; CLIPSYNC_PACKAGE_CARGO_TARGET cross-builds.
+clipsync_package_release_bin_dir() {
+  local target="${CLIPSYNC_PACKAGE_CARGO_TARGET:-}"
+  printf '%s/%srelease\n' "$(clipsync_package_target_dir)" "${target:+$target/}"
 }
 
 # Escape a path for Freedesktop Desktop Entry Exec= (two layers + %% field codes).
@@ -378,6 +416,31 @@ clipsync_package_write_provenance() {
   local version arch commit toolchain fixture features_note
   version="$(clipsync_json_escape "$(clipsync_package_version)")"
   arch="$(clipsync_json_escape "$(clipsync_package_arch)")"
+  if clipsync_package_release_mode; then
+    clipsync_package_require_release_inputs
+    # Written before any signing: notarization status lives in the outer
+    # manifest because the bundle cannot change after codesign seals it.
+    cat >"$out_file" <<EOF
+{
+  "product": "ClipSync",
+  "kind": "$(clipsync_json_escape "$kind")",
+  "version": "$version",
+  "arch": "$arch",
+  "git": "$(clipsync_json_escape "$(clipsync_package_git_commit)")",
+  "release_build": true,
+  "signing": "$(clipsync_package_release_signing)",
+  "fixture_mode": false,
+  "rust_toolchain": "$(clipsync_json_escape "${CLIPSYNC_RUSTUP_TOOLCHAIN-1.95.0}")",
+  "features": {
+    "clipsync": ["tui"],
+    "clipsync_desktop": [],
+    "disabled": ["integration-tests", "ui-test"],
+    "verified": true
+  }
+}
+EOF
+    return 0
+  fi
   commit="$(clipsync_json_escape "$(git -C "$(clipsync_package_project_root)" rev-parse --short HEAD 2>/dev/null || echo unknown)")"
   toolchain="$(clipsync_json_escape "${CLIPSYNC_RUSTUP_TOOLCHAIN-1.95.0}")"
   if clipsync_package_fixture_mode; then

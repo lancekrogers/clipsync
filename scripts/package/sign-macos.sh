@@ -117,6 +117,22 @@ fail_acceptance() {
   clipsync_package_die "$msg"
 }
 
+# codesign seals Contents/Resources, so provenance is final before signing and
+# notarization status is recorded in ACCEPTANCE, outside the bundle.
+PROV="$APP/Contents/Resources/PROVENANCE.json"
+if [[ -f "$PROV" ]] && ! grep -q '"release_build": true' "$PROV"; then
+  python3 - "$PROV" <<'PY' || fail_acceptance "could not update PROVENANCE.json before signing"
+import json,sys
+p=sys.argv[1]
+with open(p) as f: d=json.load(f)
+d["signing"]="Developer-ID"
+d.pop("notarized", None)
+d.pop("public_release_ready", None)
+d["notes"]="Developer ID signed by sign-macos.sh. Notarization status is recorded in ACCEPTANCE-*.json outside the signed bundle."
+with open(p,"w") as f: json.dump(d,f,indent=2); f.write("\n")
+PY
+fi
+
 log_step "codesign-nested-cli"
 codesign --force --options runtime --timestamp \
   --sign "$IDENTITY" \
@@ -216,21 +232,6 @@ if command -v spctl >/dev/null 2>&1; then
 fi
 
 write_acceptance "accepted" "Developer ID signed, notarized, stapled; DMG recreated from stapled app when requested"
-
-# Update adjacent provenance if present.
-PROV="$APP/Contents/Resources/PROVENANCE.json"
-if [[ -f "$PROV" ]]; then
-  python3 - "$PROV" <<'PY' 2>/dev/null || true
-import json,sys
-p=sys.argv[1]
-with open(p) as f: d=json.load(f)
-d["signing"]="Developer-ID"
-d["notarized"]=True
-d["public_release_ready"]=True
-d["notes"]="Signed and notarized via sign-macos.sh. Verify ACCEPTANCE.json + stapler + spctl before distribution."
-with open(p,"w") as f: json.dump(d,f,indent=2); f.write("\n")
-PY
-fi
 
 clipsync_package_log "notarization + staple complete"
 clipsync_package_log "acceptance: $ACCEPTANCE"

@@ -21,6 +21,70 @@ Start with the [desktop and TUI guide](docs/COMPANION.md), or use the
 
 The repaired transport uses protocol **2.0.0**: update both devices together. It intentionally refuses the old plaintext protocol.
 
+## Install
+
+Download ClipSync from [GitHub Releases](https://github.com/lancekrogers/clipsync/releases).
+Each release has a macOS disk image for Apple Silicon, Linux archives for x86_64
+and aarch64, a `SHA256SUMS` file and install steps in its notes. If no release
+is listed yet, [build from source](#build-from-source).
+
+**macOS (Apple Silicon).** With Homebrew, once the release is in the tap:
+
+```sh
+brew install --cask lancekrogers/tap/clipsync
+```
+
+Or open the disk image and drag ClipSync to Applications. Release builds are
+not notarized by Apple, so macOS blocks the first launch: click **Done**, open
+**System Settings → Privacy & Security** and click **Open Anyway**. You only do
+this once. Alternatively, run
+`xattr -dr com.apple.quarantine /Applications/ClipSync.app` before the first
+launch. The Homebrew cask does this for you.
+
+**Linux.** Unpack the archive for your architecture and run its installer:
+
+```sh
+tar -xzf clipsync-<version>-linux-x86_64.tar.gz
+cd clipsync-<version>-linux-x86_64
+./install-user.sh
+```
+
+It installs `clipsync` and `clipsync-desktop` to `~/.local/bin` and adds ClipSync
+to your app menu, without root. The archives need glibc 2.35 or newer and
+OpenSSL 3 (`libssl3` on Debian and Ubuntu), which Ubuntu 22.04, Debian 12 and
+current Arch Linux meet.
+
+Then open ClipSync (or run `clipsync tui`) on each computer and
+[pair them with a code](docs/COMPANION.md#pair-two-computers). Check a download
+with `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS) or
+`sha256sum -c SHA256SUMS --ignore-missing` (Linux).
+
+### Build from source
+
+To build an installable macOS app or Linux desktop package from this checkout,
+use Rust 1.95 or newer and `just`:
+
+```sh
+just companion-package
+```
+
+This packages the desktop app with a matching CLI and TUI, labeled
+`UNSIGNED-DEVELOPMENT`. Follow the
+[platform installation steps](docs/COMPANION.md#install-from-a-local-package)
+to install it and complete setup. On macOS, open **ClipSync.app**; on Linux,
+launch **ClipSync** from the app menu. Run `clipsync tui` for the terminal interface.
+
+For a development build without packaging:
+
+```sh
+cargo +1.95.0 build --locked --workspace --features tui
+./target/debug/clipsync-desktop
+./target/debug/clipsync tui
+```
+
+Maintainers cut releases with `just companion-release`; see the
+[release checklist](docs/RELEASE_CHECKLIST.md).
+
 ## Current scope
 
 - Plain text up to 5 MiB; automatic polling every 250 ms.
@@ -89,31 +153,11 @@ Discovery alone never authorizes a device. See
 
 *Pairing two isolated fixtures in `clipsync tui`. Re-record with `just demo-tui-pairing` (macOS).*
 
-To build an installable macOS app or Linux desktop package from this checkout,
-use Rust 1.95 or newer and `just`:
-
-```sh
-just companion-package
-```
-
-This packages the desktop app with a matching CLI and TUI. Follow the
-[platform installation steps](docs/COMPANION.md#install-from-a-local-package)
-to install it and complete setup. On macOS, open **ClipSync.app**; on Linux,
-launch **ClipSync** from the app menu. Run `clipsync tui` for the terminal interface.
-
-For a development build without packaging:
-
-```sh
-cargo +1.95.0 build --locked --workspace --features tui
-./target/debug/clipsync-desktop
-./target/debug/clipsync tui
-```
-
 Existing configurations are inspected before changes. If multiple configurations
 conflict, choose one explicitly. See [companion setup, packaging and recovery](docs/COMPANION.md).
 See [verification and release gates](docs/COMPANION_ACCEPTANCE.md) for the isolated checks.
-These are development builds; public macOS signing/notarization and physical
-login/logout and sleep/wake acceptance remain release gates.
+Release builds for macOS are not notarized by Apple, and physical login/logout
+and sleep/wake acceptance is still in progress.
 
 ## CLI install and pair
 

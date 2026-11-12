@@ -15,6 +15,7 @@ TARGET_DIR="$(clipsync_package_target_dir)"
 LABEL="$(clipsync_package_artifact_label_unsigned)"
 SKIP_BUILD="${CLIPSYNC_PACKAGE_SKIP_BUILD:-0}"
 HOST_OS="$(uname -s)"
+clipsync_package_require_release_inputs
 
 # Host guard: never package Darwin Mach-O (or other) as a Linux archive unless
 # an explicit fixture/test mode is opted in with override binaries.
@@ -27,8 +28,12 @@ if [[ "$HOST_OS" != "Linux" ]]; then
 fi
 
 BUNDLE_NAME="clipsync-companion-${VERSION}-${ARCH}"
-BUNDLE_DIR="$DIST/$BUNDLE_NAME"
 ARCHIVE_NAME="${BUNDLE_NAME}-${LABEL}.tar.gz"
+if clipsync_package_release_mode; then
+  BUNDLE_NAME="clipsync-${VERSION}-linux-${ARCH}"
+  ARCHIVE_NAME="${BUNDLE_NAME}.tar.gz"
+fi
+BUNDLE_DIR="$DIST/$BUNDLE_NAME"
 ARCHIVE_PATH="$DIST/$ARCHIVE_NAME"
 
 mkdir -p "$DIST"
@@ -37,8 +42,9 @@ if [[ "$SKIP_BUILD" != "1" ]]; then
   bash "$SCRIPT_DIR/build-binaries.sh" >/dev/null
 fi
 
-CLI_BIN="${CLIPSYNC_PACKAGE_CLI_BIN:-$TARGET_DIR/release/clipsync}"
-GUI_BIN="${CLIPSYNC_PACKAGE_GUI_BIN:-$TARGET_DIR/release/clipsync-desktop}"
+BIN_DIR="$(clipsync_package_release_bin_dir)"
+CLI_BIN="${CLIPSYNC_PACKAGE_CLI_BIN:-$BIN_DIR/clipsync}"
+GUI_BIN="${CLIPSYNC_PACKAGE_GUI_BIN:-$BIN_DIR/clipsync-desktop}"
 [[ -f "$CLI_BIN" ]] || clipsync_package_die "CLI binary missing: $CLI_BIN"
 [[ -f "$GUI_BIN" ]] || clipsync_package_die "GUI binary missing: $GUI_BIN"
 
@@ -156,11 +162,20 @@ VERSION_SAFE="$(clipsync_json_escape "$VERSION")"
 ARCH_SAFE="$(clipsync_json_escape "$ARCH")"
 LABEL_SAFE="$(clipsync_json_escape "$LABEL")"
 
-cat >"$BUNDLE_DIR/share/doc/clipsync/README-${LABEL}.txt" <<EOF
-ClipSync companion ${VERSION} (${ARCH}) — ${LABEL}
+README_FILE="$BUNDLE_DIR/share/doc/clipsync/README-${LABEL}.txt"
+README_HEADER="ClipSync companion ${VERSION} (${ARCH}) — ${LABEL}
 ${FIXTURE_NOTE}
 
-Not a distro package and not a public signed release.
+Not a distro package and not a public signed release."
+if clipsync_package_release_mode; then
+  README_FILE="$BUNDLE_DIR/share/doc/clipsync/README.txt"
+  README_HEADER="ClipSync ${VERSION} for Linux (${ARCH})
+
+Not a distro package. The archive is not signed; check it against SHA256SUMS
+from the release page."
+fi
+cat >"$README_FILE" <<EOF
+${README_HEADER}
 Runtime libraries (e.g. libxkbcommon-x11 on X11) must be provided by the system;
 see docs/COMPANION.md.
 
@@ -458,6 +473,50 @@ if clipsync_package_fixture_mode; then
   FIXTURE_JSON=true
   FEATURES_VERIFIED=false
 fi
+
+# Highest GLIBC version either binary requires (.gnu.version_r), and its shared libraries.
+release_glibc_required() {
+  local bin
+  command -v readelf >/dev/null 2>&1 || clipsync_package_die "readelf is required for release builds"
+  for bin in "$BUNDLE_DIR/bin/clipsync" "$BUNDLE_DIR/bin/clipsync-desktop"; do
+    readelf -V -W "$bin" | sed -n 's/.*Name: GLIBC_\([0-9][0-9.]*\).*/\1/p'
+  done | sort -uV | tail -1
+}
+release_needed_json() {
+  local bin
+  for bin in "$BUNDLE_DIR/bin/clipsync" "$BUNDLE_DIR/bin/clipsync-desktop"; do
+    readelf -d "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'
+  done | sort -u | sed 's/.*/"&"/' | paste -sd, -
+}
+
+if clipsync_package_release_mode; then
+GLIBC_REQUIRED="$(release_glibc_required)"
+[[ -n "$GLIBC_REQUIRED" ]] || clipsync_package_die "could not determine the required glibc version"
+cat >"$MANIFEST" <<EOF
+{
+  "release_build": true,
+  "version": "$VERSION_SAFE",
+  "os": "linux",
+  "arch": "$ARCH_SAFE",
+  "git": "$(clipsync_json_escape "$(clipsync_package_git_commit)")",
+  "signing": "unsigned",
+  "notarized": false,
+  "public_release_ready": false,
+  "fixture_mode": false,
+  "features_verified": true,
+  "glibc_required": "$(clipsync_json_escape "$GLIBC_REQUIRED")",
+  "needed_libraries": [$(release_needed_json)],
+  "bundle": "$(clipsync_json_escape "$BUNDLE_NAME")",
+  "archive": "$(clipsync_json_escape "$ARCHIVE_NAME")",
+  "linux_layout": {
+    "cli": "bin/clipsync",
+    "gui": "bin/clipsync-desktop",
+    "installer": "install-user.sh",
+    "terminal_free_entrypoint": "ClipSync-Install.desktop"
+  }
+}
+EOF
+else
 cat >"$MANIFEST" <<EOF
 {
   "version": "$VERSION_SAFE",
@@ -479,8 +538,13 @@ cat >"$MANIFEST" <<EOF
   "notes": "ClipSync-Install.desktop uses %k (not relative Exec or package-time absolute paths). Raw .sh double-click is not a supported install UX."
 }
 EOF
+fi
 
-clipsync_package_log "Linux package complete (unsigned development archive)"
+if clipsync_package_release_mode; then
+  clipsync_package_log "Linux release archive complete (glibc >= ${GLIBC_REQUIRED})"
+else
+  clipsync_package_log "Linux package complete (unsigned development archive)"
+fi
 clipsync_package_log "  bundle: $BUNDLE_DIR"
 clipsync_package_log "  archive: $ARCHIVE_PATH"
 clipsync_package_log "  manifest: $MANIFEST"
