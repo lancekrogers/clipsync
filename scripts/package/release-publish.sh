@@ -1,27 +1,34 @@
 #!/usr/bin/env bash
-# Upload a staged release (release-stage.sh) as a DRAFT GitHub release.
-# Publishing the draft, which creates the tag, stays a manual step; it starts
-# the Release packages workflow, which updates the Homebrew tap and the AUR.
+# Publish a staged release (release-stage.sh) on GitHub. Publishing creates the
+# tag and starts the Release packages workflow, which updates the Homebrew tap
+# and the AUR.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=release-lib.sh
 source "$SCRIPT_DIR/release-lib.sh"
 
+DRAFT_ONLY=0
 case "${1:-}" in
   "") ;;
+  --draft) DRAFT_ONLY=1 ;;
   -h|--help)
     cat <<EOF
-Usage: release-publish.sh
+Usage: release-publish.sh [--draft]
 
-Creates a draft GitHub release for the version staged in dist/release/v<version>.
-Refuses unless the staged files still match release.json and SHA256SUMS, quality
-gates ran, HEAD is the staged commit, and the tag and release do not exist yet.
+Uploads the version staged in dist/release/v<version> as a draft GitHub release,
+then publishes it, which creates the tag. Refuses unless the staged files still
+match release.json and SHA256SUMS, quality gates ran, HEAD is the staged commit,
+and the tag and release do not exist yet.
+
+  --draft   Stop at the draft so it can be reviewed; publish it later with
+            gh release edit v<version> --draft=false.
 EOF
     exit 0
     ;;
   *) clipsync_release_die "unknown argument: $1" ;;
 esac
+[[ $# -le 1 ]] || clipsync_release_die "unexpected arguments: $*"
 
 clipsync_release_require_tools git gh python3
 
@@ -137,6 +144,8 @@ done <<<"$ASSETS_LIST"
 # The Release packages workflow builds the cask and AUR updates from these two.
 UPLOADS+=("$STAGE/clipsync.rb" "$MANIFEST")
 
+# Upload everything to a draft first: the workflow starts the moment the release
+# is published and needs every asset in place.
 clipsync_release_log "creating DRAFT release $TAG in $SLUG at $COMMIT"
 URL="$(gh release create "$TAG" \
   --repo "$SLUG" \
@@ -147,11 +156,19 @@ URL="$(gh release create "$TAG" \
   "${UPLOADS[@]}")" || clipsync_release_die "gh release create failed; check the Releases page for a partial draft before retrying"
 
 clipsync_release_log "draft created: $URL"
-cat <<EOF
+if [[ "$DRAFT_ONLY" == 1 ]]; then
+  cat <<EOF
 [release] Nothing is public yet: the tag $TAG does not exist until the draft is published.
-[release] Review the draft, then publish it with either:
+[release] Review the draft, then publish it with:
 [release]   gh release edit $TAG --repo $SLUG --draft=false
-[release]   or "Publish release" on $URL
-[release] Publishing starts the Release packages workflow, which updates the Homebrew
-[release] cask and the AUR package. Check it with: gh run list --workflow release-packages.yml
+EOF
+  exit 0
+fi
+
+gh release edit "$TAG" --repo "$SLUG" --draft=false >/dev/null \
+  || clipsync_release_die "the draft is uploaded but publishing failed; retry with: gh release edit $TAG --repo $SLUG --draft=false"
+clipsync_release_log "published $TAG: https://github.com/$SLUG/releases/tag/$TAG"
+cat <<EOF
+[release] The Release packages workflow is now updating the Homebrew cask and the AUR.
+[release] Watch it with: gh run list --repo $SLUG --workflow release-packages.yml
 EOF
