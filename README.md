@@ -41,7 +41,11 @@ this once. Alternatively, run
 `xattr -dr com.apple.quarantine /Applications/ClipSync.app` before the first
 launch. The Homebrew cask does this for you.
 
-**Linux.** Unpack the archive for your architecture and run its installer:
+**Arch Linux.** Install [`clipsync-bin`](https://aur.archlinux.org/packages/clipsync-bin)
+from the AUR, for example with `yay -S clipsync-bin`. It installs the release
+binaries to `/usr/bin` and adds ClipSync to your app menu.
+
+**Other Linux.** Unpack the archive for your architecture and run its installer:
 
 ```sh
 tar -xzf clipsync-<version>-linux-x86_64.tar.gz
@@ -51,8 +55,8 @@ cd clipsync-<version>-linux-x86_64
 
 It installs `clipsync` and `clipsync-desktop` to `~/.local/bin` and adds ClipSync
 to your app menu, without root. The archives need glibc 2.35 or newer and
-OpenSSL 3 (`libssl3` on Debian and Ubuntu), which Ubuntu 22.04, Debian 12 and
-current Arch Linux meet.
+OpenSSL 3 (`libssl3` on Debian and Ubuntu, `openssl-3` on Arch Linux), so they
+run on Ubuntu 22.04, Debian 12 and current Arch Linux.
 
 Then open ClipSync (or run `clipsync tui`) on each computer and
 [pair them with a code](docs/COMPANION.md#pair-two-computers). Check a download

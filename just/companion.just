@@ -66,3 +66,10 @@ companion-release-publish:
 # After the release is published, push the staged cask to the Homebrew tap.
 companion-release-tap:
   ./scripts/package_companion.sh release-tap
+
+# --check builds and installs the package in an Arch Linux container from the staged archives
+# and pushes nothing. Without it, refuses until the release is published and its archives match
+# the staged checksums, then pushes. CLIPSYNC_AUR_SSH_KEY picks the AUR key.
+# Test the clipsync-bin AUR package in Arch Linux, then push it to the AUR.
+companion-release-aur *ARGS:
+  ./scripts/package_companion.sh release-aur {{ARGS}}

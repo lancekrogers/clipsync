@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Isolated tests for release-stage.sh, release-publish.sh and release-tap.sh.
+# Isolated tests for release-stage.sh, release-publish.sh, release-tap.sh and
+# release-aur.sh.
 # A throwaway git repo with a local bare origin, isolated git config, and stub
 # gh/cargo/docker/curl/codesign/hdiutil on PATH: nothing reaches GitHub and
 # nothing is built.
@@ -26,7 +27,8 @@ unset CLIPSYNC_CODESIGN_IDENTITY CLIPSYNC_NOTARY_PROFILE CLIPSYNC_NOTARY_APPLE_I
   CLIPSYNC_NOTARY_TEAM_ID CLIPSYNC_NOTARY_PASSWORD CLIPSYNC_PACKAGE_FIXTURE_MODE \
   CLIPSYNC_PACKAGE_SKIP_BUILD CLIPSYNC_PACKAGE_CLI_BIN CLIPSYNC_PACKAGE_GUI_BIN \
   CLIPSYNC_PACKAGE_FORCE CLIPSYNC_PACKAGE_DIST CLIPSYNC_RELEASE_ROOT CLIPSYNC_TAP_URL \
-  CLIPSYNC_TAP_REPO CLIPSYNC_RELEASE_LINUX_ARCHES CLIPSYNC_RUSTUP_TOOLCHAIN
+  CLIPSYNC_TAP_REPO CLIPSYNC_RELEASE_LINUX_ARCHES CLIPSYNC_RUSTUP_TOOLCHAIN \
+  CLIPSYNC_AUR_URL CLIPSYNC_AUR_SSH_KEY CLIPSYNC_AUR_MAINTAINER CLIPSYNC_AUR_IMAGE
 cat >"$TMP/gitconfig" <<EOF
 [user]
 	name = Release Test
@@ -88,10 +90,46 @@ while [[ $# -gt 0 ]]; do
 done
 printf '%s\n' "$url" >>"$STUB_LOGS/curl.log"
 [[ "${STUB_CURL_FAIL:-0}" == 1 ]] && exit 22
-cp "$STUB_CURL_SOURCE" "$out"
+if [[ -n "${STUB_CURL_DIR:-}" ]]; then
+  cp "$STUB_CURL_DIR/${url##*/}" "$out"
+else
+  cp "$STUB_CURL_SOURCE" "$out"
+fi
 EOS
 
-for tool in docker codesign hdiutil; do
+# docker refuses unless STUB_DOCKER_AUR=1, which fakes the Arch Linux check
+# container: each create gets its own directory, and start writes a .SRCINFO.
+cat >"$STUBS/docker" <<'EOS'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$STUB_LOGS/docker.log"
+if [[ "${STUB_DOCKER_AUR:-0}" != 1 ]]; then
+  echo "docker must not be reached in release tests" >&2
+  exit 97
+fi
+box_of() { printf '%s/container-%s' "$STUB_LOGS" "${1#aur-check-}"; }
+case "${1:-}" in
+  create)
+    n=$(($(cat "$STUB_LOGS/docker.count" 2>/dev/null || echo 0) + 1))
+    echo "$n" >"$STUB_LOGS/docker.count"
+    mkdir -p "$(box_of "$n")"
+    echo "aur-check-$n" ;;
+  cp)
+    if [[ "$2" == aur-check-*:* ]]; then
+      cp "$(box_of "${2%%:*}")${2#*:}" "$3"
+    else
+      cp -R "$2" "$(box_of "${3%%:*}")${3#*:}"
+    fi ;;
+  start)
+    box="$(box_of "$3")"
+    if [[ "${STUB_DOCKER_START_FAIL:-0}" == 1 ]]; then echo "[aur-check] FAILED: stub" >&2; exit 1; fi
+    pkgver="$(sed -n 's/^pkgver=//p' "$box/work/pkg/PKGBUILD")"
+    printf 'pkgbase = clipsync-bin\n\tpkgver = %s\n\tpkgrel = 1\n' "$pkgver" >"$box/work/pkg/.SRCINFO"
+    cksum <"$box/work/pkg/PKGBUILD" >>"$box/work/pkg/.SRCINFO" ;;
+  rm) ;;
+  *) echo "unexpected docker call: $*" >&2; exit 99 ;;
+esac
+EOS
+for tool in codesign hdiutil; do
   cat >"$STUBS/$tool" <<EOS
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >>"\$STUB_LOGS/$tool.log"
@@ -126,6 +164,8 @@ name = "clipsync-desktop"
 version = "0.1.0"
 EOF
 printf 'dist/\ntarget/\n' >"$REPO/.gitignore"
+printf 'MIT fixture license\n' >"$REPO/LICENSE-MIT"
+printf 'Apache fixture license\n' >"$REPO/LICENSE-APACHE"
 git -C "$REPO" add -A
 git -C "$REPO" commit -q -m "fixture"
 git -C "$REPO" remote add origin "$ORIGIN"
@@ -301,17 +341,21 @@ X86="clipsync-0.1.0-linux-x86_64.tar.gz"
 ARM="clipsync-0.1.0-linux-aarch64.tar.gz"
 STAGE_N=0
 
-# make_stage [gates] [fixture_mode]: fresh staged release for the current HEAD.
+# make_stage [gates] [fixture_mode] [linux arches]: fresh staged release for the current HEAD.
 make_stage() {
-  local gates="${1:-passed}" fixture="${2:-false}" stage
+  local gates="${1:-passed}" fixture="${2:-false}" arches="${3:-x86_64 aarch64}" stage arch
+  local names=("$DMG") linux=()
   STAGE_N=$((STAGE_N + 1))
   export CLIPSYNC_RELEASE_ROOT="$TMP/stages/$STAGE_N"
   stage="$CLIPSYNC_RELEASE_ROOT/v0.1.0"
   mkdir -p "$stage/assets"
   printf 'fake disk image %s\n' "$STAGE_N" >"$stage/assets/$DMG"
-  printf 'fake x86_64 archive\n' >"$stage/assets/$X86"
-  printf 'fake aarch64 archive\n' >"$stage/assets/$ARM"
-  (cd "$stage/assets" && shasum -a 256 "$DMG" "$X86" "$ARM" >SHA256SUMS)
+  for arch in $arches; do
+    printf 'fake %s archive\n' "$arch" >"$stage/assets/clipsync-0.1.0-linux-$arch.tar.gz"
+    names+=("clipsync-0.1.0-linux-$arch.tar.gz")
+    linux+=(--asset "clipsync-0.1.0-linux-$arch.tar.gz=linux:$arch")
+  done
+  (cd "$stage/assets" && shasum -a 256 "${names[@]}" >SHA256SUMS)
   python3 -I "$RENDER" template "$REPO/scripts/package/clipsync.rb.in" "$stage/clipsync.rb" \
     --set VERSION=0.1.0 --set "DMG_SHA256=$(shasum -a 256 "$stage/assets/$DMG" | awk '{print $1}')" \
     --set REPO=example/clipsync --set 'DMG_URL_NAME=ClipSync-#{version}-macos-arm64-unsigned.dmg' \
@@ -324,8 +368,7 @@ make_stage() {
     --field notes=RELEASE_NOTES.md --field cask=clipsync.rb \
     --field "cask_sha256=$(shasum -a 256 "$stage/clipsync.rb" | awk '{print $1}')" \
     --json-field release_build=true --json-field "fixture_mode=$fixture" --json-field notarized=false \
-    --asset "$DMG=macos:arm64" --asset "$X86=linux:x86_64" --asset "$ARM=linux:aarch64" \
-    --asset "SHA256SUMS=any:any"
+    --asset "$DMG=macos:arm64" "${linux[@]}" --asset "SHA256SUMS=any:any"
   STAGE="$stage"
 }
 
@@ -545,6 +588,143 @@ else
 fi
 git -C "$REPO" push -q origin :refs/tags/v0.1.0
 unset CLIPSYNC_TAP_URL STUB_CURL_SOURCE CLIPSYNC_RELEASE_ROOT
+
+# ===================== AUR package =====================
+AUR_SH="$REPO/scripts/package/release-aur.sh"
+AUR="$TMP/aur.git"
+git init -q --bare "$AUR"
+export CLIPSYNC_AUR_URL="file://$AUR" STUB_DOCKER_AUR=1
+aur_commits() { git --git-dir="$AUR" rev-list --count master 2>/dev/null || echo 0; }
+sha() { shasum -a 256 "$1" | awk '{print $1}'; }
+# pkgname, pkgver, arch, checksums and the x86_64 URL, read the way makepkg reads them.
+pkgbuild_fields() {
+  bash -c 'set -eu; source "$1"; printf "%s\n" "$pkgname" "$pkgver" "${arch[*]}" "${sha256sums[*]}" \
+    "${sha256sums_x86_64[*]}" "${sha256sums_aarch64[*]:-none}" "${source_x86_64[*]}"' _ "$1"
+}
+last_box() { printf '%s/container-%s/work/pkg' "$LOGS" "$(cat "$LOGS/docker.count")"; }
+
+make_stage
+PUBLIC="$TMP/public"
+mkdir -p "$PUBLIC"
+cp "$STAGE/assets/$X86" "$STAGE/assets/$ARM" "$REPO/LICENSE-MIT" "$REPO/LICENSE-APACHE" "$PUBLIC/"
+export STUB_CURL_DIR="$PUBLIC"
+: >"$LOGS/curl.log"
+: >"$LOGS/gh.log"
+
+expect_success "aur --check builds the package before the release is public" bash "$AUR_SH" --check
+if [[ ! -s "$LOGS/curl.log" && ! -s "$LOGS/gh.log" && "$(aur_commits)" == 0 ]]; then
+  pass "aur --check contacts neither GitHub nor the AUR"
+else
+  fail "aur --check reached GitHub or the AUR"
+fi
+EXPECTED_FIELDS="clipsync-bin
+0.1.0
+x86_64 aarch64
+$(sha "$REPO/LICENSE-MIT") $(sha "$REPO/LICENSE-APACHE")
+$(sha "$STAGE/assets/$X86")
+$(sha "$STAGE/assets/$ARM")
+https://github.com/example/clipsync/releases/download/v0.1.0/$X86"
+if [[ "$(pkgbuild_fields "$STAGE/aur/PKGBUILD")" == "$EXPECTED_FIELDS" ]]; then
+  pass "PKGBUILD carries the staged version, arches and checksums"
+else
+  fail "PKGBUILD fields differ:"
+  pkgbuild_fields "$STAGE/aur/PKGBUILD" | sed 's/^/    /' >&2
+fi
+if grep -qx '# Maintainer: Obedience Corp <contact@obediencecorp.com>' "$STAGE/aur/PKGBUILD" \
+  && grep -qxF '	pkgver = 0.1.0' "$STAGE/aur/.SRCINFO"; then
+  pass "aur --check writes PKGBUILD and .SRCINFO to the stage"
+else
+  fail "staged PKGBUILD or .SRCINFO is wrong"
+fi
+if cmp -s "$(last_box)/$X86" "$STAGE/assets/$X86" \
+  && cmp -s "$(last_box)/clipsync-bin-0.1.0-LICENSE-MIT" "$REPO/LICENSE-MIT"; then
+  pass "aur --check hands the container the staged archives and licenses"
+else
+  fail "the check container did not get the staged sources"
+fi
+
+make_stage passed false x86_64
+expect_success "aur --check handles a release without aarch64" bash "$AUR_SH" --check
+if [[ "$(pkgbuild_fields "$STAGE/aur/PKGBUILD" | sed -n '3p;6p')" == $'x86_64\nnone' ]] \
+  && ! grep -q aarch64 "$STAGE/aur/PKGBUILD"; then
+  pass "an x86_64-only release renders an x86_64-only PKGBUILD"
+else
+  fail "x86_64-only PKGBUILD still mentions aarch64"
+fi
+
+make_stage skipped
+expect_refusal "aur refuses a stage that skipped the quality gates" "does not record passed quality gates" \
+  env STUB_GH_VIEW_DRAFT=false bash "$AUR_SH"
+
+make_stage
+expect_refusal "aur refuses a malformed maintainer" "must look like 'Name <email>'" \
+  env CLIPSYNC_AUR_MAINTAINER=nobody bash "$AUR_SH" --check
+printf 'tampered\n' >>"$STAGE/assets/$X86"
+expect_refusal "aur refuses an archive changed after staging" "changed after staging" bash "$AUR_SH" --check
+make_stage
+: >"$LOGS/curl.log"
+expect_refusal "aur refuses a draft release" "still a draft" env STUB_GH_VIEW_DRAFT=true bash "$AUR_SH"
+expect_refusal "aur refuses a missing release" "no GitHub release v0.1.0" bash "$AUR_SH"
+expect_refusal "aur refuses when the release tag is not on origin" "points at 'nothing'" \
+  env STUB_GH_VIEW_DRAFT=false bash "$AUR_SH"
+git -C "$REPO" push -q origin "$(git -C "$REPO" rev-parse HEAD~1):refs/tags/v0.1.0"
+expect_refusal "aur refuses a tag that points at another commit" "not the staged commit" \
+  env STUB_GH_VIEW_DRAFT=false bash "$AUR_SH"
+git -C "$REPO" push -q --force origin "$(git -C "$REPO" rev-parse HEAD):refs/tags/v0.1.0"
+if [[ ! -s "$LOGS/curl.log" ]]; then pass "aur downloads nothing before the release is public"; else fail "aur downloaded while unpublished"; fi
+
+OTHER_PUBLIC="$TMP/other-public"
+mkdir -p "$OTHER_PUBLIC"
+cp "$PUBLIC"/* "$OTHER_PUBLIC/"
+printf 'different bytes\n' >"$OTHER_PUBLIC/$ARM"
+expect_refusal "aur refuses a public archive with a different checksum" "does not match the staged release" \
+  env STUB_GH_VIEW_DRAFT=false STUB_CURL_DIR="$OTHER_PUBLIC" bash "$AUR_SH"
+cp "$PUBLIC"/* "$OTHER_PUBLIC/"
+printf 'edited\n' >>"$OTHER_PUBLIC/LICENSE-MIT"
+expect_refusal "aur refuses a public license that differs from the tagged commit" "does not match the staged release" \
+  env STUB_GH_VIEW_DRAFT=false STUB_CURL_DIR="$OTHER_PUBLIC" bash "$AUR_SH"
+expect_refusal "aur refuses when a public file cannot be downloaded" "could not download" \
+  env STUB_GH_VIEW_DRAFT=false STUB_CURL_FAIL=1 bash "$AUR_SH"
+expect_refusal "aur pushes nothing when the Arch Linux check fails" "failed its Arch Linux check" \
+  env STUB_GH_VIEW_DRAFT=false STUB_DOCKER_START_FAIL=1 bash "$AUR_SH"
+if [[ "$(aur_commits)" == 0 ]]; then pass "refused aur runs leave the AUR untouched"; else fail "a refused aur run pushed"; fi
+
+: >"$LOGS/curl.log"
+expect_success "aur pushes once the release is public" env STUB_GH_VIEW_DRAFT=false bash "$AUR_SH"
+if grep -qxF "https://github.com/example/clipsync/releases/download/v0.1.0/$X86" "$LOGS/curl.log" \
+  && grep -qxF "https://raw.githubusercontent.com/example/clipsync/v0.1.0/LICENSE-MIT" "$LOGS/curl.log"; then
+  pass "aur checks the public archive and license URLs"
+else
+  fail "aur downloaded from unexpected URLs"
+fi
+if [[ ! -e "$(last_box)/$X86" ]]; then
+  pass "a pushing run leaves the downloads to makepkg"
+else
+  fail "a pushing run handed makepkg local archives"
+fi
+if [[ "$(git --git-dir="$AUR" log -1 --format='%s|%an <%ae>|%cn <%ce>' master)" \
+  == "Update to 0.1.0|Obedience Corp <contact@obediencecorp.com>|Obedience Corp <contact@obediencecorp.com>" ]]; then
+  pass "AUR commit uses the maintainer identity, not the local git identity"
+else
+  fail "AUR commit identity: $(git --git-dir="$AUR" log -1 --format='%s|%an <%ae>|%cn <%ce>' master)"
+fi
+if git --git-dir="$AUR" show master:PKGBUILD | cmp -s - "$STAGE/aur/PKGBUILD" \
+  && git --git-dir="$AUR" show master:.SRCINFO | cmp -s - "$STAGE/aur/.SRCINFO"; then
+  pass "AUR master has the tested PKGBUILD and .SRCINFO"
+else
+  fail "AUR content differs from the tested files"
+fi
+AFTER_COUNT="$(aur_commits)"
+expect_success "aur rerun is a no-op" env STUB_GH_VIEW_DRAFT=false bash "$AUR_SH"
+if [[ "$(aur_commits)" == "$AFTER_COUNT" && "$LAST_OUT" == *"nothing to push"* ]]; then
+  pass "aur rerun adds no commit"
+else
+  fail "aur rerun changed the AUR"
+fi
+expect_refusal "aur refuses to replace the same version with different content" "needs a pkgrel bump" \
+  env STUB_GH_VIEW_DRAFT=false CLIPSYNC_AUR_MAINTAINER="Someone Else <else@example.invalid>" bash "$AUR_SH"
+git -C "$REPO" push -q origin :refs/tags/v0.1.0
+unset CLIPSYNC_AUR_URL STUB_DOCKER_AUR STUB_CURL_DIR CLIPSYNC_RELEASE_ROOT
 
 # ===================== release-mode packaging guards =====================
 FIX_BIN="$TMP/fixture-bin"

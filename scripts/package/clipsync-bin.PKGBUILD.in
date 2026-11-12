@@ -1,0 +1,34 @@
+# Maintainer: @MAINTAINER@
+
+pkgname=clipsync-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='Clipboard sync between trusted Mac and Linux computers'
+arch=('x86_64'@IF_AARCH64@ 'aarch64'@END_AARCH64@)
+url='https://github.com/@REPO@'
+license=('MIT OR Apache-2.0')
+depends=(@DEPENDS@)
+provides=('clipsync')
+conflicts=('clipsync')
+# Ship the exact binaries from the GitHub release.
+options=('!strip' '!debug')
+source=("${pkgname}-${pkgver}-LICENSE-MIT::https://raw.githubusercontent.com/@REPO@/v${pkgver}/LICENSE-MIT"
+        "${pkgname}-${pkgver}-LICENSE-APACHE::https://raw.githubusercontent.com/@REPO@/v${pkgver}/LICENSE-APACHE")
+source_x86_64=("https://github.com/@REPO@/releases/download/v${pkgver}/clipsync-${pkgver}-linux-x86_64.tar.gz")
+@IF_AARCH64@source_aarch64=("https://github.com/@REPO@/releases/download/v${pkgver}/clipsync-${pkgver}-linux-aarch64.tar.gz")
+@END_AARCH64@sha256sums=('@LICENSE_MIT_SHA256@'
+            '@LICENSE_APACHE_SHA256@')
+sha256sums_x86_64=('@X86_64_SHA256@')
+@IF_AARCH64@sha256sums_aarch64=('@AARCH64_SHA256@')
+@END_AARCH64@
+package() {
+  cd "clipsync-${pkgver}-linux-${CARCH}"
+  install -Dm755 bin/clipsync "${pkgdir}/usr/bin/clipsync"
+  install -Dm755 bin/clipsync-desktop "${pkgdir}/usr/bin/clipsync-desktop"
+  install -Dm644 share/icons/hicolor/scalable/apps/clipsync.svg \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/clipsync.svg"
+  sed 's|^Exec=.*|Exec=clipsync-desktop|' share/applications/clipsync.desktop.in >clipsync.desktop
+  install -Dm644 clipsync.desktop "${pkgdir}/usr/share/applications/clipsync.desktop"
+  install -Dm644 "${srcdir}/${pkgname}-${pkgver}-LICENSE-MIT" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-MIT"
+  install -Dm644 "${srcdir}/${pkgname}-${pkgver}-LICENSE-APACHE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-APACHE"
+}
