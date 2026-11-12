@@ -290,7 +290,7 @@ clipboard images converted to PNG. It does not sync copied files, RTF, or HTML.
 Copy an image in an application to sync it; `clipsync copy` takes a text
 argument and does not accept an image file. Image content is sent to trusted
 peers and encrypted in history. Sensitive-text filtering does not inspect text
-inside images. See the [README](../README.md#current-scope) for image limits and
+inside images. See the [README](LIMITS.md) for image limits and
 the current Linux clipboard-write limitation.
 
 ### Configuration Profiles

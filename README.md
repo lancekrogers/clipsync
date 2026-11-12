@@ -1,51 +1,150 @@
-# ClipSync
-  <a href="https://github.com/Obedience-Corp/festival"><img src="https://img.shields.io/badge/built%20with-Festival-7c3aed.svg" alt="Built with Festival"></a>
-
-
-Your clipboard, everywhere. A **Rust desktop app, terminal UI, and CLI** for
-sharing text and image clipboards between trusted macOS and Linux computers.
-Browse saved copies, manage devices, and pause syncing from either companion.
-
-> **Experimental.** Plain-text sync is working in a macOS ↔ Arch Linux setup, with authenticated LAN connections and automatic reconnection after service restarts verified. Broader desktop compatibility, sleep/wake, and login/logout recovery are still being validated.
-
 <p align="center">
-  <img src="docs/assets/desktop-history.png" width="960" alt="ClipSync desktop app on macOS: searchable clipboard history, a selected note, and the Copy text button">
+  <img src="assets/clipsync.svg" width="88" alt="ClipSync logo">
 </p>
 
-*The running macOS app, showing sample clipboard history in an isolated test setup.*
+<h1 align="center">ClipSync</h1>
 
-ClipSync uses direct connections, local discovery, Ed25519 device identities, and mutually authenticated TLS 1.3. No cloud service is involved. Devices can connect directly over the LAN without Tailscale or an SSH session.
+<p align="center">
+  <strong>Your clipboard, everywhere.</strong><br>
+  Copy on one computer, paste on another. Text and images sync directly between<br>
+  your Mac and Linux machines, from a terminal UI, a desktop app or the command line.
+</p>
 
-Start with the [desktop and TUI guide](docs/COMPANION.md), or use the
-[CLI setup instructions](#cli-install-and-pair) below.
+<p align="center">
+  <a href="https://github.com/lancekrogers/clipsync/releases/latest"><img src="https://img.shields.io/github/v/release/lancekrogers/clipsync?label=release&color=1B4F72" alt="Latest release"></a>
+  <a href="https://aur.archlinux.org/packages/clipsync-bin"><img src="https://img.shields.io/aur/version/clipsync-bin?logo=archlinux&logoColor=white&color=1793D1&label=AUR" alt="AUR package"></a>
+  <a href="#macos"><img src="https://img.shields.io/badge/homebrew-lancekrogers%2Ftap-FBB040?logo=homebrew&logoColor=white" alt="Homebrew tap"></a>
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-5DADE2" alt="Platforms: macOS and Linux">
+  <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20or%20Apache--2.0-1ABC9C" alt="License: MIT or Apache-2.0"></a>
+  <a href="https://github.com/Obedience-Corp/festival"><img src="https://img.shields.io/badge/built%20with-Festival-7c3aed.svg" alt="Built with Festival"></a>
+</p>
 
-The repaired transport uses protocol **2.0.0**: update both devices together. It intentionally refuses the old plaintext protocol.
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#pair-two-computers">Pair</a> ·
+  <a href="#the-terminal-ui">Terminal UI</a> ·
+  <a href="#the-desktop-app">Desktop app</a> ·
+  <a href="#documentation">Docs</a>
+</p>
+
+<p align="center">
+  <img src="docs/assets/companion-tui-history-mac-arch.png" width="900" alt="ClipSync terminal companion History on a Mac connected to an Arch Linux desktop named archdtop: images, a link and shell commands copied on either computer, with a sharp preview of the selected screenshot">
+</p>
+
+<p align="center"><sub><code>clipsync tui</code> on a Mac connected to an Arch Linux desktop: everything copied on either computer, in one history.</sub></p>
+
+> [!NOTE]
+> **Experimental.** Text sync works between macOS and Arch Linux. Image sync,
+> broader desktop coverage, and sleep/wake and login/logout recovery are still
+> being validated. Install the same release on every computer.
+
+## Why ClipSync
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+**Terminal first**<br>
+`clipsync tui` shows your devices, your synced history with image previews,
+and settings, all from the keyboard.
+
+</td>
+<td width="50%" valign="top">
+
+**Text and images**<br>
+Copy text or a screenshot on one computer and paste it on the other.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**No cloud, no account**<br>
+Computers connect directly over your local network with mutually
+authenticated TLS 1.3.
+
+</td>
+<td valign="top">
+
+**Pair with a code**<br>
+Show a six-digit code on one computer and type it on the other. No Tailscale
+or SSH needed, and finding a device never trusts it.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+**One shared history**<br>
+Search it, copy an entry again, delete one or clear it all. Deletes apply on
+connected devices too.
+
+</td>
+<td valign="top">
+
+**Desktop app and CLI**<br>
+A desktop app and scriptable commands drive the same background service.
+
+</td>
+</tr>
+</table>
 
 ## Install
 
-Download ClipSync from [GitHub Releases](https://github.com/lancekrogers/clipsync/releases).
-Each release has a macOS disk image for Apple Silicon, Linux archives for x86_64
-and aarch64, a `SHA256SUMS` file and install steps in its notes. If no release
-is listed yet, [build from source](#build-from-source).
+Each [release](https://github.com/lancekrogers/clipsync/releases) has a macOS
+disk image for Apple Silicon and Linux archives for x86_64 and aarch64.
 
-**macOS (Apple Silicon).** With Homebrew, once the release is in the tap:
+### macOS
 
 ```sh
 brew install --cask lancekrogers/tap/clipsync
 ```
 
-Or open the disk image and drag ClipSync to Applications. Release builds are
-not notarized by Apple, so macOS blocks the first launch: click **Done**, open
-**System Settings → Privacy & Security** and click **Open Anyway**. You only do
-this once. Alternatively, run
-`xattr -dr com.apple.quarantine /Applications/ClipSync.app` before the first
-launch. The Homebrew cask does this for you.
+This installs ClipSync.app, puts `clipsync` on your PATH and clears the
+download quarantine flag, so the app opens without a Gatekeeper prompt.
 
-**Arch Linux.** Install [`clipsync-bin`](https://aur.archlinux.org/packages/clipsync-bin)
-from the AUR, for example with `yay -S clipsync-bin`. It installs the release
-binaries to `/usr/bin` and adds ClipSync to your app menu.
+<details>
+<summary>Without Homebrew</summary>
 
-**Other Linux.** Unpack the archive for your architecture and run its installer:
+<br>
+
+Open the disk image from the [latest release](https://github.com/lancekrogers/clipsync/releases/latest)
+and drag ClipSync to Applications. Release builds are not notarized by Apple,
+so macOS blocks the first launch: click **Done**, open **System Settings →
+Privacy & Security** and click **Open Anyway**. You only do this once. Or, before
+the first launch, run:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/ClipSync.app
+```
+
+The command-line tool is inside the app at
+`/Applications/ClipSync.app/Contents/MacOS/clipsync`.
+
+</details>
+
+### Arch Linux
+
+Install [`clipsync-bin`](https://aur.archlinux.org/packages/clipsync-bin) from
+the AUR with `yay` or any other AUR helper:
+
+```sh
+yay -S clipsync-bin
+```
+
+It installs the release binaries to `/usr/bin` and adds ClipSync to your app
+menu. Without an AUR helper:
+
+```sh
+git clone https://aur.archlinux.org/clipsync-bin.git
+cd clipsync-bin
+makepkg -si
+```
+
+### Other Linux
+
+Download the archive for your architecture from the
+[latest release](https://github.com/lancekrogers/clipsync/releases/latest), then:
 
 ```sh
 tar -xzf clipsync-<version>-linux-x86_64.tar.gz
@@ -53,241 +152,149 @@ cd clipsync-<version>-linux-x86_64
 ./install-user.sh
 ```
 
-It installs `clipsync` and `clipsync-desktop` to `~/.local/bin` and adds ClipSync
-to your app menu, without root. The archives need glibc 2.35 or newer and
-OpenSSL 3 (`libssl3` on Debian and Ubuntu, `openssl-3` on Arch Linux), so they
-run on Ubuntu 22.04, Debian 12 and current Arch Linux.
+It installs `clipsync` and `clipsync-desktop` to `~/.local/bin` and adds
+ClipSync to your app menu, without root. The archives need glibc 2.35 or newer
+and OpenSSL 3 (`libssl3` on Debian and Ubuntu, `openssl-3` on Arch Linux), so
+they run on Ubuntu 22.04, Debian 12 and current Arch Linux.
 
-Then open ClipSync (or run `clipsync tui`) on each computer and
-[pair them with a code](docs/COMPANION.md#pair-two-computers). Check a download
-with `shasum -a 256 -c SHA256SUMS --ignore-missing` (macOS) or
-`sha256sum -c SHA256SUMS --ignore-missing` (Linux).
+<details>
+<summary>Check a download</summary>
 
-### Build from source
+<br>
 
-To build an installable macOS app or Linux desktop package from this checkout,
-use Rust 1.95 or newer and `just`:
+In the folder that holds the download and `SHA256SUMS`:
 
 ```sh
-just companion-package
+shasum -a 256 -c SHA256SUMS --ignore-missing   # macOS
+sha256sum -c SHA256SUMS --ignore-missing       # Linux
 ```
 
-This packages the desktop app with a matching CLI and TUI, labeled
-`UNSIGNED-DEVELOPMENT`. Follow the
-[platform installation steps](docs/COMPANION.md#install-from-a-local-package)
-to install it and complete setup. On macOS, open **ClipSync.app**; on Linux,
-launch **ClipSync** from the app menu. Run `clipsync tui` for the terminal interface.
+</details>
 
-For a development build without packaging:
+### From source
+
+With Rust 1.95 or newer, this installs `clipsync` with the terminal UI to
+`~/.cargo/bin`:
+
+```sh
+cargo install --path . --locked --features tui   # or: just install
+```
+
+To build the desktop app too, run `just companion-package` and follow
+[install from a local package](docs/COMPANION.md#install-from-a-local-package).
+
+## Pair two computers
+
+Run `clipsync tui` on both computers and finish setup. Then:
+
+1. **On the first computer**, press `2` for Devices, then `e`. A six-digit code
+   appears.
+2. **On the second computer**, press `2`, then `f`, pick the first computer and
+   press `Enter`. Not listed? Press `m` and enter the address shown under the
+   code.
+3. **Type the code.** Both computers now list each other under
+   **Authorized devices**, and anything you copy on one shows up on the other.
+
+<p align="center">
+  <img src="docs/assets/companion-tui-pairing.gif" width="900" alt="Two ClipSync terminal companions side by side: Studio Mac shows a six-digit pairing code; Travel laptop finds it nearby, types the code, and both list each other under Authorized devices">
+</p>
+
+<p align="center"><sub>Pairing two isolated fixtures. Re-record with <code>just demo-tui-pairing</code> (macOS).</sub></p>
+
+Each code works once, and neither computer saves anything until the code is
+verified. Pairing uses TCP port 8485 and sync uses 8484. If a computer's
+firewall blocks them, as firewalld's default zone does on EndeavourOS, show the
+code on the other computer and type it on this one, or open both ports. See
+[when pairing fails](docs/COMPANION.md#pair-two-computers) for every error
+message and its fix.
+
+## The terminal UI
+
+`clipsync tui` has four sections: **Overview**, **Devices**, **History** and
+**Settings**. Switch with `1`–`4`.
+
+| Key | In History |
+|---|---|
+| `↑` `↓` | Select a copy |
+| `/` | Search |
+| `c` | Copy it again |
+| `d` / `D` | Delete one, or clear all. Both ask first and apply on connected devices, like `clipsync history delete` and `clear` |
+| `p` | Pause or resume syncing |
+| `q` | Quit the TUI; syncing keeps running |
+
+Selecting an image shows a preview: sharp in terminals with Kitty or Sixel
+graphics, and drawn with colored characters elsewhere. Set
+`CLIPSYNC_TUI_GRAPHICS=off` to force the character preview, or `NO_COLOR` for
+grayscale.
+
+<p align="center">
+  <img src="docs/assets/companion-tui.gif" width="900" alt="ClipSync terminal companion: Overview with a connected device, Devices, History with an image preview, copying a line from another device, search, and pause">
+</p>
+
+<p align="center"><sub>Overview, Devices and History against an isolated fixture. Re-record with <code>just demo-tui</code> (macOS).</sub></p>
+
+## The desktop app
+
+The desktop app has the same four sections and pairs the same way. It can
+also check your setup, start or stop the background service, and pause syncing.
+On macOS, open **ClipSync** from Applications; on Linux, launch it from the app
+menu.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/assets/desktop-history.png" alt="ClipSync desktop app on macOS: searchable clipboard history, a selected note, and the Copy text button"></td>
+<td width="50%"><img src="docs/assets/desktop-overview.png" alt="ClipSync desktop Overview showing service status, Pause syncing, Sync current copy, and Open clipboard history controls"></td>
+</tr>
+<tr>
+<td align="center"><sub>History</sub></td>
+<td align="center"><sub>Overview</sub></td>
+</tr>
+</table>
+
+<p align="center"><sub>Sample data in an isolated test setup.</sub></p>
+
+## How it works
+
+- A background service on each computer owns the clipboard. The terminal UI,
+  desktop app and `clipsync` commands all talk to it, so closing them leaves
+  syncing running.
+- Computers find each other with mDNS and connect directly over TCP with
+  mutually authenticated TLS 1.3 and Ed25519 device identities. No cloud
+  service is involved.
+- History contents are encrypted with AES-256-GCM; database metadata is not.
+
+Read the [security model](docs/SECURITY.md), including
+[what a stranger on the same network can and cannot do](docs/SECURITY.md#pairing-a-new-device),
+and [what syncs and its limits](docs/LIMITS.md).
+
+## Documentation
+
+| Guide | What's in it |
+|---|---|
+| [Desktop app and TUI](docs/COMPANION.md) | Local packages, pairing errors, upgrading, uninstalling |
+| [Command line and manual setup](docs/CLI.md) | `clipsync` commands, SSH-key setup, background services, troubleshooting, history recovery |
+| [What syncs](docs/LIMITS.md) | Supported clipboards, size limits, history retention |
+| [Security model](docs/SECURITY.md) | Pairing, transport, encryption and their limits |
+| [Verification](docs/COMPANION_ACCEPTANCE.md) | Isolated checks and release gates |
+| [Release checklist](docs/RELEASE_CHECKLIST.md) | Cutting a release |
+
+## Development
 
 ```sh
 cargo +1.95.0 build --locked --workspace --features tui
-./target/debug/clipsync-desktop
 ./target/debug/clipsync tui
-```
+./target/debug/clipsync-desktop
 
-Maintainers cut releases with `just companion-release`; see the
-[release checklist](docs/RELEASE_CHECKLIST.md).
-
-## Current scope
-
-- Plain text up to 5 MiB; automatic polling every 250 ms.
-- Image sync for PNG clipboard data on macOS, X11, and Wayland data-control; macOS TIFF clipboard images are converted to PNG. Image files copied as files are not synced.
-- macOS NSPasteboard, Linux X11, and Wayland compositors supporting data-control through arboard. Arboard can fall back to X11 where available.
-- Explicit peer authorization, automatic discovery, bounded reconnect backoff, stale/duplicate event rejection, and remote-update echo suppression.
-- The latest local event is retained in memory for newly connected sessions. Starting a daemon does not automatically broadcast pre-existing clipboard contents; use `sync` to request that.
-- AES-256-GCM encrypted history **contents**. Database metadata is not encrypted. The current retention limit is 20 entries.
-- Separate `status`, `peers`, and `sync` commands communicate with the daemon through a protected per-user Unix socket. `sync` reports **queued** peers, not confirmed remote application.
-
-RTF synchronization, global hotkeys, and primary-selection configuration are not supported by the repaired sync engine. Sensitive-content filtering is a heuristic and does not inspect text inside images; it is not a guarantee that every secret will be detected. Trusted peers receive copied images, and image history contents are encrypted like text history.
-
-Image sync is experimental. On Linux, a stalled image write may finish after its
-timeout and replace a newer clipboard copy. Native application paste and color
-handling still need broader testing. Images are limited by the configured byte
-limit and the receiving peer, with an additional maximum of 8,192 pixels per
-dimension and 16,777,216 pixels in total. The current queue budget also caps an
-encoded image to approximately 12.8 MiB even if `clipboard.max_size` is higher.
-
-The transport reserves frame capacity for each connection. With the default
-5 MiB clipboard limit, the default ten connections fit; raising
-`clipboard.max_size` to 50 MiB permits one connection at a time, including for
-text-only peers. The reservation controls admission, not total process memory.
-
-## Desktop and terminal companions
-
-The experimental Rust desktop app and `clipsync tui` share **Overview, Devices,
-History, and Settings**. History shows actual saved copies, their source and time;
-select one to read it and copy it again. The daemon remains the sole clipboard
-owner, so closing either interface leaves syncing running.
-
-In the TUI's History, `d` deletes the selected copy and `D` clears all history
-and the clipboard. Both ask for `y` first and, like `clipsync history delete`
-and `clipsync history clear`, also remove it on connected devices.
-
-In the TUI, selecting an image in History shows a color preview using terminal
-characters. With `NO_COLOR` set, the preview uses grayscale characters. Update
-both the TUI and its local daemon to use image previews. Terminals that support
-Kitty or Sixel graphics get a sharper preview; set `CLIPSYNC_TUI_GRAPHICS=off`
-to keep the character preview where a terminal reports graphics it cannot show.
-
-<p align="center">
-  <img src="docs/assets/companion-tui-history-mac-arch.png" width="960" alt="ClipSync terminal companion History on a Mac connected to an Arch Linux desktop named archdtop: images, a link and shell commands copied on either computer, with a sharp preview of the selected screenshot">
-</p>
-
-*Real use: History on a Mac connected to an Arch Linux desktop (`archdtop`), in a terminal with graphics support.*
-
-<p align="center">
-  <img src="docs/assets/companion-tui.gif" width="960" alt="ClipSync terminal companion: Overview with a connected device, Devices, History with an image preview, copying a line from another device, search, and pause">
-</p>
-
-*`clipsync tui` against an isolated fixture. Re-record with `just demo-tui` (macOS).*
-
-<p align="center">
-  <img src="docs/assets/desktop-overview.png" width="960" alt="ClipSync desktop Overview showing service status, Pause syncing, Sync current copy, and Open clipboard history controls">
-</p>
-
-*Overview in the same isolated setup, with the service running and no device connected.*
-
-The desktop uses native macOS window controls with a blue/teal interface. Both
-clients support setup inspection, user-service controls, pause/resume and device
-pairing. To pair, choose **Allow a new device** on one computer and type the
-six-digit code it shows on the other; it needs no Tailscale or SSH session. Each
-code works once, and neither computer saves anything until the code is verified.
-Discovery alone never authorizes a device. See
-[pairing two computers](docs/COMPANION.md#pair-two-computers) and
-[what a stranger on the same network can and cannot do](docs/SECURITY.md#pairing-a-new-device).
-
-<p align="center">
-  <img src="docs/assets/companion-tui-pairing.gif" width="960" alt="Two ClipSync terminal companions side by side: Studio Mac shows a six-digit pairing code; Travel laptop finds it nearby, types the code, and both list each other under Authorized devices">
-</p>
-
-*Pairing two isolated fixtures in `clipsync tui`. Re-record with `just demo-tui-pairing` (macOS).*
-
-Existing configurations are inspected before changes. If multiple configurations
-conflict, choose one explicitly. See [companion setup, packaging and recovery](docs/COMPANION.md).
-See [verification and release gates](docs/COMPANION_ACCEPTANCE.md) for the isolated checks.
-Release builds for macOS are not notarized by Apple, and physical login/logout
-and sleep/wake acceptance is still in progress.
-
-## CLI install and pair
-
-For a CLI-only installation, run the following from the repository checkout on
-each device with a current stable Rust toolchain. It installs `clipsync` with
-the terminal UI (`clipsync tui`) but not the desktop app; `just install` runs
-the same Cargo command.
-
-```sh
-cargo install --path . --locked --features tui
-export PATH="$HOME/.cargo/bin:$PATH"
-type -a clipsync
-clipsync version
-```
-
-Cargo installs to `~/.cargo/bin` by default. `cargo build --release` and `just release` only build; they do not replace an installed executable or restart a service. Older copies in `~/.local/bin` or `/usr/local/bin` can shadow a new installation. Check the executable path and build date on both devices; the version number alone may be unchanged.
-
-On Linux, install the native build dependencies (`pkg-config`, OpenSSL and X11/XCB development packages). See [the disposable test image](scripts/test/Dockerfile.repair) for a working Debian setup.
-
-Create a dedicated unencrypted Ed25519 identity on each device:
-
-```sh
-ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519_clipsync
-```
-
-ClipSync cannot unlock passphrase-protected identities. Keep the dedicated private key owner-readable only. Configure its path; do not replace an existing SSH key.
-
-Example `config.toml` (use a separate file on each device). Use a dedicated ClipSync authorization file containing only the devices that should receive clipboard contents; do not point it at your general SSH `authorized_keys`. When updating an existing setup, preserve its history database and key paths.
-
-The commands below use an explicit `--config` path so the daemon and CLI read the same configuration:
-
-```toml
-listen_addr = "0.0.0.0:8484"
-
-[auth]
-ssh_key = "~/.ssh/id_ed25519_clipsync"
-authorized_keys = "~/.config/clipsync/authorized_devices"
-
-[clipboard]
-history_db = "~/.local/share/clipsync/history.db"
-# Optional: only set for a NEW isolated store. Existing stores retain their old key location.
-# history_key = "/absolute/path/to/isolated/history.key"
-```
-
-Exchange only the `.pub` files through a trusted channel. Verify their fingerprints out of band (`ssh-keygen -lf peer.pub`), then authorize the other device on **both** sides:
-
-```sh
-clipsync --config /path/to/config.toml auth add /path/to/peer.pub --name desktop
-clipsync --config /path/to/config.toml auth list
-clipsync --config /path/to/config.toml start --foreground
-```
-
-The daemon does not prompt for trust on standard input. Discovery never grants authorization. A non-default port is advertised automatically.
-
-On each device, `status` and `peers` should show one authenticated peer for a two-device setup. Then copy ordinary text on the Mac and paste it on Linux, and repeat in reverse. A connected peer confirms the transport; the copy/paste check confirms that the desktop clipboard is working too.
-
-In another terminal, using the same configuration:
-
-```sh
-clipsync --config /path/to/config.toml status
-clipsync --config /path/to/config.toml peers
-clipsync --config /path/to/config.toml sync
-clipsync --config /path/to/config.toml history
-clipsync --config /path/to/config.toml copy "example text"
-clipsync --config /path/to/config.toml auth remove 'SHA256:fingerprint-from-auth-list'
-```
-
-On Linux, `copy` requires a running daemon with the same configuration. The daemon
-keeps ownership after the CLI exits; success confirms the local clipboard write.
-Sensitive-content filtering still controls whether that text enters history or
-is forwarded to another device. If the daemon is unavailable, `copy` fails
-without replacing the clipboard.
-
-Authorization is reloaded for new handshakes and checked during active traffic/heartbeats. Removing a key closes its session. Local `auth list` now uses standard OpenSSH fingerprints; pre-repair trust-cache fingerprints are not used to authorize the daemon.
-
-## Run in the background
-
-A macOS LaunchAgent and a Linux systemd **user** service have been verified together on a real LAN. Both must run as the logged-in desktop user, point at the updated executable, and use `start --foreground`. The old `--daemon` argument is unsupported. Automatic reconnection was verified after restarting each service.
-
-After foreground pairing works, stop those foreground instances before installing a background service. The [user installer](scripts/install_user.sh) installs to `~/.local/bin` and uses `${XDG_CONFIG_HOME:-~/.config}/clipsync/config.toml`. Put the validated configuration there first, preserving any existing history paths. From the checkout, use the binary just installed by Cargo:
-
-```sh
-CLIPSYNC_BINARY_SOURCE="$HOME/.cargo/bin/clipsync" ./scripts/install_user.sh
-```
-
-On macOS the installer writes and starts `~/Library/LaunchAgents/com.clipsync.plist`. On Linux it enables `~/.config/systemd/user/clipsync.service` for the graphical session; start it from your logged-in desktop:
-
-```sh
-systemctl --user start clipsync.service
-systemctl --user status clipsync.service
-```
-
-Use `clipsync --config /path/to/config.toml status` and `peers` with the service's actual config path. Config resolution prefers `${XDG_CONFIG_HOME:-~/.config}/clipsync/config.toml` and also inspects the legacy macOS `~/Library/Application Support/clipsync/config.toml`. Conflicting files require an explicit choice; identical duplicates select the canonical XDG path. An explicit `--config` keeps service and client commands on the intended configuration.
-
-### Updating an older service installation
-
-Back up its configuration, history database and history key before migrating. Installing a new binary does not update an existing unit or LaunchAgent automatically.
-
-- **macOS:** unload an already loaded `com.clipsync` LaunchAgent before using the installer. Wait for it to exit; the installer can then load the replacement with the correct executable, configuration and foreground arguments.
-- **Linux:** inspect `systemctl cat clipsync.service` and `systemctl --user cat clipsync.service`. If an obsolete system/root service exists, retire it with `sudo systemctl disable --now clipsync.service`. Stop the old user service before reinstalling it, then start the replacement with `systemctl --user start clipsync.service`. A missing executable in `ExecStart` can cause a continuous restart loop.
-- **Both:** ensure the intended install directory precedes old copies in `PATH`, open a new terminal, and check `type -a clipsync` and `clipsync version` again. Service executable paths must also be correct; shell `PATH` alone does not update them.
-
-### If the devices do not connect
-
-Check both daemons with `status`, confirm that each dedicated authorization file contains the other device's public key, and verify that the services use the same config files as the CLI. Local discovery uses mDNS (UDP 5353); the configured listener uses TCP 8484 by default. Guest Wi-Fi isolation or a firewall can allow discovery while blocking the connection. ClipSync does not modify firewall rules.
-
-Refreshing the Mac service restored discovery during one installed-device check; its cause remains unconfirmed. If discovery stalls, restart the services and inspect `peers` again. This is a troubleshooting step, not evidence that sleep/wake recovery is fully validated.
-
-## History recovery
-
-Never delete or replace an existing history key to fix an error. An unreadable, malformed, missing, or insecurely permissioned key causes initialization to fail without replacing the key or database. Fix its permissions or restore the original key from backup. Back up the key together with the database. See [security and compatibility](docs/SECURITY.md).
-
-## Verification
-
-```sh
 just check          # formatting and Clippy
 just test           # unit/integration tests; private named pasteboards on macOS
 just test-desktop   # Docker: Linux suite plus two real X11 and two headless Wayland daemons
 ```
 
-The desktop harness refuses to run outside its disposable container. It generates temporary identities and history stores and does not mount personal configuration or clipboard sockets.
+The desktop harness refuses to run outside its disposable container. It
+generates temporary identities and history stores and does not mount personal
+configuration or clipboard sockets. See [repair validation](docs/REPAIR_VALIDATION.md)
+for evidence and limits.
 
-See [repair validation](docs/REPAIR_VALIDATION.md) for evidence and limits. Dual licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
+## License
+
+Dual licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
