@@ -172,11 +172,12 @@ and sleep/wake acceptance is still in progress.
 ## CLI install and pair
 
 For a CLI-only installation, run the following from the repository checkout on
-each device with a current stable Rust toolchain. These commands do not install
-the desktop app; add `--features tui` to the Cargo command to include the TUI.
+each device with a current stable Rust toolchain. It installs `clipsync` with
+the terminal UI (`clipsync tui`) but not the desktop app; `just install` runs
+the same Cargo command.
 
 ```sh
-cargo install --path . --locked
+cargo install --path . --locked --features tui
 export PATH="$HOME/.cargo/bin:$PATH"
 type -a clipsync
 clipsync version
