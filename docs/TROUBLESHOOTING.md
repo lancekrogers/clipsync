@@ -428,7 +428,7 @@ clipsync sync
 
 Image sync supports PNG clipboard data and macOS TIFF clipboard images, but not
 files copied as files. Check that both devices run an image-capable version and
-that the image fits their byte and dimension limits in the [README](../README.md#current-scope).
+that the image fits their byte and dimension limits in the [README](LIMITS.md).
 Increasing the configured limit does not bypass the image queue budget.
 
 ### Content Type Issues
@@ -830,7 +830,7 @@ ERROR Database error: disk full
 
 ### Q: Large images don't sync
 
-**A:** Check the encoded size and dimensions against the [image limits](../README.md#current-scope)
+**A:** Check the encoded size and dimensions against the [image limits](LIMITS.md)
 on both devices. Increasing the configured size does not bypass the queue budget.
 
 ### Q: ClipSync stops working after sleep/hibernate
