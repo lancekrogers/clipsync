@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Isolated tests for release-stage.sh, release-publish.sh, release-tap.sh and
-# release-aur.sh.
+# Isolated tests for release-stage.sh, release-publish.sh, release-tap.sh,
+# release-aur.sh and release-packages.sh.
 # A throwaway git repo with a local bare origin, isolated git config, and stub
 # gh/cargo/docker/curl/codesign/hdiutil on PATH: nothing reaches GitHub and
 # nothing is built.
@@ -27,7 +27,7 @@ unset CLIPSYNC_CODESIGN_IDENTITY CLIPSYNC_NOTARY_PROFILE CLIPSYNC_NOTARY_APPLE_I
   CLIPSYNC_NOTARY_TEAM_ID CLIPSYNC_NOTARY_PASSWORD CLIPSYNC_PACKAGE_FIXTURE_MODE \
   CLIPSYNC_PACKAGE_SKIP_BUILD CLIPSYNC_PACKAGE_CLI_BIN CLIPSYNC_PACKAGE_GUI_BIN \
   CLIPSYNC_PACKAGE_FORCE CLIPSYNC_PACKAGE_DIST CLIPSYNC_RELEASE_ROOT CLIPSYNC_TAP_URL \
-  CLIPSYNC_TAP_REPO CLIPSYNC_RELEASE_LINUX_ARCHES CLIPSYNC_RUSTUP_TOOLCHAIN \
+  CLIPSYNC_TAP_REPO CLIPSYNC_TAP_SSH_KEY CLIPSYNC_RELEASE_LINUX_ARCHES CLIPSYNC_RUSTUP_TOOLCHAIN \
   CLIPSYNC_AUR_URL CLIPSYNC_AUR_SSH_KEY CLIPSYNC_AUR_MAINTAINER CLIPSYNC_AUR_IMAGE
 cat >"$TMP/gitconfig" <<EOF
 [user]
@@ -65,6 +65,15 @@ case "${1:-} ${2:-}" in
   "release create")
     printf '%s\n' "$@" >"$STUB_LOGS/gh-create.args"
     echo "https://github.com/example/clipsync/releases/tag/untagged-0123"
+    exit 0 ;;
+  "release download")
+    if [[ -z "${STUB_GH_DOWNLOAD_DIR:-}" ]]; then echo "release not found" >&2; exit 1; fi
+    dir=""
+    while [[ $# -gt 0 ]]; do
+      [[ "$1" == --dir ]] && dir="$2"
+      shift
+    done
+    cp "$STUB_GH_DOWNLOAD_DIR"/* "$dir/"
     exit 0 ;;
 esac
 echo "unexpected gh call: $*" >&2
@@ -426,9 +435,11 @@ $STAGE/RELEASE_NOTES.md
 $STAGE/assets/$DMG
 $STAGE/assets/$X86
 $STAGE/assets/$ARM
-$STAGE/assets/SHA256SUMS"
+$STAGE/assets/SHA256SUMS
+$STAGE/clipsync.rb
+$STAGE/release.json"
 if [[ -f "$LOGS/gh-create.args" && "$(cat "$LOGS/gh-create.args")" == "$EXPECTED_ARGS" ]]; then
-  pass "gh release create gets --draft, --target <staged sha> and exactly the staged assets"
+  pass "gh release create gets --draft, --target <staged sha>, the staged assets, the cask and release.json"
 else
   fail "unexpected gh release create arguments"
   diff <(printf '%s\n' "$EXPECTED_ARGS") "$LOGS/gh-create.args" >&2 || true
@@ -563,6 +574,8 @@ expect_refusal "tap refuses a cask with added steps" "staged cask changed after 
   env STUB_GH_VIEW_DRAFT=false bash "$TAP_SH"
 cp "$TMP/cask.backup" "$STAGE/clipsync.rb"
 rm -f "$STAGE/clipsync.rb.bak"
+expect_refusal "tap refuses a CLIPSYNC_TAP_SSH_KEY that is not a file" "CLIPSYNC_TAP_SSH_KEY is not a file" \
+  env STUB_GH_VIEW_DRAFT=false CLIPSYNC_TAP_SSH_KEY="$TMP/no-such-key" bash "$TAP_SH"
 
 if [[ "$(tap_commits)" == "$SEED_COUNT" ]]; then pass "refused tap runs leave the tap untouched"; else fail "a refused tap run changed the tap"; fi
 
@@ -725,6 +738,85 @@ expect_refusal "aur refuses to replace the same version with different content" 
   env STUB_GH_VIEW_DRAFT=false CLIPSYNC_AUR_MAINTAINER="Someone Else <else@example.invalid>" bash "$AUR_SH"
 git -C "$REPO" push -q origin :refs/tags/v0.1.0
 unset CLIPSYNC_AUR_URL STUB_DOCKER_AUR STUB_CURL_DIR CLIPSYNC_RELEASE_ROOT
+
+# ===================== packages from a published release =====================
+PACKAGES_SH="$REPO/scripts/package/release-packages.sh"
+make_stage
+STAGED="$STAGE"
+unset CLIPSYNC_RELEASE_ROOT
+RELEASE_ASSETS="$TMP/release-assets"
+PUBLIC_FILES="$TMP/public-files"
+mkdir -p "$RELEASE_ASSETS" "$PUBLIC_FILES"
+cp "$STAGED"/assets/* "$STAGED/clipsync.rb" "$STAGED/release.json" "$RELEASE_ASSETS/"
+cp "$STAGED"/assets/* "$REPO/LICENSE-MIT" "$REPO/LICENSE-APACHE" "$PUBLIC_FILES/"
+TAP_CI="$TMP/tap-ci.git"
+AUR_CI="$TMP/aur-ci.git"
+git init -q --bare "$TAP_CI"
+git -C "$TAP_SEED" push -q "$TAP_CI" HEAD:main
+git init -q --bare "$AUR_CI"
+git -C "$REPO" push -q origin "$(git -C "$REPO" rev-parse HEAD):refs/tags/v0.1.0"
+export STUB_GH_VIEW_DRAFT=false STUB_GH_DOWNLOAD_DIR="$RELEASE_ASSETS" STUB_CURL_DIR="$PUBLIC_FILES" \
+  STUB_DOCKER_AUR=1 CLIPSYNC_TAP_URL="file://$TAP_CI" CLIPSYNC_AUR_URL="file://$AUR_CI"
+# packages_run [env...]: release-packages.sh v0.1.0 against a fresh release root.
+packages_run() {
+  env CLIPSYNC_RELEASE_ROOT="$(mktemp -d "$TMP/ci.XXXXXX")/root" "$@" bash "$PACKAGES_SH" v0.1.0
+}
+ci_commits() { git --git-dir="$1" rev-list --count "$2" 2>/dev/null || echo 0; }
+
+expect_refusal "packages refuses a tag that is not the checkout's version" "is not the version of this checkout" \
+  env CLIPSYNC_RELEASE_ROOT="$TMP/ci-other" bash "$PACKAGES_SH" v0.2.0
+NO_MANIFEST="$TMP/release-assets-old"
+mkdir -p "$NO_MANIFEST"
+cp "$STAGED"/assets/* "$NO_MANIFEST/"
+expect_refusal "packages refuses a release published without release.json" "has no release.json asset" \
+  packages_run STUB_GH_DOWNLOAD_DIR="$NO_MANIFEST"
+OTHER_TAG="$TMP/release-assets-other-tag"
+mkdir -p "$OTHER_TAG"
+cp "$RELEASE_ASSETS"/* "$OTHER_TAG/"
+sed -i.bak 's/"tag": "v0.1.0"/"tag": "v0.0.9"/' "$OTHER_TAG/release.json"
+rm -f "$OTHER_TAG/release.json.bak"
+expect_refusal "packages refuses a release.json for another tag" "is for another tag" \
+  packages_run STUB_GH_DOWNLOAD_DIR="$OTHER_TAG"
+expect_refusal "packages leaves an existing local stage alone" "already exists" \
+  env CLIPSYNC_RELEASE_ROOT="${STAGED%/v0.1.0}" bash "$PACKAGES_SH" v0.1.0
+if [[ "$(ci_commits "$TAP_CI" main)" == 1 && "$(ci_commits "$AUR_CI" master)" == 0 ]]; then
+  pass "refused packages runs leave the tap and the AUR untouched"
+else
+  fail "a refused packages run pushed"
+fi
+
+: >"$LOGS/gh.log"
+expect_success "packages updates the tap and the AUR from the release assets" packages_run
+if grep -qE "^release download v0.1.0 --repo example/clipsync --dir $TMP/ci\.[A-Za-z0-9]+/root/v0.1.0/assets\$" "$LOGS/gh.log"; then
+  pass "packages downloads the assets of the published release"
+else
+  fail "packages gh calls: $(tr '\n' ';' <"$LOGS/gh.log")"
+fi
+if git --git-dir="$TAP_CI" show main:Casks/clipsync.rb | cmp -s - "$STAGED/clipsync.rb" \
+  && git --git-dir="$AUR_CI" show master:.SRCINFO | grep -qxF '	pkgver = 0.1.0'; then
+  pass "packages pushes the released cask and the clipsync-bin package"
+else
+  fail "tap or AUR content after packages is wrong"
+fi
+expect_success "packages rerun succeeds" packages_run
+if [[ "$(ci_commits "$TAP_CI" main)" == 2 && "$(ci_commits "$AUR_CI" master)" == 1 \
+  && "$(grep -c 'nothing to push' <<<"$LAST_OUT")" == 2 ]]; then
+  pass "packages rerun pushes nothing"
+else
+  fail "packages rerun changed the tap or the AUR"
+fi
+
+AUR_CI2="$TMP/aur-ci2.git"
+git init -q --bare "$AUR_CI2"
+expect_refusal "packages reports a failed tap update" "not updated: Homebrew tap" \
+  packages_run CLIPSYNC_TAP_URL="file://$TMP/missing-tap.git" CLIPSYNC_AUR_URL="file://$AUR_CI2"
+if [[ "$(ci_commits "$AUR_CI2" master)" == 1 ]]; then
+  pass "a failed tap update does not stop the AUR update"
+else
+  fail "the AUR was not updated after the tap failed"
+fi
+git -C "$REPO" push -q origin :refs/tags/v0.1.0
+unset STUB_GH_VIEW_DRAFT STUB_GH_DOWNLOAD_DIR STUB_CURL_DIR STUB_DOCKER_AUR CLIPSYNC_TAP_URL CLIPSYNC_AUR_URL
 
 # ===================== release-mode packaging guards =====================
 FIX_BIN="$TMP/fixture-bin"

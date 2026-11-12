@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Upload a staged release (release-stage.sh) as a DRAFT GitHub release.
-# Publishing the draft, which creates the tag, stays a manual step.
+# Publishing the draft, which creates the tag, stays a manual step; it starts
+# the Release packages workflow, which updates the Homebrew tap and the AUR.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -133,6 +134,8 @@ UPLOADS=()
 while IFS= read -r name; do
   [[ -n "$name" ]] && UPLOADS+=("$STAGE/assets/$name")
 done <<<"$ASSETS_LIST"
+# The Release packages workflow builds the cask and AUR updates from these two.
+UPLOADS+=("$STAGE/clipsync.rb" "$MANIFEST")
 
 clipsync_release_log "creating DRAFT release $TAG in $SLUG at $COMMIT"
 URL="$(gh release create "$TAG" \
@@ -149,5 +152,6 @@ cat <<EOF
 [release] Review the draft, then publish it with either:
 [release]   gh release edit $TAG --repo $SLUG --draft=false
 [release]   or "Publish release" on $URL
-[release] After it is public, update the Homebrew cask: just companion-release-tap
+[release] Publishing starts the Release packages workflow, which updates the Homebrew
+[release] cask and the AUR package. Check it with: gh run list --workflow release-packages.yml
 EOF

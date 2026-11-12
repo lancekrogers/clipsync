@@ -21,6 +21,7 @@ Environment:
   CLIPSYNC_TAP_REPO     default lancekrogers/homebrew-tap
   CLIPSYNC_TAP_URL      clone/push URL (default: same protocol as origin)
   CLIPSYNC_TAP_BRANCH   default main
+  CLIPSYNC_TAP_SSH_KEY  private key for an ssh tap URL (default: ssh config)
 EOF
     exit 0
     ;;
@@ -87,6 +88,10 @@ else
   TAP_URL="https://github.com/$TAP_REPO.git"
 fi
 
+if [[ -n "${CLIPSYNC_TAP_SSH_KEY:-}" ]]; then
+  [[ -f "$CLIPSYNC_TAP_SSH_KEY" ]] || clipsync_release_die "CLIPSYNC_TAP_SSH_KEY is not a file: $CLIPSYNC_TAP_SSH_KEY"
+  export GIT_SSH_COMMAND="ssh -i '$CLIPSYNC_TAP_SSH_KEY' -o IdentitiesOnly=yes"
+fi
 git clone --quiet --depth 1 --branch "$TAP_BRANCH" "$TAP_URL" "$WORK/tap" \
   || clipsync_release_die "could not clone $TAP_URL"
 mkdir -p "$WORK/tap/Casks"

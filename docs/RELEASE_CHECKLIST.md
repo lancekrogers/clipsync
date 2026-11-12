@@ -1,17 +1,20 @@
 # Cutting a ClipSync release
 
 A release publishes the version in `Cargo.toml` as GitHub release `v<version>`
-with a macOS disk image, Linux archives, `SHA256SUMS` and release notes, then
-updates the Homebrew cask and the `clipsync-bin` AUR package. Four commands do
-it; making the release public is a manual click in between.
+with a macOS disk image, Linux archives, `SHA256SUMS` and release notes. Two
+commands stage and draft it. Publishing the draft is a manual click, and it
+starts the **Release packages** workflow, which updates the Homebrew cask and
+the `clipsync-bin` AUR package.
 
-| Step | Command | Writes to GitHub |
+| Step | How | Writes |
 |---|---|---|
 | Stage | `just companion-release` | Nothing (reads releases and tags) |
-| Draft | `just companion-release-publish` | A **draft** release with the staged files |
-| Publish | `gh release edit v<version> --repo lancekrogers/clipsync --draft=false`, or **Publish release** on the draft | The tag and the public release |
-| Tap | `just companion-release-tap` | `Casks/clipsync.rb` in `lancekrogers/homebrew-tap` |
-| AUR | `just companion-release-aur` | `PKGBUILD` and `.SRCINFO` in the AUR's `clipsync-bin` |
+| Draft | `just companion-release-publish` | A **draft** release with the staged files, the cask and `release.json` |
+| Publish | **Publish release** on the draft, or `gh release edit v<version> --repo lancekrogers/clipsync --draft=false` | The tag and the public release |
+| Homebrew and AUR | Automatic: `.github/workflows/release-packages.yml` | `Casks/clipsync.rb` in `lancekrogers/homebrew-tap`; `PKGBUILD` and `.SRCINFO` in the AUR's `clipsync-bin` |
+
+`just companion-release-tap` and `just companion-release-aur` do the last step
+from the local stage when the workflow cannot run.
 
 ## Before staging
 
@@ -90,25 +93,71 @@ in `assets/`, gates ran, HEAD is the staged commit and that commit is on
 `origin/main`, and the tag and release still do not exist. `RELEASE_NOTES.md`
 may be edited after staging. It then runs
 `gh release create v<version> --draft --target <commit>` with the notes and
-assets and prints the draft URL. A draft creates no tag.
+assets, plus `clipsync.rb` and `release.json` for the Release packages
+workflow, and prints the draft URL. A draft creates no tag.
 
 ## Publish
 
 Open the draft, check the notes and files, then click **Publish release** or
 run the `gh release edit … --draft=false` command it printed. This creates the
-tag at the staged commit.
+tag at the staged commit and starts the Release packages workflow.
+
+## Homebrew and AUR: the Release packages workflow
+
+Publishing a release runs `.github/workflows/release-packages.yml`. It checks
+out the tag and runs `scripts/package/release-packages.sh`, which downloads the
+release's assets, `release.json` and `clipsync.rb` into
+`dist/release/v<version>/` and runs the tap and AUR steps below on them. Both
+run even if the other fails, and the run fails if either does. The tap commit
+comes from `github-actions[bot]`; the AUR commit uses the maintainer identity.
+
+On the runner, the checks that public files match the staged ones compare the
+release with its own `release.json`, so they show only that the release is
+consistent. The files were checked against the local stage when the draft was
+made.
+
+See runs with `gh run list --repo lancekrogers/clipsync --workflow release-packages.yml`.
+To run it again for a published release, for example after fixing a secret:
+
+```sh
+gh workflow run release-packages.yml --repo lancekrogers/clipsync -f tag=v<version>
+```
+
+A manual run uses the release scripts from `main` with the release's version.
+When the tap and the AUR are already current, it pushes nothing.
+
+The workflow needs two repository secrets:
+
+- `AUR_SSH_KEY`: the private key of the AUR account that maintains
+  `clipsync-bin`.
+- `HOMEBREW_TAP_DEPLOY_KEY`: the private half of a deploy key with write access
+  to `lancekrogers/homebrew-tap`. To replace it:
+
+  ```sh
+  ssh-keygen -t ed25519 -N '' -C 'clipsync release-packages' -f tap_key
+  gh repo deploy-key add tap_key.pub --repo lancekrogers/homebrew-tap --allow-write --title 'clipsync release-packages'
+  gh secret set HOMEBREW_TAP_DEPLOY_KEY --repo lancekrogers/clipsync <tap_key
+  rm tap_key tap_key.pub
+  ```
+
+The SSH host keys of `aur.archlinux.org` and `github.com` are pinned in the
+workflow.
 
 ## Tap: `just companion-release-tap`
+
+The workflow runs this step. Run it yourself only when the workflow cannot.
 
 Refuses unless the release is published (not a draft), its tag on origin
 points at the staged commit, the cask is unchanged since staging, and the disk
 image downloaded from its public URL has the staged checksum. It then commits
 `Casks/clipsync.rb` to the tap's `main` branch and pushes, the way the tap is
 maintained. Afterwards `brew install --cask lancekrogers/tap/clipsync` works.
-The tap also holds an older, unbuildable `Formula/clipsync.rb`; always pass
-`--cask`.
+`CLIPSYNC_TAP_SSH_KEY` picks the key for an ssh tap URL.
 
 ## AUR: `just companion-release-aur`
+
+The workflow runs this step without `--check`. Run it yourself only when the
+workflow cannot.
 
 `clipsync-bin` repackages the published Linux archives: `clipsync` and
 `clipsync-desktop` in `/usr/bin`, the desktop entry and icon, and the license
@@ -148,8 +197,9 @@ entries are checked only against `release.json`.
 
 `just companion-package-test` runs the release-command tests in
 `scripts/package/test_release.sh` against a throwaway repository with stub
-`gh`, `cargo`, `docker` and `curl`, and a local bare repository standing in for
-the AUR. They cover the refusals above that can be
+`gh`, `cargo`, `docker` and `curl`, and local bare repositories standing in for
+the tap and the AUR. They include `release-packages.sh` run on a stub
+published release. They cover the refusals above that can be
 reached without a real build or credentials (not the post-signing Developer ID
 checks) and check the exact `gh release create` arguments; nothing reaches
 GitHub.
