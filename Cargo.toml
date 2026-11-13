@@ -27,7 +27,6 @@ image = { version = "0.25.10", default-features = false, features = ["png", "tif
 
 # Networking
 tokio-tungstenite = "0.30"
-ssh2 = "0.9"
 bytes = "1.10"
 futures-util = "0.3"
 
