@@ -56,7 +56,7 @@ if-addrs = "0.15"
 
 # CLI
 ratatui = { version = "=0.30.2", default-features = false, features = ["crossterm_0_29"], optional = true }
-ratatui-image = { version = "=11.0.8", default-features = false, features = ["crossterm"], optional = true }
+ratatui-image = { version = "=11.1.0", default-features = false, features = ["crossterm"], optional = true }
 unicode-width = { version = "0.2", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 crossterm = "0.29"
