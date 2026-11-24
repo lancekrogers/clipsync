@@ -106,7 +106,7 @@ wayland-client = "0.31"
 wl-clipboard-rs = "0.9.4"
 wayland-protocols = "0.32"
 wayland-protocols-wlr = "0.3"
-nix = { version = "0.30", features = ["poll", "process", "signal", "user", "fs"] }
+nix = { version = "0.32", features = ["poll", "process", "signal", "user", "fs"] }
 
 # Validation
 validator = { version = "0.20", features = ["derive"] }
